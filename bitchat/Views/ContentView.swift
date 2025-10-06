@@ -308,78 +308,7 @@ struct ContentView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             } else {
-                                // Regular messages with natural text wrapping
-                                VStack(alignment: .leading, spacing: 0) {
-                                    // Precompute heavy token scans once per row
-                                    let cashuTokens = message.content.extractCashuTokens()
-                                    let lightningLinks = message.content.extractLightningLinks()
-                                    HStack(alignment: .top, spacing: 0) {
-                                        let isLong = (message.content.count > TransportConfig.uiLongMessageLengthThreshold || message.content.hasVeryLongToken(threshold: TransportConfig.uiVeryLongTokenThreshold)) && cashuTokens.isEmpty
-                                        let isExpanded = expandedMessageIDs.contains(message.id)
-                                        Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .lineLimit(isLong && !isExpanded ? TransportConfig.uiLongMessageLineLimit : nil)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        
-                                        // Delivery status indicator for private messages
-                                        if message.isPrivate && message.sender == viewModel.nickname,
-                                           let status = message.deliveryStatus {
-                                            DeliveryStatusView(status: status)
-                                                .padding(.leading, 4)
-                                        }
-                                    }
-                                    
-                                    // Expand/Collapse for very long messages
-                                    if (message.content.count > TransportConfig.uiLongMessageLengthThreshold || message.content.hasVeryLongToken(threshold: TransportConfig.uiVeryLongTokenThreshold)) && cashuTokens.isEmpty {
-                                        let isExpanded = expandedMessageIDs.contains(message.id)
-                                        let labelKey = isExpanded ? LocalizedStringKey("content.message.show_less") : LocalizedStringKey("content.message.show_more")
-                                        Button(labelKey) {
-                                            if isExpanded { expandedMessageIDs.remove(message.id) }
-                                            else { expandedMessageIDs.insert(message.id) }
-                                        }
-                                        .font(.bitchatSystem(size: 11, weight: .medium, design: .monospaced))
-                                        .foregroundColor(Color.blue)
-                                        .padding(.top, 4)
-                                    }
-
-                                    // Render payment chips (Lightning / Cashu) with rounded background
-                                    if !lightningLinks.isEmpty || !cashuTokens.isEmpty {
-                                        HStack(spacing: 8) {
-                                            ForEach(Array(lightningLinks.prefix(3)).indices, id: \.self) { i in
-                                                let link = lightningLinks[i]
-                                                PaymentChipView(
-                                                    emoji: "⚡",
-                                                    label: String(localized: "content.payment.lightning", comment: "Label for Lightning payment chip"),
-                                                    colorScheme: colorScheme
-                                                ) {
-                                                    #if os(iOS)
-                                                    if let url = URL(string: link) { UIApplication.shared.open(url) }
-                                                    #else
-                                                    if let url = URL(string: link) { NSWorkspace.shared.open(url) }
-                                                    #endif
-                                                }
-                                            }
-                                            ForEach(Array(cashuTokens.prefix(3)).indices, id: \.self) { i in
-                                                let token = cashuTokens[i]
-                                                let enc = token.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_"))) ?? token
-                                                let urlStr = "cashu:\(enc)"
-                                                PaymentChipView(
-                                                    emoji: "🥜",
-                                                    label: String(localized: "content.payment.cashu", comment: "Label for Cashu payment chip"),
-                                                    colorScheme: colorScheme
-                                                ) {
-                                                    #if os(iOS)
-                                                    if let url = URL(string: urlStr) { UIApplication.shared.open(url) }
-                                                    #else
-                                                    if let url = URL(string: urlStr) { NSWorkspace.shared.open(url) }
-                                                    #endif
-                                                }
-                                            }
-                                        }
-                                        .padding(.top, 6)
-                                        .padding(.leading, 2)
-                                    }
-                                }
+                                TextMessageView(message: message, expandedMessageIDs: $expandedMessageIDs)
                             }
                         }
                         .id(item.uiID)
@@ -989,7 +918,7 @@ struct ContentView: View {
                 }
                     }
                 }
-                .id(viewModel.allPeers.map { "\($0.id)-\($0.isConnected)" }.joined())
+                .id(viewModel.allPeers.map { "\($0.peerID)-\($0.isConnected)" }.joined())
             }
             
             Spacer()
@@ -1062,19 +991,6 @@ struct ContentView: View {
             .foregroundColor(textColor)
         }
     }
-
-    // Split a name into base and a '#abcd' suffix if present
-    private func splitNameSuffix(_ name: String) -> (base: String, suffix: String) {
-        guard name.count >= 5 else { return (name, "") }
-        let suffix = String(name.suffix(5))
-        if suffix.first == "#", suffix.dropFirst().allSatisfy({ c in
-            ("0"..."9").contains(String(c)) || ("a"..."f").contains(String(c)) || ("A"..."F").contains(String(c))
-        }) {
-            let base = String(name.dropLast(5))
-            return (base, suffix)
-        }
-        return (name, "")
-    }
     
     // Compute channel-aware people count and color for toolbar (cross-platform)
     private func channelPeopleCountAndColor() -> (Int, Color) {
@@ -1085,7 +1001,7 @@ struct ContentView: View {
             return (n, n > 0 ? standardGreen : Color.secondary)
         case .mesh:
             let counts = viewModel.allPeers.reduce(into: (others: 0, mesh: 0)) { counts, peer in
-                guard peer.id != viewModel.meshService.myPeerID else { return }
+                guard peer.peerID != viewModel.meshService.myPeerID else { return }
                 if peer.isConnected { counts.mesh += 1; counts.others += 1 }
                 else if peer.isReachable { counts.others += 1 }
             }
@@ -1618,45 +1534,5 @@ extension ContentView {
         case .location:
             LocationNotesCounter.shared.cancel()
         }
-    }
-}
-
-// MARK: - Helper Views
-
-// Rounded payment chip button
-private struct PaymentChipView: View {
-    let emoji: String
-    let label: String
-    let colorScheme: ColorScheme
-    let action: () -> Void
-    
-    private var fgColor: Color {
-        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-    }
-    private var bgColor: Color {
-        colorScheme == .dark ? Color.gray.opacity(0.18) : Color.gray.opacity(0.12)
-    }
-    private var border: Color { fgColor.opacity(0.25) }
-    
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Text(emoji)
-                Text(label)
-                    .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
-            }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(bgColor)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(border, lineWidth: 1)
-            )
-            .foregroundColor(fgColor)
-        }
-        .buttonStyle(.plain)
     }
 }
