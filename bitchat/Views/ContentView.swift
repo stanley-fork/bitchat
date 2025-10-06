@@ -324,7 +324,7 @@ struct ContentView: View {
                                         // Delivery status indicator for private messages
                                         if message.isPrivate && message.sender == viewModel.nickname,
                                            let status = message.deliveryStatus {
-                                            DeliveryStatusView(status: status, colorScheme: colorScheme)
+                                            DeliveryStatusView(status: status)
                                                 .padding(.leading, 4)
                                         }
                                     }
@@ -465,7 +465,7 @@ struct ContentView: View {
                     selectedMessageSender = viewModel.geohashDisplayName(for: peerID)
                 } else {
                     // Mesh sender: use current mesh nickname if available; otherwise fall back to last non-system message
-                    if let name = viewModel.meshService.peerNickname(peerID: peerID) {
+                    if let name = viewModel.meshService.peerNickname(peerID: PeerID(str: peerID)) {
                         selectedMessageSender = name
                     } else {
                         selectedMessageSender = viewModel.messages.last(where: { $0.senderPeerID == peerID && $0.sender != "system" })?.sender
@@ -1401,7 +1401,7 @@ struct ContentView: View {
             // Try mesh/unified peer display
             if let name = peer?.displayName { return name }
             // Try direct mesh nickname (connected-only)
-            if let name = viewModel.meshService.peerNickname(peerID: headerPeerID) { return name }
+            if let name = viewModel.meshService.peerNickname(peerID: PeerID(str: headerPeerID)) { return name }
             // Try favorite nickname by stable Noise key
             if let fav = FavoritesPersistenceService.shared.getFavoriteStatus(for: Data(hexString: headerPeerID) ?? Data()),
                !fav.peerNickname.isEmpty { return fav.peerNickname }
@@ -1477,7 +1477,7 @@ struct ContentView: View {
                                     // Should not happen for PM header, but handle gracefully
                                     EmptyView()
                                 }
-                            } else if viewModel.meshService.isPeerReachable(headerPeerID) {
+                            } else if viewModel.meshService.isPeerReachable(PeerID(str: headerPeerID)) {
                                 // Fallback: reachable via mesh but not in current peer list
                                 Image(systemName: "point.3.filled.connected.trianglepath.dotted")
                                     .font(.bitchatSystem(size: 14))
@@ -1493,7 +1493,7 @@ struct ContentView: View {
                                     .accessibilityLabel(
                                         String(localized: "content.accessibility.available_nostr", comment: "Accessibility label for Nostr-available peer indicator")
                                     )
-                            } else if viewModel.meshService.isPeerConnected(headerPeerID) || viewModel.connectedPeers.contains(headerPeerID) {
+                            } else if viewModel.meshService.isPeerConnected(PeerID(str: headerPeerID)) || viewModel.connectedPeers.contains(headerPeerID) {
                                 // Fallback: if peer lookup is missing but mesh reports connected, show radio
                                 Image(systemName: "dot.radiowaves.left.and.right")
                                     .font(.bitchatSystem(size: 14))
@@ -1658,110 +1658,5 @@ private struct PaymentChipView: View {
             .foregroundColor(fgColor)
         }
         .buttonStyle(.plain)
-    }
-}
-
-//
-
-// Delivery status indicator view
-struct DeliveryStatusView: View {
-    let status: DeliveryStatus
-    let colorScheme: ColorScheme
-    
-    // MARK: - Computed Properties
-    
-    private var textColor: Color {
-        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-    }
-    
-    private var secondaryTextColor: Color {
-        colorScheme == .dark ? Color.green.opacity(0.8) : Color(red: 0, green: 0.5, blue: 0).opacity(0.8)
-    }
-
-    private enum Strings {
-        static func delivered(to nickname: String) -> String {
-            String(
-                format: String(localized: "content.delivery.delivered_to", comment: "Tooltip for delivered private messages"),
-                locale: .current,
-                nickname
-            )
-        }
-
-        static func read(by nickname: String) -> String {
-            String(
-                format: String(localized: "content.delivery.read_by", comment: "Tooltip for read private messages"),
-                locale: .current,
-                nickname
-            )
-        }
-
-        static func failed(_ reason: String) -> String {
-            String(
-                format: String(localized: "content.delivery.failed", comment: "Tooltip for failed message delivery"),
-                locale: .current,
-                reason
-            )
-        }
-
-        static func deliveredToMembers(_ reached: Int, _ total: Int) -> String {
-            String(
-                format: String(localized: "content.delivery.delivered_members", comment: "Tooltip for partially delivered messages"),
-                locale: .current,
-                reached,
-                total
-            )
-        }
-    }
-    
-    // MARK: - Body
-    
-    var body: some View {
-        switch status {
-        case .sending:
-            Image(systemName: "circle")
-                .font(.bitchatSystem(size: 10))
-                .foregroundColor(secondaryTextColor.opacity(0.6))
-            
-        case .sent:
-            Image(systemName: "checkmark")
-                .font(.bitchatSystem(size: 10))
-                .foregroundColor(secondaryTextColor.opacity(0.6))
-            
-        case .delivered(let nickname, _):
-            HStack(spacing: -2) {
-                Image(systemName: "checkmark")
-                    .font(.bitchatSystem(size: 10))
-                Image(systemName: "checkmark")
-                    .font(.bitchatSystem(size: 10))
-            }
-            .foregroundColor(textColor.opacity(0.8))
-            .help(Strings.delivered(to: nickname))
-            
-        case .read(let nickname, _):
-            HStack(spacing: -2) {
-                Image(systemName: "checkmark")
-                    .font(.bitchatSystem(size: 10, weight: .bold))
-                Image(systemName: "checkmark")
-                    .font(.bitchatSystem(size: 10, weight: .bold))
-            }
-            .foregroundColor(Color(red: 0.0, green: 0.478, blue: 1.0))  // Bright blue
-            .help(Strings.read(by: nickname))
-            
-        case .failed(let reason):
-            Image(systemName: "exclamationmark.triangle")
-                .font(.bitchatSystem(size: 10))
-                .foregroundColor(Color.red.opacity(0.8))
-                .help(Strings.failed(reason))
-            
-        case .partiallyDelivered(let reached, let total):
-            HStack(spacing: 1) {
-                Image(systemName: "checkmark")
-                    .font(.bitchatSystem(size: 10))
-                Text(verbatim: "\(reached)/\(total)")
-                    .font(.bitchatSystem(size: 10, design: .monospaced))
-            }
-            .foregroundColor(secondaryTextColor.opacity(0.6))
-            .help(Strings.deliveredToMembers(reached, total))
-        }
     }
 }
