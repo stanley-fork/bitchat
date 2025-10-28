@@ -720,7 +720,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(appWillTerminate),
+            selector: #selector(applicationWillTerminate),
             name: NSApplication.willTerminateNotification,
             object: nil
         )
@@ -776,7 +776,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(appWillTerminate),
+            selector: #selector(applicationWillTerminate),
             name: UIApplication.willTerminateNotification,
             object: nil
         )
@@ -3251,24 +3251,21 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         // No-op; avoid forcing synchronize on resign
     }
     
+    /// Save identity state without stopping services (for backgrounding)
+    func saveIdentityState() {
+        // Force save any pending identity changes (verifications, favorites, etc)
+        identityManager.forceSave()
+
+        // Verify identity key is still there
+        _ = keychain.verifyIdentityKeyExists()
+    }
+
     @objc func applicationWillTerminate() {
         // Send leave message to all peers
         meshService.stopServices()
-        
-        // Force save any pending identity changes (verifications, favorites, etc)
-        identityManager.forceSave()
-        
-        // Verify identity key is still there
-        _ = keychain.verifyIdentityKeyExists()
-        
-        // No need to force synchronize here
-        
-        // Verify identity key after save
-        _ = keychain.verifyIdentityKeyExists()
-    }
-    
-    @objc private func appWillTerminate() {
-        // No need to force synchronize here
+
+        // Save identity state
+        saveIdentityState()
     }
     
     @MainActor
@@ -4464,6 +4461,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         
         // Update secure storage with verified status
         identityManager.setVerified(fingerprint: fingerprint, verified: true)
+        saveIdentityState()
         
         // Update local set for UI
         verifiedFingerprints.insert(fingerprint)
@@ -4476,7 +4474,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
     func unverifyFingerprint(for peerID: PeerID) {
         guard let fingerprint = getFingerprint(for: peerID) else { return }
         identityManager.setVerified(fingerprint: fingerprint, verified: false)
-        identityManager.forceSave()
+        saveIdentityState()
         verifiedFingerprints.remove(fingerprint)
         updateEncryptionStatus(for: peerID)
     }
@@ -4685,7 +4683,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
                         let short = fp.prefix(8)
                         SecureLogger.info("🔐 Marking verified fingerprint: \(short)", category: .security)
                         identityManager.setVerified(fingerprint: fp, verified: true)
-                        identityManager.forceSave()
+                        saveIdentityState()
                         verifiedFingerprints.insert(fp)
                         let name = unifiedPeerService.getPeer(by: peerID)?.nickname ?? resolveNickname(for: peerID)
                         NotificationService.shared.sendLocalNotification(
