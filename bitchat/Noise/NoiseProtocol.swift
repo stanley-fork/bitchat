@@ -451,13 +451,13 @@ final class NoiseSymmetricState {
         }
     }
     
-    func split() -> (NoiseCipherState, NoiseCipherState) {
+    func split(useExtractedNonce: Bool) -> (NoiseCipherState, NoiseCipherState) {
         let output = hkdf(chainingKey: chainingKey, inputKeyMaterial: Data(), numOutputs: 2)
         let tempKey1 = SymmetricKey(data: output[0])
         let tempKey2 = SymmetricKey(data: output[1])
         
-        let c1 = NoiseCipherState(key: tempKey1, useExtractedNonce: true)
-        let c2 = NoiseCipherState(key: tempKey2, useExtractedNonce: true)
+        let c1 = NoiseCipherState(key: tempKey1, useExtractedNonce: useExtractedNonce)
+        let c2 = NoiseCipherState(key: tempKey2, useExtractedNonce: useExtractedNonce)
         
         return (c1, c2)
     }
@@ -789,12 +789,12 @@ final class NoiseHandshakeState {
         return currentPattern >= messagePatterns.count
     }
     
-    func getTransportCiphers() throws -> (send: NoiseCipherState, receive: NoiseCipherState) {
+    func getTransportCiphers(useExtractedNonce: Bool) throws -> (send: NoiseCipherState, receive: NoiseCipherState) {
         guard isHandshakeComplete() else {
             throw NoiseError.handshakeNotComplete
         }
         
-        let (c1, c2) = symmetricState.split()
+        let (c1, c2) = symmetricState.split(useExtractedNonce: useExtractedNonce)
         
         // Initiator uses c1 for sending, c2 for receiving
         // Responder uses c2 for sending, c1 for receiving

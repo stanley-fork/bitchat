@@ -679,23 +679,59 @@ struct NoiseProtocolTests {
             predeterminedEphemeralKey: respEphemeralKey
         )
         
-        // Message 1: Initiator -> Responder (e)
-        let msg1 = try initiatorHandshake.writeMessage()
-        #expect(!msg1.isEmpty, "Message 1 should not be empty")
+        // For XX pattern, we have 3 handshake messages, then transport messages
+        // The test vector messages are ordered as: [msg1, msg2, msg3, transport1, transport2, ...]
         
-        _ = try responderHandshake.readMessage(msg1)
+        guard testVector.messages.count >= 3 else {
+            throw NSError(
+                domain: "NoiseTests", code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Test vector must have at least 3 messages for XX pattern"])
+        }
+        
+        // Message 1: Initiator -> Responder (e)
+        guard let payload1 = Data(hex: testVector.messages[0].payload),
+              let expectedCiphertext1 = Data(hex: testVector.messages[0].ciphertext) else {
+            throw NSError(
+                domain: "NoiseTests", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Message 1: Failed to parse hex"])
+        }
+        
+        let msg1 = try initiatorHandshake.writeMessage(payload: payload1)
+        #expect(!msg1.isEmpty, "Message 1 should not be empty")
+        #expect(msg1 == expectedCiphertext1, "Message 1 ciphertext should match expected value. Got: \(msg1.hexString()), Expected: \(expectedCiphertext1.hexString())")
+        
+        let decrypted1 = try responderHandshake.readMessage(msg1)
+        #expect(decrypted1 == payload1, "Message 1: Decrypted payload should match original")
         
         // Message 2: Responder -> Initiator (e, ee, s, es)
-        let msg2 = try responderHandshake.writeMessage()
-        #expect(!msg2.isEmpty, "Message 2 should not be empty")
+        guard let payload2 = Data(hex: testVector.messages[1].payload),
+              let expectedCiphertext2 = Data(hex: testVector.messages[1].ciphertext) else {
+            throw NSError(
+                domain: "NoiseTests", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Message 2: Failed to parse hex"])
+        }
         
-        _ = try initiatorHandshake.readMessage(msg2)
+        let msg2 = try responderHandshake.writeMessage(payload: payload2)
+        #expect(!msg2.isEmpty, "Message 2 should not be empty")
+        #expect(msg2 == expectedCiphertext2, "Message 2 ciphertext should match expected value. Got: \(msg2.hexString()), Expected: \(expectedCiphertext2.hexString())")
+        
+        let decrypted2 = try initiatorHandshake.readMessage(msg2)
+        #expect(decrypted2 == payload2, "Message 2: Decrypted payload should match original")
         
         // Message 3: Initiator -> Responder (s, se)
-        let msg3 = try initiatorHandshake.writeMessage()
-        #expect(!msg3.isEmpty, "Message 3 should not be empty")
+        guard let payload3 = Data(hex: testVector.messages[2].payload),
+              let expectedCiphertext3 = Data(hex: testVector.messages[2].ciphertext) else {
+            throw NSError(
+                domain: "NoiseTests", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Message 3: Failed to parse hex"])
+        }
         
-        _ = try responderHandshake.readMessage(msg3)
+        let msg3 = try initiatorHandshake.writeMessage(payload: payload3)
+        #expect(!msg3.isEmpty, "Message 3 should not be empty")
+        #expect(msg3 == expectedCiphertext3, "Message 3 ciphertext should match expected value. Got: \(msg3.hexString()), Expected: \(expectedCiphertext3.hexString())")
+        
+        let decrypted3 = try responderHandshake.readMessage(msg3)
+        #expect(decrypted3 == payload3, "Message 3: Decrypted payload should match original")
         
         // Verify handshake hash
         let initiatorHash = initiatorHandshake.getHandshakeHash()
@@ -706,16 +742,18 @@ struct NoiseProtocolTests {
         if let expectedHash = expectedHash {
             #expect(
                 initiatorHash == expectedHash,
-                "Handshake hash should match expected value from test vector")
+                "Handshake hash should match expected value from test vector. Got: \(initiatorHash.hexString()), Expected: \(expectedHash.hexString())")
         }
         
         // Get transport ciphers
-        let (initSend, initRecv) = try initiatorHandshake.getTransportCiphers()
-        let (respSend, respRecv) = try responderHandshake.getTransportCiphers()
-        
-        // Test transport messages
-        for (index, testMsg) in testVector.messages.enumerated() {
-            guard let payload = Data(hex: testMsg.payload) else {
+        let (initSend, initRecv) = try initiatorHandshake.getTransportCiphers(useExtractedNonce: false)
+        let (respSend, respRecv) = try responderHandshake.getTransportCiphers(useExtractedNonce: false)
+
+        // Test transport messages (messages after the 3 handshake messages)
+        for index in 3..<testVector.messages.count {
+            let testMsg = testVector.messages[index]
+            guard let payload = Data(hex: testMsg.payload),
+                  let expectedCiphertext = Data(hex: testMsg.ciphertext) else {
                 throw NSError(
                     domain: "NoiseTests", code: 4,
                     userInfo: [
@@ -724,22 +762,28 @@ struct NoiseProtocolTests {
                     ])
             }
             
-            // Alternate between initiator and responder sending
+            // Alternate between responder and initiator sending
+            // Responder sends first transport message (since initiator sent last handshake message)
             let (sender, receiver): (NoiseCipherState, NoiseCipherState)
-            if index % 2 == 0 {
-                sender = initSend
-                receiver = respRecv
-            } else {
+            let transportIndex = index - 3
+            if transportIndex % 2 == 0 {
+                // Even transport messages: responder sends
                 sender = respSend
                 receiver = initRecv
+            } else {
+                // Odd transport messages: initiator sends
+                sender = initSend
+                receiver = respRecv
             }
             
-            // Encrypt
+            // Encrypt and validate ciphertext matches expected value
             let ciphertext = try sender.encrypt(plaintext: payload)
-            
-            // Decrypt
+            #expect(
+                ciphertext == expectedCiphertext,
+                "Message \(index + 1) ciphertext should match expected value. Got: \(ciphertext.hexString()), Expected: \(expectedCiphertext.hexString())")
+
+            // Decrypt and validate payload
             let decrypted = try receiver.decrypt(ciphertext: ciphertext)
-            
             #expect(
                 decrypted == payload,
                 "Message \(index + 1): Decrypted payload should match original")
