@@ -92,7 +92,7 @@ import UniformTypeIdentifiers
 /// Manages the application state and business logic for BitChat.
 /// Acts as the primary coordinator between UI components and backend services,
 /// implementing the BitchatDelegate protocol to handle network events.
-final class ChatViewModel: ObservableObject, BitchatDelegate {
+final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider, GeohashParticipantContext, MessageFormattingContext {
     // Precompiled regexes and detectors reused across formatting
     private enum Regexes {
         static let hashtag: NSRegularExpression = {
@@ -419,10 +419,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
     private var lastPublicActivityAt: [String: Date] = [:]   // channelKey -> last activity time
     private var lastPublicActivityNotifyAt: [String: Date] = [:]
     private let channelInactivityThreshold: TimeInterval = TransportConfig.uiChannelInactivityThresholdSeconds
-    // Geohash participants (per geohash: pubkey -> lastSeen)
-    private var geoParticipants: [String: [String: Date]] = [:]
-    @Published private(set) var geohashPeople: [GeoPerson] = []
-    private var geoParticipantsTimer: Timer? = nil
+    // Geohash participant tracker
+    let participantTracker = GeohashParticipantTracker(activityCutoff: -TransportConfig.uiRecentCutoffFiveMinutesSeconds)
     // Participants who indicated they teleported (by tag in their events)
     @Published private(set) var teleportedGeo: Set<String> = []  // lowercased pubkey hex
     // Sampling subscriptions for multiple geohashes (when channel sheet is open)
@@ -526,9 +524,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         
         // Wire up dependencies
         self.commandProcessor.chatViewModel = self
+        self.participantTracker.configure(context: self)
         
         // Subscribe to privateChatManager changes to trigger UI updates
         privateChatManager.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Subscribe to participantTracker changes to trigger UI updates
+        participantTracker.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -873,7 +879,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
             return
         }
         // Ensure participant decay timer is running
-        startGeoParticipantsTimer()
+        participantTracker.startRefreshTimer()
         // Unsubscribe + resubscribe
         NostrRelayManager.shared.unsubscribe(id: subID)
         let filter = NostrFilter.geohashEphemeral(
@@ -932,7 +938,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
 
         // Update participants last-seen for this pubkey
-        recordGeoParticipant(pubkeyHex: event.pubkey)
+        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
         
         // Track teleported tag (only our format ["t","teleport"]) for icon state
         let hasTeleportTag = event.tags.contains(where: { tag in
@@ -1479,7 +1485,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         }
 
         // Track ourselves as active participant
-        recordGeoParticipant(pubkeyHex: identity.publicKeyHex)
+        participantTracker.recordParticipant(pubkeyHex: identity.publicKeyHex)
         nostrKeyMapping[PeerID(nostr: identity.publicKeyHex)] = identity.publicKeyHex
         SecureLogger.debug("GeoTeleport: sent geo message pub=\(identity.publicKeyHex.prefix(8))… teleported=\(context.teleported)", category: .session)
 
@@ -1514,8 +1520,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
             if emptyMesh > 0 {
                 SecureLogger.debug("RenderGuard: mesh timeline contains \(emptyMesh) empty messages", category: .session)
             }
-            stopGeoParticipantsTimer()
-            geohashPeople = []
+            participantTracker.stopRefreshTimer()
+            participantTracker.setActiveGeohash(nil)
             teleportedGeo.removeAll()
         case .location:
             refreshVisibleMessages(from: channel)
@@ -1536,16 +1542,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
             geoDmSubscriptionID = nil
         }
         currentGeohash = nil
+        participantTracker.setActiveGeohash(nil)
         // Reset nickname cache for geochat participants
         geoNicknames.removeAll()
-        geohashPeople = []
-        
+
         guard case .location(let ch) = channel else { return }
         currentGeohash = ch.geohash
+        participantTracker.setActiveGeohash(ch.geohash)
         
         // Ensure self appears immediately in the people list; mark teleported state only when truly teleported
         if let id = try? idBridge.deriveIdentity(forGeohash: ch.geohash) {
-            recordGeoParticipant(pubkeyHex: id.publicKeyHex)
+            participantTracker.recordParticipant(pubkeyHex: id.publicKeyHex)
             let hasRegional = !LocationChannelManager.shared.availableChannels.isEmpty
             let inRegional = LocationChannelManager.shared.availableChannels.contains { $0.geohash == ch.geohash }
             let key = id.publicKeyHex.lowercased()
@@ -1559,7 +1566,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         
         let subID = "geo-\(ch.geohash)"
         geoSubscriptionID = subID
-        startGeoParticipantsTimer()
+        participantTracker.startRefreshTimer()
         let ts = Date().addingTimeInterval(-TransportConfig.nostrGeohashInitialLookbackSeconds)
         let filter = NostrFilter.geohashEphemeral(ch.geohash, since: ts, limit: TransportConfig.nostrGeohashInitialLimit)
         let subRelays = GeoRelayDirectory.shared.closestRelays(toGeohash: ch.geohash, count: 5)
@@ -1629,7 +1636,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
         
         // Update participants last-seen for this pubkey
-        recordGeoParticipant(pubkeyHex: event.pubkey)
+        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
         
         let senderName = displayNameForNostrPubkey(event.pubkey)
         let content = event.content
@@ -1811,49 +1818,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
     }
 
     // MARK: - Geohash Participants
-    struct GeoPerson: Identifiable, Equatable {
-        let id: String        // pubkey hex (lowercased)
-        let displayName: String
-        let lastSeen: Date
-    }
-
-    private func recordGeoParticipant(pubkeyHex: String) {
-        guard let gh = currentGeohash else { return }
-        let key = pubkeyHex.lowercased()
-        var map = geoParticipants[gh] ?? [:]
-        map[key] = Date()
-        geoParticipants[gh] = map
-        refreshGeohashPeople()
-    }
-
-    private func recordGeoParticipant(pubkeyHex: String, geohash: String) {
-        let key = pubkeyHex.lowercased()
-        var map = geoParticipants[geohash] ?? [:]
-        map[key] = Date()
-        geoParticipants[geohash] = map
-        // Only refresh list if this geohash is currently selected
-        if currentGeohash == geohash {
-            refreshGeohashPeople()
-        }
-    }
-
-    private func refreshGeohashPeople() {
-        guard let gh = currentGeohash else { geohashPeople = []; return }
-        let cutoff = Date().addingTimeInterval(-TransportConfig.uiRecentCutoffFiveMinutesSeconds)
-        var map = geoParticipants[gh] ?? [:]
-        // Prune expired entries
-        map = map.filter { $0.value >= cutoff }
-        // Remove blocked Nostr pubkeys
-        map = map.filter { !identityManager.isNostrBlocked(pubkeyHexLowercased: $0.key) }
-        geoParticipants[gh] = map
-        // Build display list
-        let people = map
-            .map { (pub, seen) in
-                GeoPerson(id: pub, displayName: displayNameForNostrPubkey(pub), lastSeen: seen)
-            }
-            .sorted { $0.lastSeen > $1.lastSeen }
-        geohashPeople = people
-    }
 
     @MainActor
     func isSelfSender(peerID: PeerID?, displayName: String?) -> Bool {
@@ -1878,40 +1842,37 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         return false
     }
 
-    private func startGeoParticipantsTimer() {
-        stopGeoParticipantsTimer()
-        geoParticipantsTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshGeohashPeople()
-            }
-        }
+    // MARK: - Public helpers
+
+    /// Published geohash people list for SwiftUI observation
+    var geohashPeople: [GeoPerson] {
+        participantTracker.visiblePeople
     }
 
-    private func stopGeoParticipantsTimer() {
-        geoParticipantsTimer?.invalidate()
-        geoParticipantsTimer = nil
-    }
-    
-    // MARK: - Public helpers
     /// Return the current, pruned, sorted people list for the active geohash without mutating state.
     @MainActor
     func visibleGeohashPeople() -> [GeoPerson] {
-        guard let gh = currentGeohash else { return [] }
-        let cutoff = Date().addingTimeInterval(-TransportConfig.uiRecentCutoffFiveMinutesSeconds)
-        let map = (geoParticipants[gh] ?? [:])
-            .filter { $0.value >= cutoff }
-            .filter { !identityManager.isNostrBlocked(pubkeyHexLowercased: $0.key) }
-        let people = map
-            .map { (pub, seen) in GeoPerson(id: pub, displayName: displayNameForNostrPubkey(pub), lastSeen: seen) }
-            .sorted { $0.lastSeen > $1.lastSeen }
-        return people
+        participantTracker.getVisiblePeople()
+    }
+
+    /// CommandContextProvider conformance - returns visible geo participants
+    func getVisibleGeoParticipants() -> [CommandGeoParticipant] {
+        visibleGeohashPeople().map { CommandGeoParticipant(id: $0.id, displayName: $0.displayName) }
     }
     /// Returns the current participant count for a specific geohash, using the 5-minute activity window.
     @MainActor
     func geohashParticipantCount(for geohash: String) -> Int {
-        let cutoff = Date().addingTimeInterval(-TransportConfig.uiRecentCutoffFiveMinutesSeconds)
-        let map = geoParticipants[geohash] ?? [:]
-        return map.values.filter { $0 >= cutoff }.count
+        participantTracker.participantCount(for: geohash)
+    }
+
+    // MARK: - GeohashParticipantContext Protocol
+
+    func displayNameForPubkey(_ pubkeyHex: String) -> String {
+        displayNameForNostrPubkey(pubkeyHex)
+    }
+
+    func isBlocked(_ pubkeyHexLowercased: String) -> Bool {
+        identityManager.isNostrBlocked(pubkeyHexLowercased: pubkeyHexLowercased)
     }
 
     // Geohash block helpers
@@ -1923,13 +1884,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
     func blockGeohashUser(pubkeyHexLowercased: String, displayName: String) {
         let hex = pubkeyHexLowercased.lowercased()
         identityManager.setNostrBlocked(hex, isBlocked: true)
-        
+
         // Remove from participants for all geohashes
-        for (gh, var map) in geoParticipants {
-            map.removeValue(forKey: hex)
-            geoParticipants[gh] = map
-        }
-        refreshGeohashPeople()
+        participantTracker.removeParticipant(pubkeyHex: hex)
         
         // Remove their public messages from current geohash timeline and visible list
         if let gh = currentGeohash {
@@ -2017,13 +1974,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
     
     private func subscribeNostrEvent(_ event: NostrEvent, gh: String) {
         guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue else { return }
-        
+
         // Compute current participant count (5-minute window) BEFORE updating with this event
-        let cutoff = Date().addingTimeInterval(-TransportConfig.uiRecentCutoffFiveMinutesSeconds)
-        let existingCount = geoParticipants[gh]?.values.filter { $0 >= cutoff }.count ?? 0
-        
+        let existingCount = participantTracker.participantCount(for: gh)
+
         // Update participants for this specific geohash
-        recordGeoParticipant(pubkeyHex: event.pubkey, geohash: gh)
+        participantTracker.recordParticipant(pubkeyHex: event.pubkey, geohash: gh)
         
         // Notify only on rising-edge: previously zero people, now someone sends a chat
         let content = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3224,7 +3180,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
                             NostrRelayManager.shared.sendEvent(event, to: targetRelays)
                         }
                         // Track ourselves as active participant
-                        self.recordGeoParticipant(pubkeyHex: identity.publicKeyHex)
+                        self.participantTracker.recordParticipant(pubkeyHex: identity.publicKeyHex)
                     } catch {
                         SecureLogger.error("❌ Failed to send geohash screenshot message: \(error)", category: .session)
                         self.addSystemMessage(
@@ -4235,6 +4191,46 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
         }
         // Fallback when we only have a display name
         return Color(peerSeed: message.sender.lowercased(), isDark: isDark)
+    }
+
+    // MARK: - MessageFormattingContext Protocol
+
+    @MainActor
+    func isSelfMessage(_ message: BitchatMessage) -> Bool {
+        if let spid = message.senderPeerID {
+            // In geohash channels, compare against our per-geohash nostr short ID
+            if case .location(let ch) = activeChannel, spid.isGeoChat {
+                let myGeo: NostrIdentity? = {
+                    if let cached = cachedGeohashIdentity, cached.geohash == ch.geohash {
+                        return cached.identity
+                    }
+                    // Derive and cache
+                    if let identity = try? idBridge.deriveIdentity(forGeohash: ch.geohash) {
+                        cachedGeohashIdentity = (ch.geohash, identity)
+                        return identity
+                    }
+                    return nil
+                }()
+                if let myGeo {
+                    return spid == PeerID(nostr: myGeo.publicKeyHex)
+                }
+            }
+            return spid == meshService.myPeerID
+        }
+        // Fallback by nickname
+        if message.sender == nickname { return true }
+        if message.sender.hasPrefix(nickname + "#") { return true }
+        return false
+    }
+
+    @MainActor
+    func senderColor(for message: BitchatMessage, isDark: Bool) -> Color {
+        return peerColor(for: message, isDark: isDark)
+    }
+
+    @MainActor
+    func peerURL(for peerID: PeerID) -> URL? {
+        return URL(string: "bitchat://user/\(peerID.toPercentEncoded())")
     }
 
     // Public helpers for views to color peers consistently in lists

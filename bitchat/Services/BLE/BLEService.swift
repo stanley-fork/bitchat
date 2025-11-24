@@ -521,8 +521,11 @@ final class BLEService: NSObject {
             }
         }
         
-        // Give leave message a moment to send
-        Thread.sleep(forTimeInterval: TransportConfig.bleThreadSleepWriteShortDelaySeconds)
+        // Give leave message a moment to send (cooperative delay allows BLE callbacks to fire)
+        let deadline = Date().addingTimeInterval(TransportConfig.bleThreadSleepWriteShortDelaySeconds)
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         
         // Clear pending notifications
         collectionsQueue.sync(flags: .barrier) {
