@@ -92,7 +92,7 @@ import UniformTypeIdentifiers
 /// Manages the application state and business logic for BitChat.
 /// Acts as the primary coordinator between UI components and backend services,
 /// implementing the BitchatDelegate protocol to handle network events.
-final class ChatViewModel: ObservableObject, BitchatDelegate {
+final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider {
     // Precompiled regexes and detectors reused across formatting
     private enum Regexes {
         static let hashtag: NSRegularExpression = {
@@ -1905,6 +1905,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate {
             .map { (pub, seen) in GeoPerson(id: pub, displayName: displayNameForNostrPubkey(pub), lastSeen: seen) }
             .sorted { $0.lastSeen > $1.lastSeen }
         return people
+    }
+
+    /// CommandContextProvider conformance - returns visible geo participants
+    func getVisibleGeoParticipants() -> [CommandGeoParticipant] {
+        visibleGeohashPeople().map { CommandGeoParticipant(id: $0.id, displayName: $0.displayName) }
     }
     /// Returns the current participant count for a specific geohash, using the 5-minute activity window.
     @MainActor

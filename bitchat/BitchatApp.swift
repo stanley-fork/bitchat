@@ -248,10 +248,15 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
             // Get peer ID from userInfo
             if let peerID = userInfo["peerID"] as? String {
                 // Don't show notification if the private chat is already open
-                if chatViewModel?.selectedPrivateChatPeer == PeerID(str: peerID) {
-                    completionHandler([])
-                    return
+                // Access main-actor-isolated property via Task
+                Task { @MainActor in
+                    if self.chatViewModel?.selectedPrivateChatPeer == PeerID(str: peerID) {
+                        completionHandler([])
+                    } else {
+                        completionHandler([.banner, .sound])
+                    }
                 }
+                return
             }
         }
         // Suppress geohash activity notification if we're already in that geohash channel
