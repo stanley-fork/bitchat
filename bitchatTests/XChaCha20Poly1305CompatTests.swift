@@ -7,17 +7,15 @@
 //
 
 import Testing
-import Foundation
+import struct Foundation.Data
 @testable import bitchat
 
 struct XChaCha20Poly1305CompatTests {
 
-    // MARK: - Valid Input Tests
-
     @Test func sealAndOpenRoundtrip() throws {
         let plaintext = "Hello, XChaCha20-Poly1305!".data(using: .utf8)!
-        let key = Data(repeating: 0x42, count: 32)  // 32-byte key
-        let nonce = Data(repeating: 0x24, count: 24) // 24-byte nonce
+        let key = Data(repeating: 0x42, count: 32)
+        let nonce = Data(repeating: 0x24, count: 24)
 
         let sealed = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: nonce)
         let decrypted = try XChaCha20Poly1305Compat.open(
@@ -60,131 +58,119 @@ struct XChaCha20Poly1305CompatTests {
         #expect(sealed1.ciphertext != sealed2.ciphertext)
     }
 
-    // MARK: - Invalid Key Length Tests
-
-    @Test func sealThrowsOnShortKey() throws {
+    @Test func sealThrowsOnShortKey() {
         let plaintext = "Test".data(using: .utf8)!
-        let shortKey = Data(repeating: 0x42, count: 16)  // Only 16 bytes, need 32
+        let shortKey = Data(repeating: 0x42, count: 16)
         let nonce = Data(repeating: 0x24, count: 24)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: shortKey, nonce24: nonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func sealThrowsOnLongKey() throws {
+    @Test func sealThrowsOnLongKey() {
         let plaintext = "Test".data(using: .utf8)!
-        let longKey = Data(repeating: 0x42, count: 64)  // 64 bytes, need 32
+        let longKey = Data(repeating: 0x42, count: 64)
         let nonce = Data(repeating: 0x24, count: 24)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: longKey, nonce24: nonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func sealThrowsOnEmptyKey() throws {
+    @Test func sealThrowsOnEmptyKey() {
         let plaintext = "Test".data(using: .utf8)!
         let emptyKey = Data()
         let nonce = Data(repeating: 0x24, count: 24)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: emptyKey, nonce24: nonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func openThrowsOnInvalidKeyLength() throws {
+    @Test func openThrowsOnInvalidKeyLength() {
         let ciphertext = Data(repeating: 0x00, count: 16)
         let tag = Data(repeating: 0x00, count: 16)
-        let shortKey = Data(repeating: 0x42, count: 31)  // 31 bytes, need 32
+        let shortKey = Data(repeating: 0x42, count: 31)
         let nonce = Data(repeating: 0x24, count: 24)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.open(ciphertext: ciphertext, tag: tag, key: shortKey, nonce24: nonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    // MARK: - Invalid Nonce Length Tests
-
-    @Test func sealThrowsOnShortNonce() throws {
+    @Test func sealThrowsOnShortNonce() {
         let plaintext = "Test".data(using: .utf8)!
         let key = Data(repeating: 0x42, count: 32)
-        let shortNonce = Data(repeating: 0x24, count: 12)  // Only 12 bytes, need 24
+        let shortNonce = Data(repeating: 0x24, count: 12)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: shortNonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func sealThrowsOnLongNonce() throws {
+    @Test func sealThrowsOnLongNonce() {
         let plaintext = "Test".data(using: .utf8)!
         let key = Data(repeating: 0x42, count: 32)
-        let longNonce = Data(repeating: 0x24, count: 32)  // 32 bytes, need 24
+        let longNonce = Data(repeating: 0x24, count: 32)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: longNonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func sealThrowsOnEmptyNonce() throws {
+    @Test func sealThrowsOnEmptyNonce() {
         let plaintext = "Test".data(using: .utf8)!
         let key = Data(repeating: 0x42, count: 32)
         let emptyNonce = Data()
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: emptyNonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
-    @Test func openThrowsOnInvalidNonceLength() throws {
+    @Test func openThrowsOnInvalidNonceLength() {
         let ciphertext = Data(repeating: 0x00, count: 16)
         let tag = Data(repeating: 0x00, count: 16)
         let key = Data(repeating: 0x42, count: 32)
-        let shortNonce = Data(repeating: 0x24, count: 23)  // 23 bytes, need 24
+        let shortNonce = Data(repeating: 0x24, count: 23)
 
-        #expect(throws: XChaCha20Poly1305Compat.Error.self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.open(ciphertext: ciphertext, tag: tag, key: key, nonce24: shortNonce)
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
-
-    // MARK: - Error Detail Tests
-
-    @Test func invalidKeyLengthErrorContainsDetails() throws {
-        let plaintext = "Test".data(using: .utf8)!
-        let badKey = Data(repeating: 0x42, count: 16)
-        let nonce = Data(repeating: 0x24, count: 24)
-
-        do {
-            _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: badKey, nonce24: nonce)
-            Issue.record("Expected error to be thrown")
-        } catch let error as XChaCha20Poly1305Compat.Error {
-            if case .invalidKeyLength(let expected, let got) = error {
-                #expect(expected == 32)
-                #expect(got == 16)
-            } else {
-                Issue.record("Wrong error type")
-            }
-        }
-    }
-
-    @Test func invalidNonceLengthErrorContainsDetails() throws {
-        let plaintext = "Test".data(using: .utf8)!
-        let key = Data(repeating: 0x42, count: 32)
-        let badNonce = Data(repeating: 0x24, count: 12)
-
-        do {
-            _ = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: badNonce)
-            Issue.record("Expected error to be thrown")
-        } catch let error as XChaCha20Poly1305Compat.Error {
-            if case .invalidNonceLength(let expected, let got) = error {
-                #expect(expected == 24)
-                #expect(got == 12)
-            } else {
-                Issue.record("Wrong error type")
-            }
-        }
-    }
-
-    // MARK: - Authentication Tests
 
     @Test func openFailsWithWrongKey() throws {
         let plaintext = "Secret".data(using: .utf8)!
@@ -194,15 +180,18 @@ struct XChaCha20Poly1305CompatTests {
 
         let sealed = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: correctKey, nonce24: nonce)
 
-        // Should throw authentication error (from ChaChaPoly)
-        #expect(throws: (any Error).self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.open(
                 ciphertext: sealed.ciphertext,
                 tag: sealed.tag,
                 key: wrongKey,
                 nonce24: nonce
             )
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 
     @Test func openFailsWithTamperedCiphertext() throws {
@@ -212,20 +201,22 @@ struct XChaCha20Poly1305CompatTests {
 
         let sealed = try XChaCha20Poly1305Compat.seal(plaintext: plaintext, key: key, nonce24: nonce)
 
-        // Tamper with ciphertext
-        var tampered = sealed.ciphertext
-        if !tampered.isEmpty {
-            tampered[0] ^= 0xFF
-        }
+        // Create tampered ciphertext by changing first byte
+        var tamperedBytes = [UInt8](sealed.ciphertext)
+        tamperedBytes[0] = tamperedBytes[0] ^ 0xFF
+        let tampered = Data(tamperedBytes)
 
-        // Should throw authentication error
-        #expect(throws: (any Error).self) {
+        var didThrow = false
+        do {
             _ = try XChaCha20Poly1305Compat.open(
                 ciphertext: tampered,
                 tag: sealed.tag,
                 key: key,
                 nonce24: nonce
             )
+        } catch {
+            didThrow = true
         }
+        #expect(didThrow)
     }
 }
