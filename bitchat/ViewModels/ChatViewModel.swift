@@ -92,7 +92,7 @@ import UniformTypeIdentifiers
 /// Manages the application state and business logic for BitChat.
 /// Acts as the primary coordinator between UI components and backend services,
 /// implementing the BitchatDelegate protocol to handle network events.
-final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider, GeohashParticipantContext {
+final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider, GeohashParticipantContext, MessageFormattingContext {
     // Precompiled regexes and detectors reused across formatting
     private enum Regexes {
         static let hashtag: NSRegularExpression = {
@@ -4191,6 +4191,46 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
         // Fallback when we only have a display name
         return Color(peerSeed: message.sender.lowercased(), isDark: isDark)
+    }
+
+    // MARK: - MessageFormattingContext Protocol
+
+    @MainActor
+    func isSelfMessage(_ message: BitchatMessage) -> Bool {
+        if let spid = message.senderPeerID {
+            // In geohash channels, compare against our per-geohash nostr short ID
+            if case .location(let ch) = activeChannel, spid.isGeoChat {
+                let myGeo: NostrIdentity? = {
+                    if let cached = cachedGeohashIdentity, cached.geohash == ch.geohash {
+                        return cached.identity
+                    }
+                    // Derive and cache
+                    if let identity = try? idBridge.deriveIdentity(forGeohash: ch.geohash) {
+                        cachedGeohashIdentity = (ch.geohash, identity)
+                        return identity
+                    }
+                    return nil
+                }()
+                if let myGeo {
+                    return spid == PeerID(nostr: myGeo.publicKeyHex)
+                }
+            }
+            return spid == meshService.myPeerID
+        }
+        // Fallback by nickname
+        if message.sender == nickname { return true }
+        if message.sender.hasPrefix(nickname + "#") { return true }
+        return false
+    }
+
+    @MainActor
+    func senderColor(for message: BitchatMessage, isDark: Bool) -> Color {
+        return peerColor(for: message, isDark: isDark)
+    }
+
+    @MainActor
+    func peerURL(for peerID: PeerID) -> URL? {
+        return URL(string: "bitchat://user/\(peerID.toPercentEncoded())")
     }
 
     // Public helpers for views to color peers consistently in lists
