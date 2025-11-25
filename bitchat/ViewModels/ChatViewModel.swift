@@ -2560,7 +2560,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
 
         // Consolidate messages from different peer ID representations (stable Noise key, temp Nostr IDs)
-        _ = privateChatManager.consolidateMessages(for: peerID, peerNickname: peerNickname)
+        // Pass persisted sentReadReceipts to correctly identify already-read messages after app restart
+        _ = privateChatManager.consolidateMessages(for: peerID, peerNickname: peerNickname, persistedReadReceipts: sentReadReceipts)
 
         // Trigger handshake if needed (mesh peers only). Skip for Nostr geohash conv keys.
         if !peerID.isGeoDM && !peerID.isGeoChat {

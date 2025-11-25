@@ -39,9 +39,10 @@ final class PrivateChatManager: ObservableObject {
     /// - Parameters:
     ///   - peerID: The target peer ID to consolidate messages into
     ///   - peerNickname: The peer's display name (lowercased for matching)
+    ///   - persistedReadReceipts: The persisted read receipts set from ChatViewModel (UserDefaults-backed)
     /// - Returns: True if any unread messages were found during consolidation
     @MainActor
-    func consolidateMessages(for peerID: PeerID, peerNickname: String) -> Bool {
+    func consolidateMessages(for peerID: PeerID, peerNickname: String, persistedReadReceipts: Set<String>) -> Bool {
         guard let meshService = meshService else { return false }
         var hasUnreadMessages = false
 
@@ -74,9 +75,10 @@ final class PrivateChatManager: ObservableObject {
                         privateChats[peerID]?.append(updatedMessage)
 
                         // Check for recent unread messages (< 60s, not sent by us, not already read)
+                        // Use persistedReadReceipts to correctly identify already-read messages after app restart
                         if message.senderPeerID != meshService.myPeerID {
                             let messageAge = Date().timeIntervalSince(message.timestamp)
-                            if messageAge < 60 && !sentReadReceipts.contains(message.id) {
+                            if messageAge < 60 && !persistedReadReceipts.contains(message.id) {
                                 hasUnreadMessages = true
                             }
                         }
