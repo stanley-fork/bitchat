@@ -59,11 +59,28 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     private var resolvingNames: Set<String> = []
     private let storage: UserDefaults
 
+    /// Returns true if running in test environment
+    private static var isRunningTests: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return NSClassFromString("XCTestCase") != nil ||
+               env["XCTestConfigurationFilePath"] != nil ||
+               env["XCTestBundlePath"] != nil ||
+               env["GITHUB_ACTIONS"] != nil ||
+               env["CI"] != nil
+    }
+
     // MARK: - Initialization
 
     private override init() {
         self.storage = .standard
         super.init()
+
+        // Skip CoreLocation setup in test environments
+        guard !Self.isRunningTests else {
+            loadPersistedState()
+            return
+        }
+
         cl.delegate = self
         cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
         cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
