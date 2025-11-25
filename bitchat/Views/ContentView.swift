@@ -465,17 +465,17 @@ struct ContentView: View {
                     } else {
                         // Schedule a delayed scroll
                         scrollThrottleTimer?.invalidate()
-                        scrollThrottleTimer = Timer.scheduledTimer(withTimeInterval: TransportConfig.uiScrollThrottleSeconds, repeats: false) { _ in
-                            lastScrollTime = Date()
-                        let contextKey: String = {
-                            switch locationManager.selectedChannel {
-                            case .mesh: return "mesh"
-                            case .location(let ch): return "geo:\(ch.geohash)"
-                            }
-                        }()
-                            let count = windowCountPublic
-                            let target = viewModel.messages.suffix(count).last.map { "\(contextKey)|\($0.id)" }
-                            DispatchQueue.main.async {
+                        scrollThrottleTimer = Timer.scheduledTimer(withTimeInterval: TransportConfig.uiScrollThrottleSeconds, repeats: false) { [weak viewModel] _ in
+                            Task { @MainActor in
+                                lastScrollTime = Date()
+                                let contextKey: String = {
+                                    switch locationManager.selectedChannel {
+                                    case .mesh: return "mesh"
+                                    case .location(let ch): return "geo:\(ch.geohash)"
+                                    }
+                                }()
+                                let count = windowCountPublic
+                                let target = viewModel?.messages.suffix(count).last.map { "\(contextKey)|\($0.id)" }
                                 if let target = target { proxy.scrollTo(target, anchor: .bottom) }
                             }
                         }
@@ -643,9 +643,11 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onChange(of: messageText) { newValue in
                     autocompleteDebounceTimer?.invalidate()
-                    autocompleteDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
+                    autocompleteDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak viewModel] _ in
                         let cursorPosition = newValue.count
-                        viewModel.updateAutocomplete(for: newValue, cursorPosition: cursorPosition)
+                        Task { @MainActor in
+                            viewModel?.updateAutocomplete(for: newValue, cursorPosition: cursorPosition)
+                        }
                     }
                 }
 

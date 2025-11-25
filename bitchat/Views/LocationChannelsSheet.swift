@@ -357,7 +357,7 @@ struct LocationChannelsSheet: View {
                         isPresented = false
                     }
                     .padding(.vertical, 6)
-                    .onAppear { bookmarks.resolveNameIfNeeded(for: gh) }
+                    .onAppear { bookmarks.resolveBookmarkNameIfNeeded(for: gh) }
 
                     if index < entries.count - 1 {
                         sectionDivider
