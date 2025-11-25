@@ -187,40 +187,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         return String(format: "h:%016llx", h)
     }
 
-    // Persistent recent content map (LRU) to speed near-duplicate checks
-    private var contentLRUMap: [String: Date] = [:]
-    private var contentLRUOrder: [String] = []
-    private var contentLRUHead = 0
-    private let contentLRUCap = TransportConfig.contentLRUCap
-    private func recordContentKey(_ key: String, timestamp: Date) {
-        if contentLRUMap[key] == nil { contentLRUOrder.append(key) }
-        contentLRUMap[key] = timestamp
-        trimContentLRUIfNeeded()
-    }
-
-    private func trimContentLRUIfNeeded() {
-        let activeCount = contentLRUOrder.count - contentLRUHead
-        guard activeCount > contentLRUCap else { return }
-
-        let overflow = activeCount - contentLRUCap
-        for _ in 0..<overflow {
-            guard let victim = popOldestContentKey() else { break }
-            contentLRUMap.removeValue(forKey: victim)
-        }
-    }
-
-    private func popOldestContentKey() -> String? {
-        guard contentLRUHead < contentLRUOrder.count else { return nil }
-        let victim = contentLRUOrder[contentLRUHead]
-        contentLRUHead += 1
-
-        // Periodically compact the backing storage to avoid unbounded growth.
-        if contentLRUHead >= 32 && contentLRUHead * 2 >= contentLRUOrder.count {
-            contentLRUOrder.removeFirst(contentLRUHead)
-            contentLRUHead = 0
-        }
-        return victim
-    }
+    // Content deduplication using shared MessageDeduplicator
+    private let contentDeduplicator = MessageDeduplicator(
+        maxAge: 86400,  // 24 hours - content dedup is primarily count-based
+        maxCount: TransportConfig.contentLRUCap
+    )
     // MARK: - Published Properties
     
     @Published var messages: [BitchatMessage] = []
@@ -1424,9 +1395,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         timelineStore.append(message, to: activeChannel)
         refreshVisibleMessages(from: activeChannel)
 
-        // Update content LRU for near-dup detection
+        // Update content deduplicator for near-dup detection
         let ckey = normalizedContentKey(message.content)
-        recordContentKey(ckey, timestamp: message.timestamp)
+        contentDeduplicator.record(ckey, timestamp: message.timestamp)
 
         trimMessagesIfNeeded()
 
@@ -2454,7 +2425,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
 
         let key = normalizedContentKey(message.content)
-        recordContentKey(key, timestamp: timestamp)
+        contentDeduplicator.record(key, timestamp: timestamp)
         objectWillChange.send()
         return message
     }
@@ -5184,7 +5155,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         refreshVisibleMessages(from: activeChannel)
         // Track the content key so relayed copies of the same system-style message are ignored
         let contentKey = normalizedContentKey(systemMessage.content)
-        recordContentKey(contentKey, timestamp: systemMessage.timestamp)
+        contentDeduplicator.record(contentKey, timestamp: systemMessage.timestamp)
         trimMessagesIfNeeded()
         objectWillChange.send()
     }
@@ -6120,11 +6091,11 @@ extension ChatViewModel: PublicMessagePipelineDelegate {
     }
 
     func pipeline(_ pipeline: PublicMessagePipeline, contentTimestampForKey key: String) -> Date? {
-        contentLRUMap[key]
+        contentDeduplicator.timestampFor(key)
     }
 
     func pipeline(_ pipeline: PublicMessagePipeline, recordContentKey key: String, timestamp: Date) {
-        recordContentKey(key, timestamp: timestamp)
+        contentDeduplicator.record(key, timestamp: timestamp)
     }
 
     func pipelineTrimMessages(_ pipeline: PublicMessagePipeline) {
