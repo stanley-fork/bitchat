@@ -93,33 +93,8 @@ import UniformTypeIdentifiers
 /// Acts as the primary coordinator between UI components and backend services,
 /// implementing the BitchatDelegate protocol to handle network events.
 final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider, GeohashParticipantContext, MessageFormattingContext {
-    // Precompiled regexes and detectors reused across formatting
-    private enum Regexes {
-        static let hashtag: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "#([a-zA-Z0-9_]+)", options: [])
-        }()
-        static let mention: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "@([\\p{L}0-9_]+(?:#[a-fA-F0-9]{4})?)", options: [])
-        }()
-        static let cashu: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "\\bcashu[AB][A-Za-z0-9._-]{40,}\\b", options: [])
-        }()
-        static let bolt11: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "(?i)\\bln(bc|tb|bcrt)[0-9][a-z0-9]{50,}\\b", options: [])
-        }()
-        static let lnurl: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "(?i)\\blnurl1[a-z0-9]{20,}\\b", options: [])
-        }()
-        static let lightningScheme: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "(?i)\\blightning:[^\\s]+", options: [])
-        }()
-        static let linkDetector: NSDataDetector? = {
-            try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        }()
-        static let quickCashuPresence: NSRegularExpression = {
-            try! NSRegularExpression(pattern: "\\bcashu[AB][A-Za-z0-9._-]{40,}\\b", options: [])
-        }()
-    }
+    // Use MessageFormattingEngine.Patterns for regex matching (shared, precompiled)
+    private typealias Patterns = MessageFormattingEngine.Patterns
 
     private typealias GeoOutgoingContext = (channel: GeohashChannel, event: NostrEvent, identity: NostrIdentity, teleported: Bool)
 
@@ -464,6 +439,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         self.messageRouter = MessageRouter(mesh: meshService, nostr: nostrTransport)
         // Route receipts from PrivateChatManager through MessageRouter
         self.privateChatManager.messageRouter = self.messageRouter
+        // Allow PrivateChatManager to look up peer info for message consolidation
+        self.privateChatManager.unifiedPeerService = self.unifiedPeerService
         // Allow UnifiedPeerService to route favorite notifications via mesh/Nostr
         self.unifiedPeerService.messageRouter = self.messageRouter
         self.autocompleteService = AutocompleteService()
@@ -2544,7 +2521,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     }
     
     // MARK: - Private Chat Management
-    
+
     /// Initiates a private chat session with a peer.
     /// - Parameter peerID: The peer's ID to start chatting with
     /// - Note: Switches the UI to private chat mode and loads message history
@@ -2554,9 +2531,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         if peerID == meshService.myPeerID {
             return
         }
-        
+
         let peerNickname = meshService.peerNickname(peerID: peerID) ?? "unknown"
-        
+
         // Check if the peer is blocked
         if unifiedPeerService.isBlocked(peerID) {
             addSystemMessage(
@@ -2568,7 +2545,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
             )
             return
         }
-        
+
         // Check mutual favorites for offline messaging
         if let peer = unifiedPeerService.getPeer(by: peerID),
            peer.isFavorite && !peer.theyFavoritedUs && !peer.isConnected {
@@ -2581,156 +2558,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
             )
             return
         }
-        
-        // Consolidate messages from stable Noise key if needed
-        // This ensures Nostr messages appear when opening a chat with an ephemeral peer ID
-        if let peer = unifiedPeerService.getPeer(by: peerID) {
-            let noiseKeyHex = PeerID(hexData: peer.noisePublicKey)
-            
-            // If we have messages stored under the stable Noise key hex but not under the ephemeral ID,
-            // or if we need to merge them, do so now
-            if noiseKeyHex != peerID {
-                if let nostrMessages = privateChats[noiseKeyHex], !nostrMessages.isEmpty {
-                    // Check if there are ACTUALLY unread messages (not just the unread flag)
-                    // Only transfer unread status if there are recent unread messages
-                    var hasActualUnreadMessages = false
-                    
-                    // Merge messages from stable key into ephemeral peer ID storage
-                    if privateChats[peerID] == nil {
-                        privateChats[peerID] = []
-                    }
-                    
-                    // Add any messages that aren't already in the ephemeral storage
-                    let existingMessageIds = Set(privateChats[peerID]?.map { $0.id } ?? [])
-                    for message in nostrMessages {
-                        if !existingMessageIds.contains(message.id) {
-                            // Create updated message with correct senderPeerID
-                            // This is crucial for read receipts to work correctly
-                            let updatedMessage = BitchatMessage(
-                                id: message.id,
-                                sender: message.sender,
-                                content: message.content,
-                                timestamp: message.timestamp,
-                                isRelay: message.isRelay,
-                                originalSender: message.originalSender,
-                                isPrivate: message.isPrivate,
-                                recipientNickname: message.recipientNickname,
-                                senderPeerID: message.senderPeerID == meshService.myPeerID ? meshService.myPeerID : peerID,  // Update peer ID if it's from them
-                                mentions: message.mentions,
-                                deliveryStatus: message.deliveryStatus
-                            )
-                            privateChats[peerID]?.append(updatedMessage)
-                            
-                            // Check if this is an actually unread message
-                            // Only mark as unread if:
-                            // 1. Not a message we sent
-                            // 2. Message is recent (< 60s old)
-                            // Never mark old messages as unread during consolidation
-                            if message.senderPeerID != meshService.myPeerID {
-                                let messageAge = Date().timeIntervalSince(message.timestamp)
-                                if messageAge < 60 && !sentReadReceipts.contains(message.id) {
-                                    hasActualUnreadMessages = true
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Sort by timestamp
-                    privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                    
-                    // Only transfer unread status if there are actual recent unread messages
-                    if hasActualUnreadMessages {
-                        unreadPrivateMessages.insert(peerID)
-                    } else if unreadPrivateMessages.contains(noiseKeyHex) {
-                        // Remove incorrect unread status from stable key
-                        unreadPrivateMessages.remove(noiseKeyHex)
-                    }
-                    
-                    // Clean up the stable key storage to avoid duplication
-                    privateChats.removeValue(forKey: noiseKeyHex)
-                    
-                    // Consolidated Nostr messages from stable key
-                }
-            }
-        }
-        
-        // Also consolidate messages from temporary Nostr peer IDs
-        // These are messages received via Nostr when we didn't know the sender's Noise key
-        // They're stored under "nostr_" + first 16 chars of Nostr pubkey
-        let currentPeerNickname = peerNickname.lowercased()
-        var tempPeerIDsToConsolidate: [PeerID] = []
-        
-        // Find all temporary Nostr peer IDs that have messages from the same nickname
-        for (storedPeerID, messages) in privateChats {
-            if storedPeerID.isGeoDM && storedPeerID != peerID {
-                // Check if ALL messages from this temporary peer have the same sender nickname
-                // This is more reliable than just checking the first message
-                let nicknamesMatch = messages.allSatisfy { msg in
-                    msg.sender.lowercased() == currentPeerNickname
-                }
-                if nicknamesMatch && !messages.isEmpty {
-                    tempPeerIDsToConsolidate.append(storedPeerID)
-                }
-            }
-        }
-        
-        // Consolidate messages from temporary Nostr peer IDs
-        if !tempPeerIDsToConsolidate.isEmpty {
-            if privateChats[peerID] == nil {
-                privateChats[peerID] = []
-            }
-            
-            let existingMessageIds = Set(privateChats[peerID]?.map { $0.id } ?? [])
-            var consolidatedCount = 0
-            
-            var hadUnreadTemp = false
-            for tempPeerID in tempPeerIDsToConsolidate {
-                // Check if this temp peer ID had unread messages
-                if unreadPrivateMessages.contains(tempPeerID) {
-                    hadUnreadTemp = true
-                }
-                
-                if let tempMessages = privateChats[tempPeerID] {
-                    for message in tempMessages {
-                        if !existingMessageIds.contains(message.id) {
-                            // Create a new message with the updated sender peer ID
-                            let updatedMessage = BitchatMessage(
-                                id: message.id,
-                                sender: message.sender,
-                                content: message.content,
-                                timestamp: message.timestamp,
-                                isRelay: message.isRelay,
-                                originalSender: message.originalSender,
-                                isPrivate: message.isPrivate,
-                                recipientNickname: message.recipientNickname,
-                                senderPeerID: peerID,  // Update to match current peer
-                                mentions: message.mentions,
-                                deliveryStatus: message.deliveryStatus
-                            )
-                            privateChats[peerID]?.append(updatedMessage)
-                            consolidatedCount += 1
-                        }
-                    }
-                    // Remove the temporary storage
-                    privateChats.removeValue(forKey: tempPeerID)
-                    unreadPrivateMessages.remove(tempPeerID)
-                }
-            }
-            
-            // If any temp peer ID had unread messages, mark the consolidated peer as unread
-            if hadUnreadTemp {
-                unreadPrivateMessages.insert(peerID)
-                SecureLogger.debug("📬 Transferred unread status from temp peer IDs to \(peerID)", category: .session)
-            }
-            
-            if consolidatedCount > 0 {
-                // Sort by timestamp
-                privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                
-                SecureLogger.info("📥 Consolidated \(consolidatedCount) Nostr messages from temporary peer IDs to \(peerNickname)", category: .session)
-            }
-        }
-        
+
+        // Consolidate messages from different peer ID representations (stable Noise key, temp Nostr IDs)
+        // Pass persisted sentReadReceipts to correctly identify already-read messages after app restart
+        _ = privateChatManager.consolidateMessages(for: peerID, peerNickname: peerNickname, persistedReadReceipts: sentReadReceipts)
+
         // Trigger handshake if needed (mesh peers only). Skip for Nostr geohash conv keys.
         if !peerID.isGeoDM && !peerID.isGeoChat {
             let sessionState = meshService.getNoiseSessionState(for: peerID)
@@ -2743,30 +2575,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         } else {
             SecureLogger.debug("GeoDM: skipping mesh handshake for virtual peerID=\(peerID)", category: .session)
         }
-        
-        // Delegate to private chat manager but add already-acked messages first
-        // This prevents duplicate read receipts
-        // IMPORTANT: Only add messages WE sent to sentReadReceipts, not messages we received
-        if let messages = privateChats[peerID] {
-            for message in messages {
-                // Only track read receipts for messages WE sent (not received messages)
-                if message.sender == nickname {
-                    // Check if message has been read or delivered
-                    if let status = message.deliveryStatus {
-                        switch status {
-                        case .read, .delivered:
-                            sentReadReceipts.insert(message.id)
-                            privateChatManager.sentReadReceipts.insert(message.id)
-                        case .failed, .partiallyDelivered, .sending, .sent:
-                            break
-                        }
-                    }
-                }
-            }
-        }
-        
+
+        // Sync read receipt tracking to prevent duplicates
+        privateChatManager.syncReadReceiptsForSentMessages(peerID: peerID, nickname: nickname, externalReceipts: &sentReadReceipts)
+
         privateChatManager.startChat(with: peerID)
-        
+
         // Also mark messages as read for Nostr ACKs
         // This ensures read receipts are sent even for consolidated messages
         markPrivateMessagesAsRead(from: peerID)
@@ -3508,7 +3322,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
             let nsContent = content as NSString
             let nsLen = nsContent.length
             let containsCashuEarly: Bool = {
-                let rx = Regexes.quickCashuPresence
+                let rx = Patterns.quickCashuPresence
                 return rx.numberOfMatches(in: content, options: [], range: NSRange(location: 0, length: nsLen)) > 0
             }()
             if (content.count > 4000 || content.hasVeryLongToken(threshold: 1024)) && !containsCashuEarly {
@@ -3519,14 +3333,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                     : .bitchatSystem(size: 14, design: .monospaced)
                 result.append(AttributedString(content).mergingAttributes(plainStyle))
             } else {
-            // Reuse compiled regexes and detector
-            let hashtagRegex = Regexes.hashtag
-            let mentionRegex = Regexes.mention
-            let cashuRegex = Regexes.cashu
-            let bolt11Regex = Regexes.bolt11
-            let lnurlRegex = Regexes.lnurl
-            let lightningSchemeRegex = Regexes.lightningScheme
-            let detector = Regexes.linkDetector
+            // Reuse compiled regexes and detector from MessageFormattingEngine
+            let hashtagRegex = Patterns.hashtag
+            let mentionRegex = Patterns.mention
+            let cashuRegex = Patterns.cashu
+            let bolt11Regex = Patterns.bolt11
+            let lnurlRegex = Patterns.lnurl
+            let lightningSchemeRegex = Patterns.lightningScheme
+            let detector = Patterns.linkDetector
             let hasMentionsHint = content.contains("@")
             let hasHashtagsHint = content.contains("#")
             let hasURLHint = content.contains("://") || content.contains("www.") || content.contains("http")
@@ -3823,105 +3637,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         result.append(AttributedString("> ").mergingAttributes(senderStyle))
         return result
     }
-    
-    func formatMessage(_ message: BitchatMessage, colorScheme: ColorScheme) -> AttributedString {
-        var result = AttributedString()
-        
-        let isDark = colorScheme == .dark
-        let primaryColor = isDark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-        
-        if message.sender == "system" {
-            let content = AttributedString("* \(message.content) *")
-            var contentStyle = AttributeContainer()
-            contentStyle.foregroundColor = Color.gray
-            contentStyle.font = .bitchatSystem(size: 12, design: .monospaced).italic()
-            result.append(content.mergingAttributes(contentStyle))
-            
-            // Add timestamp at the end for system messages
-            let timestamp = AttributedString(" [\(message.formattedTimestamp)]")
-            var timestampStyle = AttributeContainer()
-            timestampStyle.foregroundColor = Color.gray.opacity(0.5)
-            timestampStyle.font = .bitchatSystem(size: 10, design: .monospaced)
-            result.append(timestamp.mergingAttributes(timestampStyle))
-        } else {
-            let sender = AttributedString("<@\(message.sender)> ")
-            var senderStyle = AttributeContainer()
-            
-            // Use consistent color for all senders
-            senderStyle.foregroundColor = primaryColor
-            // Bold the user's own nickname
-            let fontWeight: Font.Weight = message.sender == nickname ? .bold : .medium
-            senderStyle.font = .bitchatSystem(size: 12, weight: fontWeight, design: .monospaced)
-            result.append(sender.mergingAttributes(senderStyle))
-            
-            
-            // Process content to highlight mentions
-            let contentText = message.content
-            var processedContent = AttributedString()
-            
-            // Regular expression to find @mentions
-            let pattern = "@([\\p{L}0-9_]+)"
-            let regex = try? NSRegularExpression(pattern: pattern, options: [])
-            let nsContent = contentText as NSString
-            let nsLen = nsContent.length
-            let matches = regex?.matches(in: contentText, options: [], range: NSRange(location: 0, length: nsLen)) ?? []
-            
-            var lastEndIndex = contentText.startIndex
-            
-            for match in matches {
-                // Add text before the mention
-                if let range = Range(match.range(at: 0), in: contentText) {
-                    if lastEndIndex < range.lowerBound {
-                        let beforeText = String(contentText[lastEndIndex..<range.lowerBound])
-                        if !beforeText.isEmpty {
-                            var normalStyle = AttributeContainer()
-                            normalStyle.font = .bitchatSystem(size: 14, design: .monospaced)
-                            normalStyle.foregroundColor = isDark ? Color.white : Color.black
-                            processedContent.append(AttributedString(beforeText).mergingAttributes(normalStyle))
-                        }
-                    }
-                    
-                    // Add the mention with highlight
-                    let mentionText = String(contentText[range])
-                    var mentionStyle = AttributeContainer()
-                    mentionStyle.font = .bitchatSystem(size: 14, weight: .semibold, design: .monospaced)
-                    mentionStyle.foregroundColor = Color.orange
-                    processedContent.append(AttributedString(mentionText).mergingAttributes(mentionStyle))
-                    
-                    if lastEndIndex < range.upperBound { lastEndIndex = range.upperBound }
-                }
-            }
-            
-            // Add any remaining text
-            if lastEndIndex < contentText.endIndex {
-                let remainingText = String(contentText[lastEndIndex...])
-                var normalStyle = AttributeContainer()
-                normalStyle.font = .bitchatSystem(size: 14, design: .monospaced)
-                normalStyle.foregroundColor = isDark ? Color.white : Color.black
-                processedContent.append(AttributedString(remainingText).mergingAttributes(normalStyle))
-            }
-            
-            result.append(processedContent)
-            
-            if message.isRelay, let originalSender = message.originalSender {
-                let relay = AttributedString(" (via \(originalSender))")
-                var relayStyle = AttributeContainer()
-                relayStyle.foregroundColor = primaryColor.opacity(0.7)
-                relayStyle.font = .bitchatSystem(size: 11, design: .monospaced)
-                result.append(relay.mergingAttributes(relayStyle))
-            }
-            
-            // Add timestamp at the end (smaller, light grey)
-            let timestamp = AttributedString(" [\(message.formattedTimestamp)]")
-            var timestampStyle = AttributeContainer()
-            timestampStyle.foregroundColor = Color.gray.opacity(0.7)
-            timestampStyle.font = .bitchatSystem(size: 10, design: .monospaced)
-            result.append(timestamp.mergingAttributes(timestampStyle))
-        }
-        
-        return result
-    }
-    
+
     // MARK: - Noise Protocol Support
     
     @MainActor
@@ -4915,7 +4631,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     
     private func parseMentions(from content: String) -> [String] {
         // Allow optional disambiguation suffix '#abcd' for duplicate nicknames
-        let regex = Regexes.mention
+        let regex = Patterns.mention
         let nsContent = content as NSString
         let nsLen = nsContent.length
         let matches = regex.matches(in: content, options: [], range: NSRange(location: 0, length: nsLen))
