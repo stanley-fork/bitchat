@@ -53,9 +53,10 @@ struct BitchatApp: App {
                     // Inject live Noise service into VerificationService to avoid creating new BLE instances
                     VerificationService.shared.configure(with: chatViewModel.meshService.getNoiseService())
                     // Prewarm Nostr identity and QR to make first VERIFY sheet fast
+                    let nickname = chatViewModel.nickname
                     DispatchQueue.global(qos: .utility).async {
                         let npub = try? idBridge.getCurrentNostrIdentity()?.npub
-                        _ = VerificationService.shared.buildMyQRString(nickname: chatViewModel.nickname, npub: npub)
+                        _ = VerificationService.shared.buildMyQRString(nickname: nickname, npub: npub)
                     }
 
                     appDelegate.chatViewModel = chatViewModel
