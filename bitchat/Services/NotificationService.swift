@@ -17,10 +17,14 @@ import AppKit
 final class NotificationService {
     static let shared = NotificationService()
 
-    /// Returns true if running in test environment (XCTest or Swift Testing)
+    /// Returns true if running in test environment (XCTest, Swift Testing, or CI)
     private var isRunningTests: Bool {
-        NSClassFromString("XCTestCase") != nil ||
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let env = ProcessInfo.processInfo.environment
+        return NSClassFromString("XCTestCase") != nil ||
+               env["XCTestConfigurationFilePath"] != nil ||
+               env["XCTestBundlePath"] != nil ||
+               env["GITHUB_ACTIONS"] != nil ||
+               env["CI"] != nil
     }
 
     private init() {}
