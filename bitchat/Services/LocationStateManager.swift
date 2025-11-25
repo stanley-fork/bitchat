@@ -72,6 +72,13 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         initializePermissionState()
     }
 
+    /// Internal initializer for testing with custom storage
+    init(storage: UserDefaults) {
+        self.storage = storage
+        super.init()
+        loadPersistedState()
+    }
+
     private func loadPersistedState() {
         // Load selected channel
         if let data = storage.data(forKey: selectedChannelKey),
