@@ -189,6 +189,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAppInfo) {
             AppInfoView()
+                .environmentObject(viewModel)
                 .onAppear { viewModel.isAppInfoPresented = true }
                 .onDisappear { viewModel.isAppInfoPresented = false }
         }
@@ -198,6 +199,7 @@ struct ContentView: View {
         )) {
             if let peerID = viewModel.showingFingerprintFor {
                 FingerprintView(viewModel: viewModel, peerID: peerID)
+                    .environmentObject(viewModel)
             }
         }
 #if os(iOS)
@@ -225,6 +227,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .environmentObject(viewModel)
             .ignoresSafeArea()
         }
 #endif
@@ -253,6 +256,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .environmentObject(viewModel)
         }
 #endif
         .sheet(isPresented: Binding(
@@ -261,6 +265,7 @@ struct ContentView: View {
         )) {
             if let url = imagePreviewURL {
                 ImagePreviewView(url: url)
+                    .environmentObject(viewModel)
             }
         }
         .alert("Recording Error", isPresented: $showRecordingAlert, actions: {
@@ -825,6 +830,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .environmentObject(viewModel)
             .ignoresSafeArea()
         }
         #endif
@@ -845,6 +851,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .environmentObject(viewModel)
         }
         #endif
     }
@@ -1382,6 +1389,7 @@ struct ContentView: View {
         .padding(.horizontal, 12)
         .sheet(isPresented: $showLocationChannelsSheet) {
             LocationChannelsSheet(isPresented: $showLocationChannelsSheet)
+                .environmentObject(viewModel)
                 .onAppear { viewModel.isLocationChannelsSheetPresented = true }
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
         }
