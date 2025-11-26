@@ -718,6 +718,49 @@ extension ChatViewModel {
                 }
             }
         }
+        
+        // Avoid duplicates
+        if isDuplicateMessage(message.id, targetPeerID: peerID) {
+            return
+        }
+
+        // Store the message
+        addMessageToPrivateChatsIfNeeded(message, targetPeerID: peerID)
+        
+        // Mirror to ephemeral if needed (if we are talking to a stable key peer but have an ephemeral session)
+        // Actually, logic usually mirrors TO stable key storage if available?
+        // Or mirrors to ephemeral if we received on stable.
+        // Let's just use the existing helper which seems to mirror TO ephemeral.
+        // But we need to get the noise key.
+        let noiseKey = peerID.noiseKey ?? unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+        mirrorToEphemeralIfNeeded(message, targetPeerID: peerID, key: noiseKey)
+
+        // Notifications and Read Receipts
+        let isViewing = selectedPrivateChatPeer == peerID
+        
+        if isViewing {
+            // Mark read immediately if viewing
+            // Use router to send read receipt
+            let receipt = ReadReceipt(originalMessageID: message.id, readerID: meshService.myPeerID, readerNickname: nickname)
+            if let key = noiseKey {
+                 // Send via router to stable key if available (preferred for persistence/Nostr fallback)
+                 messageRouter.sendReadReceipt(receipt, to: PeerID(hexData: key))
+            } else {
+                 // Fallback to mesh direct
+                 meshService.sendReadReceipt(receipt, to: peerID)
+            }
+            sentReadReceipts.insert(message.id)
+        } else {
+            // Notify
+            unreadPrivateMessages.insert(peerID)
+            NotificationService.shared.sendPrivateMessageNotification(
+                from: message.sender,
+                message: message.content,
+                peerID: peerID
+            )
+        }
+        
+        objectWillChange.send()
     }
 
     func isDuplicateMessage(_ messageId: String, targetPeerID: PeerID) -> Bool {
