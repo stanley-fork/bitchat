@@ -3,7 +3,7 @@ import Foundation
 import Combine
 
 // Minimal Nostr transport conforming to Transport for offline sending
-final class NostrTransport: Transport {
+final class NostrTransport: Transport, @unchecked Sendable {
     // Provide BLE short peer ID for BitChat embedding
     var senderPeerID = PeerID(str: "")
 
@@ -18,9 +18,49 @@ final class NostrTransport: Transport {
     private let keychain: KeychainManagerProtocol
     private let idBridge: NostrIdentityBridge
 
+    // Reachability Cache (thread-safe)
+    private var reachablePeers: Set<PeerID> = []
+    private let queue = DispatchQueue(label: "nostr.transport.state", attributes: .concurrent)
+
+    @MainActor
     init(keychain: KeychainManagerProtocol, idBridge: NostrIdentityBridge) {
         self.keychain = keychain
         self.idBridge = idBridge
+        
+        setupObservers()
+        
+        // Synchronously warm the cache to avoid startup race
+        let favorites = FavoritesPersistenceService.shared.favorites
+        let reachable = favorites.values
+            .filter { $0.peerNostrPublicKey != nil }
+            .map { PeerID(publicKey: $0.peerNoisePublicKey) }
+            
+        queue.sync(flags: .barrier) {
+            self.reachablePeers = Set(reachable)
+        }
+    }
+
+    private func setupObservers() {
+        NotificationCenter.default.addObserver(
+            forName: .favoriteStatusChanged,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.refreshReachablePeers()
+        }
+    }
+
+    private func refreshReachablePeers() {
+        Task { @MainActor in
+            let favorites = FavoritesPersistenceService.shared.favorites
+            let reachable = favorites.values
+                .filter { $0.peerNostrPublicKey != nil }
+                .map { PeerID(publicKey: $0.peerNoisePublicKey) }
+            
+            self.queue.async(flags: .barrier) { [weak self] in
+                self?.reachablePeers = Set(reachable)
+            }
+        }
     }
 
     // MARK: - Transport Protocol Conformance
@@ -42,7 +82,19 @@ final class NostrTransport: Transport {
     func emergencyDisconnectAll() { /* no-op */ }
 
     func isPeerConnected(_ peerID: PeerID) -> Bool { false }
-    func isPeerReachable(_ peerID: PeerID) -> Bool { false }
+    
+    func isPeerReachable(_ peerID: PeerID) -> Bool {
+        queue.sync {
+            // Check if exact match
+            if reachablePeers.contains(peerID) { return true }
+            // Check for short ID match
+            if peerID.isShort {
+                return reachablePeers.contains(where: { $0.toShort() == peerID })
+            }
+            return false
+        }
+    }
+    
     func peerNickname(peerID: PeerID) -> String? { nil }
     func getPeerNicknames() -> [PeerID : String] { [:] }
 
