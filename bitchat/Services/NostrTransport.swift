@@ -22,12 +22,22 @@ final class NostrTransport: Transport, @unchecked Sendable {
     private var reachablePeers: Set<PeerID> = []
     private let queue = DispatchQueue(label: "nostr.transport.state", attributes: .concurrent)
 
+    @MainActor
     init(keychain: KeychainManagerProtocol, idBridge: NostrIdentityBridge) {
         self.keychain = keychain
         self.idBridge = idBridge
         
         setupObservers()
-        refreshReachablePeers()
+        
+        // Synchronously warm the cache to avoid startup race
+        let favorites = FavoritesPersistenceService.shared.favorites
+        let reachable = favorites.values
+            .filter { $0.peerNostrPublicKey != nil }
+            .map { PeerID(publicKey: $0.peerNoisePublicKey) }
+            
+        queue.sync(flags: .barrier) {
+            self.reachablePeers = Set(reachable)
+        }
     }
 
     private func setupObservers() {
