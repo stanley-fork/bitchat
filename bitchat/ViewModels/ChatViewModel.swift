@@ -94,12 +94,12 @@ import UniformTypeIdentifiers
 /// implementing the BitchatDelegate protocol to handle network events.
 final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProvider, GeohashParticipantContext, MessageFormattingContext {
     // Use MessageFormattingEngine.Patterns for regex matching (shared, precompiled)
-    private typealias Patterns = MessageFormattingEngine.Patterns
+    typealias Patterns = MessageFormattingEngine.Patterns
 
-    private typealias GeoOutgoingContext = (channel: GeohashChannel, event: NostrEvent, identity: NostrIdentity, teleported: Bool)
+    typealias GeoOutgoingContext = (channel: GeohashChannel, event: NostrEvent, identity: NostrIdentity, teleported: Bool)
 
     @MainActor
-    private var canSendMediaInCurrentContext: Bool {
+    var canSendMediaInCurrentContext: Bool {
         if let peer = selectedPrivateChatPeer {
             return !(peer.isGeoDM || peer.isGeoChat)
         }
@@ -158,11 +158,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     
     // MARK: - Service Delegates
 
-    private let commandProcessor: CommandProcessor
-    private let messageRouter: MessageRouter
-    private let privateChatManager: PrivateChatManager
-    private let unifiedPeerService: UnifiedPeerService
-    private let autocompleteService: AutocompleteService
+    let commandProcessor: CommandProcessor
+    let messageRouter: MessageRouter
+    let privateChatManager: PrivateChatManager
+    let unifiedPeerService: UnifiedPeerService
+    let autocompleteService: AutocompleteService
     let deduplicationService: MessageDeduplicationService  // internal for test access
     
     // Computed properties for compatibility
@@ -215,7 +215,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     }
     
     //
-    private var peerIDToPublicKeyFingerprint: [PeerID: String] = [:]
+    var peerIDToPublicKeyFingerprint: [PeerID: String] = [:]
     private var selectedPrivateChatFingerprint: String? = nil
     // Map stable short peer IDs (16-hex) to full Noise public key hex (64-hex) for session continuity
     private var shortIDToNoiseKey: [PeerID: PeerID] = [:]
@@ -266,27 +266,27 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     let idBridge: NostrIdentityBridge
     let identityManager: SecureIdentityStateManagerProtocol
     
-    private var nostrRelayManager: NostrRelayManager?
+    var nostrRelayManager: NostrRelayManager?
     private let userDefaults = UserDefaults.standard
-    private let keychain: KeychainManagerProtocol
+    let keychain: KeychainManagerProtocol
     private let nicknameKey = "bitchat.nickname"
     // Location channel state (macOS supports manual geohash selection)
-    @Published private(set) var activeChannel: ChannelID = .mesh
-    private var geoSubscriptionID: String? = nil
-    private var geoDmSubscriptionID: String? = nil
-    private var currentGeohash: String? = nil
-    private var cachedGeohashIdentity: (geohash: String, identity: NostrIdentity)? = nil // Cache current geohash identity
-    private var geoNicknames: [String: String] = [:] // pubkeyHex(lowercased) -> nickname
+    @Published var activeChannel: ChannelID = .mesh
+    var geoSubscriptionID: String? = nil
+    var geoDmSubscriptionID: String? = nil
+    var currentGeohash: String? = nil
+    var cachedGeohashIdentity: (geohash: String, identity: NostrIdentity)? = nil // Cache current geohash identity
+    var geoNicknames: [String: String] = [:] // pubkeyHex(lowercased) -> nickname
     // Show Tor status once per app launch
-    private var torStatusAnnounced = false
+    var torStatusAnnounced = false
     private var torProgressCancellable: AnyCancellable?
     private var lastTorProgressAnnounced = -1
     // Track whether a Tor restart is pending so we only announce
     // "tor restarted" after an actual restart, not the first launch.
-    private var torRestartPending: Bool = false
+    var torRestartPending: Bool = false
     // Ensure we set up DM subscription only once per app session
-    private var nostrHandlersSetup: Bool = false
-    private var geoChannelCoordinator: GeoChannelCoordinator?
+    var nostrHandlersSetup: Bool = false
+    var geoChannelCoordinator: GeoChannelCoordinator?
     
     // MARK: - Caches
     
@@ -317,29 +317,29 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     @Published var isAppInfoPresented: Bool = false
     @Published var showScreenshotPrivacyWarning: Bool = false
     
-    private var timelineStore = PublicTimelineStore(
+    var timelineStore = PublicTimelineStore(
         meshCap: TransportConfig.meshTimelineCap,
         geohashCap: TransportConfig.geoTimelineCap
     )
     // Channel activity tracking for background nudges
-    private var lastPublicActivityAt: [String: Date] = [:]   // channelKey -> last activity time
+    var lastPublicActivityAt: [String: Date] = [:]   // channelKey -> last activity time
     private var lastPublicActivityNotifyAt: [String: Date] = [:]
     private let channelInactivityThreshold: TimeInterval = TransportConfig.uiChannelInactivityThresholdSeconds
     // Geohash participant tracker
     let participantTracker = GeohashParticipantTracker(activityCutoff: -TransportConfig.uiRecentCutoffFiveMinutesSeconds)
     // Participants who indicated they teleported (by tag in their events)
-    @Published private(set) var teleportedGeo: Set<String> = []  // lowercased pubkey hex
+    @Published var teleportedGeo: Set<String> = []  // lowercased pubkey hex
     // Sampling subscriptions for multiple geohashes (when channel sheet is open)
-    private var geoSamplingSubs: [String: String] = [:] // subID -> geohash
-    private var lastGeoNotificationAt: [String: Date] = [:] // geohash -> last notify time
+    var geoSamplingSubs: [String: String] = [:] // subID -> geohash
+    var lastGeoNotificationAt: [String: Date] = [:] // geohash -> last notify time
     
     
     // MARK: - Message Delivery Tracking
     
     // Delivery tracking
-    private var cancellables = Set<AnyCancellable>()
-    private var transferIdToMessageIDs: [String: [String]] = [:]
-    private var messageIDToTransferId: [String: String] = [:]
+    var cancellables = Set<AnyCancellable>()
+    var transferIdToMessageIDs: [String: [String]] = [:]
+    var messageIDToTransferId: [String: String] = [:]
 
     // MARK: - QR Verification (pending state)
     private struct PendingVerification {
@@ -358,12 +358,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     private var lastMutualToastAt: [String: Date] = [:] // key: fingerprint
 
     // MARK: - Public message batching (UI perf)
-    private let publicMessagePipeline: PublicMessagePipeline
+    let publicMessagePipeline: PublicMessagePipeline
     @Published private(set) var isBatchingPublic: Bool = false
     
     // Track sent read receipts to avoid duplicates (persisted across launches)
     // Note: Persistence happens automatically in didSet, no lifecycle observers needed
-    private var sentReadReceipts: Set<String> = [] {  // messageID set
+    var sentReadReceipts: Set<String> = [] {  // messageID set
         didSet {
             // Only persist if there are changes
             guard oldValue != sentReadReceipts else { return }
@@ -378,18 +378,18 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     }
 
     // Throttle verification response toasts per peer to avoid spam
-    private var lastVerifyToastAt: [String: Date] = [:]
+    var lastVerifyToastAt: [String: Date] = [:]
 
     // Track which GeoDM messages we've already sent a delivery ACK for (by messageID)
-    private var sentGeoDeliveryAcks: Set<String> = []
+    var sentGeoDeliveryAcks: Set<String> = []
     
     // Track app startup phase to prevent marking old messages as unread
     private var isStartupPhase = true
     // Announce Tor initial readiness once per launch to avoid duplicates
-    private var torInitialReadyAnnounced: Bool = false
+    var torInitialReadyAnnounced: Bool = false
     
     // Track Nostr pubkey mappings for unknown senders
-    private var nostrKeyMapping: [PeerID: String] = [:]  // senderPeerID -> nostrPubkey
+    var nostrKeyMapping: [PeerID: String] = [:]  // senderPeerID -> nostrPubkey
     
     // MARK: - Initialization
 
@@ -744,216 +744,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         // No need to force UserDefaults synchronization
     }
 
-    // MARK: - Tor notifications
-    @objc private func handleTorWillStart() {
-        Task { @MainActor in
-            if !self.torStatusAnnounced && TorManager.shared.torEnforced {
-                self.torStatusAnnounced = true
-                // Post only in geohash channels (queue if not active)
-                self.addGeohashOnlySystemMessage(
-                    String(localized: "system.tor.starting", comment: "System message when Tor is starting")
-                )
-            }
-        }
-    }
-    @objc private func handleTorWillRestart() {
-        Task { @MainActor in
-            self.torRestartPending = true
-            // Post only in geohash channels (queue if not active)
-            self.addGeohashOnlySystemMessage(
-                String(localized: "system.tor.restarting", comment: "System message when Tor is restarting")
-            )
-        }
-    }
 
-    @objc private func handleTorDidBecomeReady() {
-        Task { @MainActor in
-            // Only announce "restarted" if we actually restarted this session
-            if self.torRestartPending {
-                // Post only in geohash channels (queue if not active)
-                self.addGeohashOnlySystemMessage(
-                    String(localized: "system.tor.restarted", comment: "System message when Tor has restarted")
-                )
-                self.torRestartPending = false
-            } else if TorManager.shared.torEnforced && !self.torInitialReadyAnnounced {
-                // Initial start completed
-                self.addGeohashOnlySystemMessage(
-                    String(localized: "system.tor.started", comment: "System message when Tor has started")
-                )
-                self.torInitialReadyAnnounced = true
-            }
-        }
-    }
-
-    @objc private func handleTorPreferenceChanged(_ notification: Notification) {
-        Task { @MainActor in
-            self.torStatusAnnounced = false
-            self.torInitialReadyAnnounced = false
-            self.torRestartPending = false
-        }
-    }
     
-    // Resubscribe to the active geohash channel without clearing timeline
-    @MainActor
-    private func resubscribeCurrentGeohash() {
-        guard case .location(let ch) = activeChannel else { return }
-        guard let subID = geoSubscriptionID else {
-            // No existing subscription; set it up
-            switchLocationChannel(to: activeChannel)
-            return
-        }
-        // Ensure participant decay timer is running
-        participantTracker.startRefreshTimer()
-        // Unsubscribe + resubscribe
-        NostrRelayManager.shared.unsubscribe(id: subID)
-        let filter = NostrFilter.geohashEphemeral(
-            ch.geohash,
-            since: Date().addingTimeInterval(-TransportConfig.nostrGeohashInitialLookbackSeconds),
-            limit: TransportConfig.nostrGeohashInitialLimit
-        )
-        let subRelays = GeoRelayDirectory.shared.closestRelays(
-            toGeohash: ch.geohash,
-            count: TransportConfig.nostrGeoRelayCount
-        )
-        NostrRelayManager.shared.subscribe(filter: filter, id: subID, relayUrls: subRelays) { [weak self] event in
-            self?.subscribeNostrEvent(event)
-        }
-        // Resubscribe geohash DMs for this identity
-        if let dmSub = geoDmSubscriptionID {
-            NostrRelayManager.shared.unsubscribe(id: dmSub); geoDmSubscriptionID = nil
-        }
-        
-        if let id = try? idBridge.deriveIdentity(forGeohash: ch.geohash) {
-            let dmSub = "geo-dm-\(ch.geohash)"
-            geoDmSubscriptionID = dmSub
-            let dmFilter = NostrFilter.giftWrapsFor(pubkey: id.publicKeyHex, since: Date().addingTimeInterval(-TransportConfig.nostrDMSubscribeLookbackSeconds))
-            NostrRelayManager.shared.subscribe(filter: dmFilter, id: dmSub) { [weak self] giftWrap in
-                self?.subscribeGiftWrap(giftWrap, id: id)
-            }
-        }
-    }
-    
-    private func subscribeNostrEvent(_ event: NostrEvent) {
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue,
-              !deduplicationService.hasProcessedNostrEvent(event.id)
-        else {
-            return
-        }
 
-        deduplicationService.recordNostrEvent(event.id)
-        
-        if let gh = currentGeohash,
-           let myGeoIdentity = try? idBridge.deriveIdentity(forGeohash: gh),
-           myGeoIdentity.publicKeyHex.lowercased() == event.pubkey.lowercased() {
-            // Skip very recent self-echo from relay, but allow older events (e.g., after app restart)
-            let eventTime = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-            if Date().timeIntervalSince(eventTime) < 15 {
-                return
-            }
-        }
-        
-        if let nickTag = event.tags.first(where: { $0.first == "n" }), nickTag.count >= 2 {
-            let nick = nickTag[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            geoNicknames[event.pubkey.lowercased()] = nick
-        }
-        
-        // Store mapping for geohash sender IDs used in messages (ensures consistent colors)
-        nostrKeyMapping[PeerID(nostr_: event.pubkey)] = event.pubkey
-        nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
 
-        // Update participants last-seen for this pubkey
-        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
-        
-        // Track teleported tag (only our format ["t","teleport"]) for icon state
-        let hasTeleportTag = event.tags.contains(where: { tag in
-            tag.count >= 2 && tag[0].lowercased() == "t" && tag[1].lowercased() == "teleport"
-        })
-        
-        if hasTeleportTag {
-            let key = event.pubkey.lowercased()
-            // Do not mark our own key from historical events; rely on manager.teleported for self
-            let isSelf: Bool = {
-                if let gh = currentGeohash, let my = try? idBridge.deriveIdentity(forGeohash: gh) {
-                    return my.publicKeyHex.lowercased() == key
-                }
-                return false
-            }()
-            if !isSelf {
-                Task { @MainActor in
-                    teleportedGeo = teleportedGeo.union([key])
-                }
-            }
-        }
-        
-        let senderName = displayNameForNostrPubkey(event.pubkey)
-        let content = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        // Clamp future timestamps to now to avoid future-dated messages skewing order
-        let rawTs = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-        let timestamp = min(rawTs, Date())
-        let mentions = parseMentions(from: content)
-        let msg = BitchatMessage(
-            id: event.id,
-            sender: senderName,
-            content: content,
-            timestamp: timestamp,
-            isRelay: false,
-            senderPeerID: PeerID(nostr: event.pubkey),
-            mentions: mentions.isEmpty ? nil : mentions
-        )
-        Task { @MainActor in
-            handlePublicMessage(msg)
-            checkForMentions(msg)
-            sendHapticFeedback(for: msg)
-        }
-    }
-    
-    private func subscribeGiftWrap(_ giftWrap: NostrEvent, id: NostrIdentity) {
-        guard !deduplicationService.hasProcessedNostrEvent(giftWrap.id) else { return }
-        deduplicationService.recordNostrEvent(giftWrap.id)
-        
-        guard let (content, senderPubkey, rumorTs) = try? NostrProtocol.decryptPrivateMessage(giftWrap: giftWrap, recipientIdentity: id),
-              content.hasPrefix("bitchat1:"),
-              let packetData = Self.base64URLDecode(String(content.dropFirst("bitchat1:".count))),
-              let packet = BitchatPacket.from(packetData),
-              packet.type == MessageType.noiseEncrypted.rawValue,
-              let noisePayload = NoisePayload.decode(packet.payload)
-        else {
-            return
-        }
-        
-        let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTs))
-        let convKey = PeerID(nostr_: senderPubkey)
-        nostrKeyMapping[convKey] = senderPubkey
-        
-        switch noisePayload.type {
-        case .privateMessage:
-            handlePrivateMessage(noisePayload, senderPubkey: senderPubkey, convKey: convKey, id: id, messageTimestamp: messageTimestamp)
-        case .delivered:
-            handleDelivered(noisePayload, senderPubkey: senderPubkey, convKey: convKey)
-        case .readReceipt:
-            handleReadReceipt(noisePayload, senderPubkey: senderPubkey, convKey: convKey)
-        case .verifyChallenge, .verifyResponse:
-            // QR verification payloads over Nostr are not supported; ignore in geohash DMs
-            break
-        }
-    }
 
-    private func sendDeliveryAckIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !sentGeoDeliveryAcks.contains(messageId) else { return }
-        let nt = NostrTransport(keychain: keychain, idBridge: idBridge)
-        nt.senderPeerID = meshService.myPeerID
-        nt.sendDeliveryAckGeohash(for: messageId, toRecipientHex: senderPubKey, from: id)
-        sentGeoDeliveryAcks.insert(messageId)
-    }
-    
-    private func sendReadReceiptIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !sentReadReceipts.contains(messageId) else { return }
-        let nt = NostrTransport(keychain: keychain, idBridge: idBridge)
-        nt.senderPeerID = meshService.myPeerID
-        nt.sendReadReceiptGeohash(messageId, toRecipientHex: senderPubKey, from: id)
-        sentReadReceipts.insert(messageId)
-    }
         
     // MARK: - Nickname Management
     
@@ -1327,359 +1122,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
     }
     
-    @MainActor
-    private func sendGeohash(context: GeoOutgoingContext) {
-        let ch = context.channel
-        let event = context.event
-        let identity = context.identity
 
-        let targetRelays = GeoRelayDirectory.shared.closestRelays(
-            toGeohash: ch.geohash,
-            count: TransportConfig.nostrGeoRelayCount
-        )
-
-        if targetRelays.isEmpty {
-            SecureLogger.warning("Geo: no geohash relays available for \(ch.geohash); not sending", category: .session)
-        } else {
-            NostrRelayManager.shared.sendEvent(event, to: targetRelays)
-        }
-
-        // Track ourselves as active participant
-        participantTracker.recordParticipant(pubkeyHex: identity.publicKeyHex)
-        nostrKeyMapping[PeerID(nostr: identity.publicKeyHex)] = identity.publicKeyHex
-        SecureLogger.debug("GeoTeleport: sent geo message pub=\(identity.publicKeyHex.prefix(8))… teleported=\(context.teleported)", category: .session)
-
-        // If we tagged this as teleported, also mark our pubkey in teleportedGeo for UI
-        // Only when not in our regional set (and regional list is known)
-        let hasRegional = !LocationChannelManager.shared.availableChannels.isEmpty
-        let inRegional = LocationChannelManager.shared.availableChannels.contains { $0.geohash == ch.geohash }
-
-        if context.teleported && hasRegional && !inRegional {
-            let key = identity.publicKeyHex.lowercased()
-            teleportedGeo = teleportedGeo.union([key])
-            SecureLogger.info("GeoTeleport: mark self teleported key=\(key.prefix(8))… total=\(teleportedGeo.count)", category: .session)
-        }
-
-        deduplicationService.recordNostrEvent(event.id)
-    }
-
-    @MainActor
-    private func switchLocationChannel(to channel: ChannelID) {
-        // Reset pending public batches to avoid cross-channel bleed
-        publicMessagePipeline.reset()
-        activeChannel = channel
-        publicMessagePipeline.updateActiveChannel(channel)
-        // Reset deduplication set and optionally hydrate timeline for mesh
-        deduplicationService.clearNostrCaches()
-        switch channel {
-        case .mesh:
-            refreshVisibleMessages(from: .mesh)
-            // Debug: log if any empty messages are present
-            let emptyMesh = messages.filter { $0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
-            if emptyMesh > 0 {
-                SecureLogger.debug("RenderGuard: mesh timeline contains \(emptyMesh) empty messages", category: .session)
-            }
-            participantTracker.stopRefreshTimer()
-            participantTracker.setActiveGeohash(nil)
-            teleportedGeo.removeAll()
-        case .location:
-            refreshVisibleMessages(from: channel)
-        }
-        // If switching to a location channel, flush any pending geohash-only system messages
-        if case .location = channel {
-            for content in timelineStore.drainPendingGeohashSystemMessages() {
-                addPublicSystemMessage(content)
-            }
-        }
-        // Unsubscribe previous
-        if let sub = geoSubscriptionID {
-            NostrRelayManager.shared.unsubscribe(id: sub)
-            geoSubscriptionID = nil
-        }
-        if let dmSub = geoDmSubscriptionID {
-            NostrRelayManager.shared.unsubscribe(id: dmSub)
-            geoDmSubscriptionID = nil
-        }
-        currentGeohash = nil
-        participantTracker.setActiveGeohash(nil)
-        // Reset nickname cache for geochat participants
-        geoNicknames.removeAll()
-
-        guard case .location(let ch) = channel else { return }
-        currentGeohash = ch.geohash
-        participantTracker.setActiveGeohash(ch.geohash)
-        
-        // Ensure self appears immediately in the people list; mark teleported state only when truly teleported
-        if let id = try? idBridge.deriveIdentity(forGeohash: ch.geohash) {
-            participantTracker.recordParticipant(pubkeyHex: id.publicKeyHex)
-            let hasRegional = !LocationChannelManager.shared.availableChannels.isEmpty
-            let inRegional = LocationChannelManager.shared.availableChannels.contains { $0.geohash == ch.geohash }
-            let key = id.publicKeyHex.lowercased()
-            if LocationChannelManager.shared.teleported && hasRegional && !inRegional {
-                teleportedGeo = teleportedGeo.union([key])
-                SecureLogger.info("GeoTeleport: channel switch mark self teleported key=\(key.prefix(8))… total=\(teleportedGeo.count)", category: .session)
-            } else {
-                teleportedGeo.remove(key)
-            }
-        }
-        
-        let subID = "geo-\(ch.geohash)"
-        geoSubscriptionID = subID
-        participantTracker.startRefreshTimer()
-        let ts = Date().addingTimeInterval(-TransportConfig.nostrGeohashInitialLookbackSeconds)
-        let filter = NostrFilter.geohashEphemeral(ch.geohash, since: ts, limit: TransportConfig.nostrGeohashInitialLimit)
-        let subRelays = GeoRelayDirectory.shared.closestRelays(toGeohash: ch.geohash, count: 5)
-        NostrRelayManager.shared.subscribe(filter: filter, id: subID, relayUrls: subRelays) { [weak self] event in
-            self?.handleNostrEvent(event)
-        }
-
-        subscribeToGeoChat(ch)
-    }
     
-    private func handleNostrEvent(_ event: NostrEvent) {
-        // Only handle ephemeral kind 20000 with matching tag
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue else { return }
-        
-        // Deduplicate
-        if deduplicationService.hasProcessedNostrEvent(event.id) { return }
-        deduplicationService.recordNostrEvent(event.id)
-        
-        // Log incoming tags for diagnostics
-        let tagSummary = event.tags.map { "[" + $0.joined(separator: ",") + "]" }.joined(separator: ",")
-        SecureLogger.debug("GeoTeleport: recv pub=\(event.pubkey.prefix(8))… tags=\(tagSummary)", category: .session)
-        
-        // Track teleport tag for participants – only our format ["t", "teleport"]
-        let hasTeleportTag: Bool = event.tags.contains { tag in
-            tag.count >= 2 && tag[0].lowercased() == "t" && tag[1].lowercased() == "teleport"
-        }
-        
-        let isSelf: Bool = {
-            if let gh = currentGeohash, let my = try? idBridge.deriveIdentity(forGeohash: gh) {
-                return my.publicKeyHex.lowercased() == event.pubkey.lowercased()
-            }
-            return false
-        }()
 
-        if hasTeleportTag {
-            // Avoid marking our own key from historical events; rely on manager.teleported for self
-            if !isSelf {
-                let key = event.pubkey.lowercased()
-                Task { @MainActor in
-                    teleportedGeo = teleportedGeo.union([key])
-                    SecureLogger.info("GeoTeleport: mark peer teleported key=\(key.prefix(8))… total=\(teleportedGeo.count)", category: .session)
-                }
-            }
-        }
-        
-        // Skip only very recent self-echo from relay; include older self events for hydration
-        if isSelf {
-            let eventTime = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-            if Date().timeIntervalSince(eventTime) < 15 {
-                return
-            }
-        }
-        
-        // Cache nickname from tag if present
-        if let nickTag = event.tags.first(where: { $0.first == "n" }), nickTag.count >= 2 {
-            let nick = nickTag[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            geoNicknames[event.pubkey.lowercased()] = nick
-        }
-        
-        // If this pubkey is blocked, skip mapping, participants, and timeline
-        if identityManager.isNostrBlocked(pubkeyHexLowercased: event.pubkey) {
-            return
-        }
-        
-        // Store mapping for geohash DM initiation
-        nostrKeyMapping[PeerID(nostr_: event.pubkey)] = event.pubkey
-        nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
-        
-        // Update participants last-seen for this pubkey
-        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
-        
-        let senderName = displayNameForNostrPubkey(event.pubkey)
-        let content = event.content
-        
-        // If this is a teleport presence event (no content), don't add to timeline
-        if let teleTag = event.tags.first(where: { $0.first == "t" }), teleTag.count >= 2, (teleTag[1] == "teleport"),
-           content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return
-        }
-        
-        // Clamp future timestamps
-        let rawTs = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-        let mentions = parseMentions(from: content)
-        let msg = BitchatMessage(
-            id: event.id,
-            sender: senderName,
-            content: content,
-            timestamp: min(rawTs, Date()),
-            isRelay: false,
-            senderPeerID: PeerID(nostr: event.pubkey),
-            mentions: mentions.isEmpty ? nil : mentions
-        )
-        
-        Task { @MainActor in
-            handlePublicMessage(msg)
-            checkForMentions(msg)
-            sendHapticFeedback(for: msg)
-        }
-    }
     
-    @MainActor
-    private func subscribeToGeoChat(_ ch: GeohashChannel) {
-        guard let id = try? idBridge.deriveIdentity(forGeohash: ch.geohash) else { return }
-        
-        let dmSub = "geo-dm-\(ch.geohash)"
-        geoDmSubscriptionID = dmSub
-        // pared back logging: subscribe debug only
-        // Log GeoDM subscribe only when Tor is ready to avoid early noise
-        if TorManager.shared.isReady {
-            SecureLogger.debug("GeoDM: subscribing DMs pub=\(id.publicKeyHex.prefix(8))… sub=\(dmSub)", category: .session)
-        }
-        let dmFilter = NostrFilter.giftWrapsFor(pubkey: id.publicKeyHex, since: Date().addingTimeInterval(-TransportConfig.nostrDMSubscribeLookbackSeconds))
-        NostrRelayManager.shared.subscribe(filter: dmFilter, id: dmSub) { [weak self] giftWrap in
-            self?.handleGiftWrap(giftWrap, id: id)
-        }
-    }
-    
-    private func handleGiftWrap(_ giftWrap: NostrEvent, id: NostrIdentity) {
-        if deduplicationService.hasProcessedNostrEvent(giftWrap.id) {
-            return
-        }
-        deduplicationService.recordNostrEvent(giftWrap.id)
-        
-        // Decrypt with per-geohash identity
-        guard let (content, senderPubkey, rumorTs) = try? NostrProtocol.decryptPrivateMessage(giftWrap: giftWrap, recipientIdentity: id) else {
-            SecureLogger.warning("GeoDM: failed decrypt giftWrap id=\(giftWrap.id.prefix(8))…", category: .session)
-            return
-        }
-        
-        SecureLogger.debug("GeoDM: decrypted gift-wrap id=\(giftWrap.id.prefix(16))... from=\(senderPubkey.prefix(8))...", category: .session)
-        
-        guard content.hasPrefix("bitchat1:"),
-              let packetData = Self.base64URLDecode(String(content.dropFirst("bitchat1:".count))),
-              let packet = BitchatPacket.from(packetData),
-              packet.type == MessageType.noiseEncrypted.rawValue,
-              let payload = NoisePayload.decode(packet.payload)
-        else {
-            return
-        }
-        
-        let convKey = PeerID(nostr_: senderPubkey)
-        nostrKeyMapping[convKey] = senderPubkey
-        
-        switch payload.type {
-        case .privateMessage:
-            let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTs))
-            handlePrivateMessage(payload, senderPubkey: senderPubkey, convKey: convKey, id: id, messageTimestamp: messageTimestamp)
-        case .delivered:
-            handleDelivered(payload, senderPubkey: senderPubkey, convKey: convKey)
-        case .readReceipt:
-            handleReadReceipt(payload, senderPubkey: senderPubkey, convKey: convKey)
-        
-        // Explicitly list other cases so we get compile-time check if a new case is added in the future
-        case .verifyChallenge, .verifyResponse:
-            break
-        }
-    }
-    
-    private func handlePrivateMessage(
-        _ payload: NoisePayload,
-        senderPubkey: String,
-        convKey: PeerID,
-        id: NostrIdentity,
-        messageTimestamp: Date
-    ) {
-        guard let pm = PrivateMessagePacket.decode(from: payload.data) else { return }
-        let messageId = pm.messageID
-        
-        SecureLogger.info("GeoDM: recv PM <- sender=\(senderPubkey.prefix(8))… mid=\(messageId.prefix(8))…", category: .session)
 
-        sendDeliveryAckIfNeeded(to: messageId, senderPubKey: senderPubkey, from: id)
-
-        // Respect geohash blocks
-        if identityManager.isNostrBlocked(pubkeyHexLowercased: senderPubkey) {
-            return
-        }
-
-        // Duplicate check
-        if privateChats[convKey]?.contains(where: { $0.id == messageId }) == true { return }
-        for (_, arr) in privateChats {
-            if arr.contains(where: { $0.id == messageId }) {
-                return
-            }
-        }
-        
-        let senderName = displayNameForNostrPubkey(senderPubkey)
-        let msg = BitchatMessage(
-            id: messageId,
-            sender: senderName,
-            content: pm.content,
-            timestamp: messageTimestamp,
-            isRelay: false,
-            isPrivate: true,
-            recipientNickname: nickname,
-            senderPeerID: convKey,
-            deliveryStatus: .delivered(to: nickname, at: Date())
-        )
-        
-        if privateChats[convKey] == nil {
-            privateChats[convKey] = []
-        }
-        privateChats[convKey]?.append(msg)
-        
-        let isViewing = selectedPrivateChatPeer == convKey
-        let wasReadBefore = sentReadReceipts.contains(messageId)
-        let isRecentMessage = Date().timeIntervalSince(messageTimestamp) < 30
-        let shouldMarkUnread = !wasReadBefore && !isViewing && isRecentMessage
-        if shouldMarkUnread {
-            unreadPrivateMessages.insert(convKey)
-        }
-        
-        // Send READ if viewing this conversation
-        if isViewing {
-            // pared back: omit pre-send READ log
-            sendReadReceiptIfNeeded(to: messageId, senderPubKey: senderPubkey, from: id)
-        } else {
-            // pared back: omit defer READ log
-        }
-        
-        // Notify for truly unread and recent messages when not viewing
-        if !isViewing && shouldMarkUnread {
-            NotificationService.shared.sendPrivateMessageNotification(
-                from: senderName,
-                message: pm.content,
-                peerID: convKey
-            )
-        }
-        
-        objectWillChange.send()
-    }
     
-    private func handleDelivered(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {
-        guard let messageID = String(data: payload.data, encoding: .utf8) else { return }
-        
-        if let idx = privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
-            privateChats[convKey]?[idx].deliveryStatus = .delivered(to: displayNameForNostrPubkey(senderPubkey), at: Date())
-            objectWillChange.send()
-            SecureLogger.info("GeoDM: recv DELIVERED for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…", category: .session)
-        } else {
-            SecureLogger.warning("GeoDM: delivered ack for unknown mid=\(messageID.prefix(8))… conv=\(convKey)", category: .session)
-        }
-    }
-    
-    private func handleReadReceipt(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {
-        guard let messageID = String(data: payload.data, encoding: .utf8) else { return }
-        
-        if let idx = privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
-            privateChats[convKey]?[idx].deliveryStatus = .read(by: displayNameForNostrPubkey(senderPubkey), at: Date())
-            objectWillChange.send()
-            SecureLogger.info("GeoDM: recv READ for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…", category: .session)
-        } else {
-            SecureLogger.warning("GeoDM: read ack for unknown mid=\(messageID.prefix(8))… conv=\(convKey)", category: .session)
-        }
-    }
+
 
     // MARK: - Geohash Participants
 
@@ -1797,130 +1246,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         )
     }
 
-    /// Begin sampling multiple geohashes (used by channel sheet) without changing active channel.
-    @MainActor
-    func beginGeohashSampling(for geohashes: [String]) {
-        // Disable sampling when app is backgrounded (Tor is stopped there)
-        if !TorManager.shared.isForeground() {
-            endGeohashSampling()
-            return
-        }
-        // Determine which to add and which to remove
-        let desired = Set(geohashes)
-        let current = Set(geoSamplingSubs.values)
-        let toAdd = desired.subtracting(current)
-        let toRemove = current.subtracting(desired)
 
-        for (subID, gh) in geoSamplingSubs where toRemove.contains(gh) {
-            NostrRelayManager.shared.unsubscribe(id: subID)
-            geoSamplingSubs.removeValue(forKey: subID)
-        }
 
-        for gh in toAdd {
-            subscribe(gh)
-        }
-    }
-    
-    @MainActor
-    private func subscribe(_ gh: String) {
-        let subID = "geo-sample-\(gh)"
-        geoSamplingSubs[subID] = gh
-        let filter = NostrFilter.geohashEphemeral(
-            gh,
-            since: Date().addingTimeInterval(-TransportConfig.nostrGeohashSampleLookbackSeconds),
-            limit: TransportConfig.nostrGeohashSampleLimit
-        )
-        let subRelays = GeoRelayDirectory.shared.closestRelays(toGeohash: gh, count: 5)
-        NostrRelayManager.shared.subscribe(filter: filter, id: subID, relayUrls: subRelays) { [weak self] event in
-            self?.subscribeNostrEvent(event, gh: gh)
-        }
-    }
-    
-    private func subscribeNostrEvent(_ event: NostrEvent, gh: String) {
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue else { return }
-
-        // Compute current participant count (5-minute window) BEFORE updating with this event
-        let existingCount = participantTracker.participantCount(for: gh)
-
-        // Update participants for this specific geohash
-        participantTracker.recordParticipant(pubkeyHex: event.pubkey, geohash: gh)
-        
-        // Notify only on rising-edge: previously zero people, now someone sends a chat
-        let content = event.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return }
-        
-        // Respect geohash blocks
-        if identityManager.isNostrBlocked(pubkeyHexLowercased: event.pubkey.lowercased()) { return }
-        
-        // Skip self identity for this geohash
-        if let my = try? idBridge.deriveIdentity(forGeohash: gh), my.publicKeyHex.lowercased() == event.pubkey.lowercased() { return }
-        
-        // Only trigger when there were zero participants in this geohash recently
-        guard existingCount == 0 else { return }
-        
-        // Avoid notifications for old sampled events when launching or (re)subscribing
-        let eventTime = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-        if Date().timeIntervalSince(eventTime) > 30 { return }
-        
-        // Foreground-only notifications: app must be active, and not already viewing this geohash
-        #if os(iOS)
-        guard UIApplication.shared.applicationState == .active else { return }
-        if case .location(let ch) = activeChannel, ch.geohash == gh { return }
-        #elseif os(macOS)
-        guard NSApplication.shared.isActive else { return }
-        if case .location(let ch) = activeChannel, ch.geohash == gh { return }
-        #endif
-        
-        cooldownPerGeohash(gh, content: content, event: event)
-    }
-    
-    private func cooldownPerGeohash(_ gh: String, content: String, event: NostrEvent) {
-        let now = Date()
-        let last = lastGeoNotificationAt[gh] ?? .distantPast
-        if now.timeIntervalSince(last) < TransportConfig.uiGeoNotifyCooldownSeconds { return }
-        
-        // Compose a short preview
-        let preview: String = {
-            let maxLen = TransportConfig.uiGeoNotifySnippetMaxLen
-            if content.count <= maxLen { return content }
-            let idx = content.index(content.startIndex, offsetBy: maxLen)
-            return String(content[..<idx]) + "…"
-        }()
-
-        Task { @MainActor in
-            lastGeoNotificationAt[gh] = now
-            // Pre-populate the target geohash timeline so the triggering message appears when user opens it
-            let senderSuffix = String(event.pubkey.suffix(4))
-            let nick = geoNicknames[event.pubkey.lowercased()]
-            let senderName = (nick?.isEmpty == false ? nick! : "anon") + "#" + senderSuffix
-            
-            // Clamp future timestamps
-            let rawTs = Date(timeIntervalSince1970: TimeInterval(event.created_at))
-            let ts = min(rawTs, Date())
-            let mentions = self.parseMentions(from: content)
-            let msg = BitchatMessage(
-                id: event.id,
-                sender: senderName,
-                content: content,
-                timestamp: ts,
-                isRelay: false,
-                senderPeerID: PeerID(nostr: event.pubkey),
-                mentions: mentions.isEmpty ? nil : mentions
-            )
-            if timelineStore.appendIfAbsent(msg, toGeohash: gh) {
-                NotificationService.shared.sendGeohashActivityNotification(geohash: gh, bodyPreview: preview)
-            }
-        }
-    }
-
-    /// Stop sampling all extra geohashes.
-    @MainActor
-    func endGeohashSampling() {
-        for subID in geoSamplingSubs.keys { NostrRelayManager.shared.unsubscribe(id: subID) }
-        geoSamplingSubs.removeAll()
-    }
-
-    private func displayNameForNostrPubkey(_ pubkeyHex: String) -> String {
+    func displayNameForNostrPubkey(_ pubkeyHex: String) -> String {
         let suffix = String(pubkeyHex.suffix(4))
         // If this is our per-geohash identity, use our nickname
         if let gh = currentGeohash, let myGeoIdentity = try? idBridge.deriveIdentity(forGeohash: gh) {
@@ -1936,179 +1264,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         return "anon#\(suffix)"
     }
 
-    /// Sends an encrypted private message to a specific peer.
-    /// - Parameters:
-    ///   - content: The message content to encrypt and send
-    ///   - peerID: The recipient's peer ID
-    /// - Note: Automatically establishes Noise encryption if not already active
-    @MainActor
-    func sendPrivateMessage(_ content: String, to peerID: PeerID) {
-        guard !content.isEmpty else { return }
-        
-        // Check if blocked
-        if unifiedPeerService.isBlocked(peerID) {
-            let nickname = meshService.peerNickname(peerID: peerID) ?? "user"
-            addSystemMessage(
-                String(
-                    format: String(localized: "system.dm.blocked_recipient", comment: "System message when attempting to message a blocked user"),
-                    locale: .current,
-                    nickname
-                )
-            )
-            return
-        }
-        
-        // Geohash DM routing: conversation keys start with "nostr_"
-        if peerID.isGeoDM {
-            sendGeohashDM(content, to: peerID)
-        }
-        
-        // Determine routing method and recipient nickname
-        guard let noiseKey = Data(hexString: peerID.id) else { return }
-        let isConnected = meshService.isPeerConnected(peerID)
-        let isReachable = meshService.isPeerReachable(peerID)
-        let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
-        let isMutualFavorite = favoriteStatus?.isMutual ?? false
-        let hasNostrKey = favoriteStatus?.peerNostrPublicKey != nil
-        
-        // Get nickname from various sources
-        var recipientNickname = meshService.peerNickname(peerID: peerID)
-        if recipientNickname == nil && favoriteStatus != nil {
-            recipientNickname = favoriteStatus?.peerNickname
-        }
-        recipientNickname = recipientNickname ?? "user"
-        
-        // Generate message ID
-        let messageID = UUID().uuidString
-        
-        // Create the message object
-        let message = BitchatMessage(
-            id: messageID,
-            sender: nickname,
-            content: content,
-            timestamp: Date(),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: true,
-            recipientNickname: recipientNickname,
-            senderPeerID: meshService.myPeerID,
-            mentions: nil,
-            deliveryStatus: .sending
-        )
-        
-        // Add to local chat
-        if privateChats[peerID] == nil {
-            privateChats[peerID] = []
-        }
-        privateChats[peerID]?.append(message)
-        
-        // Trigger UI update for sent message
-        objectWillChange.send()
-        
-        // Send via appropriate transport (BLE if connected/reachable, else Nostr when possible)
-        if isConnected || isReachable || (isMutualFavorite && hasNostrKey) {
-            messageRouter.sendPrivate(content, to: peerID, recipientNickname: recipientNickname ?? "user", messageID: messageID)
-            // Optimistically mark as sent for both transports; delivery/read will update subsequently
-            if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[idx].deliveryStatus = .sent
-            }
-        } else {
-            // Update delivery status to failed
-            if let index = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[index].deliveryStatus = .failed(
-                    reason: String(localized: "content.delivery.reason.unreachable", comment: "Failure reason when a peer is unreachable")
-                )
-            }
-            let name = recipientNickname ?? "user"
-            addSystemMessage(
-                String(
-                    format: String(localized: "system.dm.unreachable", comment: "System message when a recipient is unreachable"),
-                    locale: .current,
-                    name
-                )
-            )
-        }
-    }
-    
-    private func sendGeohashDM(_ content: String, to peerID: PeerID) {
-        guard case .location(let ch) = activeChannel else {
-            addSystemMessage(
-                String(localized: "system.location.not_in_channel", comment: "System message when attempting to send without being in a location channel")
-            )
-            return
-        }
-        let messageID = UUID().uuidString
-        
-        // Local echo in the DM thread
-        let message = BitchatMessage(
-            id: messageID,
-            sender: nickname,
-            content: content,
-            timestamp: Date(),
-            isRelay: false,
-            isPrivate: true,
-            recipientNickname: nickname,
-            senderPeerID: meshService.myPeerID,
-            deliveryStatus: .sending
-        )
-        
-        if privateChats[peerID] == nil {
-            privateChats[peerID] = []
-        }
-        
-        privateChats[peerID]?.append(message)
-        objectWillChange.send()
 
-        // Resolve recipient hex from mapping
-        guard let recipientHex = nostrKeyMapping[peerID] else {
-            if let msgIdx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
-                    reason: String(localized: "content.delivery.reason.unknown_recipient", comment: "Failure reason when the recipient is unknown")
-                )
-            }
-            return
-        }
-        
-        // Respect geohash blocks
-        if identityManager.isNostrBlocked(pubkeyHexLowercased: recipientHex) {
-            if let msgIdx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
-                    reason: String(localized: "content.delivery.reason.blocked", comment: "Failure reason when the user is blocked")
-                )
-            }
-            addSystemMessage(
-                String(localized: "system.dm.blocked_generic", comment: "System message when sending fails because user is blocked")
-            )
-            return
-        }
-        
-        // Send via Nostr using per-geohash identity
-        do {
-            let id = try idBridge.deriveIdentity(forGeohash: ch.geohash)
-            // Prevent messaging ourselves
-            if recipientHex.lowercased() == id.publicKeyHex.lowercased() {
-                if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[idx].deliveryStatus = .failed(
-                    reason: String(localized: "content.delivery.reason.self", comment: "Failure reason when attempting to message yourself")
-                )
-            }
-                return
-            }
-            SecureLogger.debug("GeoDM: local send mid=\(messageID.prefix(8))… to=\(recipientHex.prefix(8))… conv=\(peerID)", category: .session)
-            let nostrTransport = NostrTransport(keychain: keychain, idBridge: idBridge)
-            nostrTransport.senderPeerID = meshService.myPeerID
-            nostrTransport.sendPrivateMessageGeohash(content: content, toRecipientHex: recipientHex, from: id, messageID: messageID)
-            if let msgIdx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[msgIdx].deliveryStatus = .sent
-            }
-        } catch {
-            if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                privateChats[peerID]?[idx].deliveryStatus = .failed(
-                    reason: String(localized: "content.delivery.reason.send_error", comment: "Failure reason for a generic send error")
-                )
-            }
-        }
-    }
 
     // MARK: - Media Transfers
 
@@ -2118,182 +1274,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         case copyFailed
     }
 
-    @MainActor
-    func sendVoiceNote(at url: URL) {
-        guard canSendMediaInCurrentContext else {
-            SecureLogger.info("Voice note blocked outside mesh/private context", category: .session)
-            try? FileManager.default.removeItem(at: url)
-            addSystemMessage("Voice notes are only available in mesh chats.")
-            return
-        }
-
-        let targetPeer = selectedPrivateChatPeer
-        let message = enqueueMediaMessage(content: "[voice] \(url.lastPathComponent)", targetPeer: targetPeer)
-        let messageID = message.id
-        let transferId = makeTransferID(messageID: messageID)
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            do {
-                // Security H1: Check file size BEFORE reading into memory
-                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-                guard let fileSize = attrs[.size] as? Int,
-                      fileSize <= FileTransferLimits.maxVoiceNoteBytes else {
-                    let size = (attrs[.size] as? Int) ?? 0
-                    SecureLogger.warning("Voice note exceeds size limit (\(size) bytes)", category: .session)
-                    try? FileManager.default.removeItem(at: url)
-                    await MainActor.run {
-                        self.handleMediaSendFailure(messageID: messageID, reason: "Voice note too large")
-                    }
-                    return
-                }
-
-                let data = try Data(contentsOf: url)
-                let packet = BitchatFilePacket(
-                    fileName: url.lastPathComponent,
-                    fileSize: UInt64(data.count),
-                    mimeType: "audio/mp4",
-                    content: data
-                )
-                guard packet.encode() != nil else { throw MediaSendError.encodingFailed }
-                await MainActor.run {
-                    self.registerTransfer(transferId: transferId, messageID: messageID)
-                    if let peerID = targetPeer {
-                        self.meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
-                    } else {
-                        self.meshService.sendFileBroadcast(packet, transferId: transferId)
-                    }
-                }
-            } catch {
-                SecureLogger.error("Voice note send failed: \(error)", category: .session)
-                await MainActor.run {
-                    self.handleMediaSendFailure(messageID: messageID, reason: "Failed to send voice note")
-                }
-            }
-        }
-    }
-
-    @MainActor
-    func sendImage(from sourceURL: URL, cleanup: (() -> Void)? = nil) {
-        guard canSendMediaInCurrentContext else {
-            SecureLogger.info("Image send blocked outside mesh/private context", category: .session)
-            cleanup?()
-            addSystemMessage("Images are only available in mesh chats.")
-            return
-        }
-
-        let targetPeer = selectedPrivateChatPeer
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            var processedURL: URL?
-            do {
-                let outputURL = try ImageUtils.processImage(at: sourceURL)
-                processedURL = outputURL
-                let data = try Data(contentsOf: outputURL)
-                guard data.count <= FileTransferLimits.maxImageBytes else {
-                    SecureLogger.warning("Processed image exceeds size limit (\(data.count) bytes)", category: .session)
-                    await MainActor.run {
-                        self.addSystemMessage("Image is too large to send.")
-                    }
-                    try? FileManager.default.removeItem(at: outputURL)
-                    return
-                }
-                let packet = BitchatFilePacket(
-                    fileName: outputURL.lastPathComponent,
-                    fileSize: UInt64(data.count),
-                    mimeType: "image/jpeg",
-                    content: data
-                )
-                guard packet.encode() != nil else { throw MediaSendError.encodingFailed }
-                await MainActor.run {
-                    let message = self.enqueueMediaMessage(content: "[image] \(outputURL.lastPathComponent)", targetPeer: targetPeer)
-                    let messageID = message.id
-                    let transferId = self.makeTransferID(messageID: messageID)
-                    self.registerTransfer(transferId: transferId, messageID: messageID)
-                    if let peerID = targetPeer {
-                        self.meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
-                    } else {
-                        self.meshService.sendFileBroadcast(packet, transferId: transferId)
-                    }
-                }
-            } catch {
-                SecureLogger.error("Image send preparation failed: \(error)", category: .session)
-                await MainActor.run {
-                    self.addSystemMessage("Failed to prepare image for sending.")
-                }
-                if let url = processedURL {
-                    try? FileManager.default.removeItem(at: url)
-                }
-            }
-            cleanup?()
-        }
-    }
 
 
-    @MainActor
-    func cancelMediaSend(messageID: String) {
-        if let transferId = messageIDToTransferId[messageID],
-           let active = transferIdToMessageIDs[transferId]?.first,
-           active == messageID {
-            meshService.cancelTransfer(transferId)
-        }
-        clearTransferMapping(for: messageID)
-        removeMessage(withID: messageID, cleanupFile: true)
-    }
 
-    @MainActor
-    func deleteMediaMessage(messageID: String) {
-        clearTransferMapping(for: messageID)
-        removeMessage(withID: messageID, cleanupFile: true)
-    }
 
-    @MainActor
-    private func enqueueMediaMessage(content: String, targetPeer: PeerID?) -> BitchatMessage {
-        let timestamp = Date()
-        let message: BitchatMessage
 
-        if let peerID = targetPeer {
-            message = BitchatMessage(
-                sender: nickname,
-                content: content,
-                timestamp: timestamp,
-                isRelay: false,
-                originalSender: nil,
-                isPrivate: true,
-                recipientNickname: nicknameForPeer(peerID),
-                senderPeerID: meshService.myPeerID,
-                deliveryStatus: .sending
-            )
-            var chats = privateChats
-            chats[peerID, default: []].append(message)
-            privateChats = chats
-            trimMessagesIfNeeded()
-        } else {
-            let (displayName, senderPeerID) = currentPublicSender()
-            message = BitchatMessage(
-                sender: displayName,
-                content: content,
-                timestamp: timestamp,
-                isRelay: false,
-                originalSender: nil,
-                isPrivate: false,
-                recipientNickname: nil,
-                senderPeerID: senderPeerID,
-                deliveryStatus: .sending
-            )
-            timelineStore.append(message, to: activeChannel)
-            messages = timelineStore.messages(for: activeChannel)
-            trimMessagesIfNeeded()
-        }
 
-        let key = deduplicationService.normalizedContentKey(message.content)
-        deduplicationService.recordContentKey(key, timestamp: timestamp)
-        objectWillChange.send()
-        return message
-    }
 
-    private func currentPublicSender() -> (name: String, peerID: PeerID) {
+    func currentPublicSender() -> (name: String, peerID: PeerID) {
         var displaySender = nickname
         var senderPeerID = meshService.myPeerID
         if case .location(let ch) = activeChannel,
@@ -2306,7 +1294,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     }
 
     @MainActor
-    private func nicknameForPeer(_ peerID: PeerID) -> String {
+    func nicknameForPeer(_ peerID: PeerID) -> String {
         if let name = meshService.peerNickname(peerID: peerID) {
             return name
         }
@@ -2322,98 +1310,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         return "user"
     }
 
-    @MainActor
-    private func registerTransfer(transferId: String, messageID: String) {
-        transferIdToMessageIDs[transferId, default: []].append(messageID)
-        messageIDToTransferId[messageID] = transferId
-    }
 
-    private func makeTransferID(messageID: String) -> String {
-        "\(messageID)-\(UUID().uuidString)"
-    }
 
     @MainActor
-    private func clearTransferMapping(for messageID: String) {
-        guard let transferId = messageIDToTransferId.removeValue(forKey: messageID) else { return }
-        guard var queue = transferIdToMessageIDs[transferId] else { return }
-        if !queue.isEmpty {
-            if queue.first == messageID {
-                queue.removeFirst()
-            } else if let idx = queue.firstIndex(of: messageID) {
-                queue.remove(at: idx)
-            }
-        }
-        transferIdToMessageIDs[transferId] = queue.isEmpty ? nil : queue
-    }
-
-    @MainActor
-    private func handleMediaSendFailure(messageID: String, reason: String) {
-        updateMessageDeliveryStatus(messageID, status: .failed(reason: reason))
-        clearTransferMapping(for: messageID)
-    }
-
-    @MainActor
-    private func handleTransferEvent(_ event: TransferProgressManager.Event) {
-        switch event {
-        case .started(let id, let total):
-            guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: 0, total: total))
-        case .updated(let id, let sent, let total):
-            guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: sent, total: total))
-        case .completed(let id, _):
-            guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            updateMessageDeliveryStatus(messageID, status: .sent)
-            clearTransferMapping(for: messageID)
-        case .cancelled(let id, _, _):
-            guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            clearTransferMapping(for: messageID)
-            removeMessage(withID: messageID, cleanupFile: true)
-        }
-    }
-
-    private func cleanupLocalFile(forMessage message: BitchatMessage) {
-        // Check both outgoing and incoming directories for thorough cleanup
-        let prefixes = ["[voice] ", "[image] ", "[file] "]
-        let subdirs = ["voicenotes/outgoing", "voicenotes/incoming",
-                       "images/outgoing", "images/incoming",
-                       "files/outgoing", "files/incoming"]
-
-        guard let prefix = prefixes.first(where: { message.content.hasPrefix($0) }) else { return }
-        let rawFilename = String(message.content.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawFilename.isEmpty, let base = try? applicationFilesDirectory() else { return }
-
-        // Security: Extract only the last path component to prevent directory traversal
-        let safeFilename = (rawFilename as NSString).lastPathComponent
-        guard !safeFilename.isEmpty && safeFilename != "." && safeFilename != ".." else { return }
-
-        // Try all possible locations (outgoing and incoming)
-        for subdir in subdirs {
-            let target = base.appendingPathComponent(subdir, isDirectory: true).appendingPathComponent(safeFilename)
-
-            // Security: Verify target is within expected directory before deletion
-            guard target.path.hasPrefix(base.path) else { continue }
-
-            do {
-                try FileManager.default.removeItem(at: target)
-            } catch CocoaError.fileNoSuchFile {
-                // Expected - file not in this directory
-            } catch {
-                SecureLogger.error("Failed to cleanup \(safeFilename): \(error)", category: .session)
-            }
-        }
-    }
-
-
-    private func applicationFilesDirectory() throws -> URL {
-        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let filesDir = base.appendingPathComponent("files", isDirectory: true)
-        try FileManager.default.createDirectory(at: filesDir, withIntermediateDirectories: true, attributes: nil)
-        return filesDir
-    }
-
-    @MainActor
-    private func removeMessage(withID messageID: String, cleanupFile: Bool = false) {
+    func removeMessage(withID messageID: String, cleanupFile: Bool = false) {
         var removedMessage: BitchatMessage?
 
         if let idx = messages.firstIndex(where: { $0.id == messageID }) {
@@ -2447,31 +1347,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         objectWillChange.send()
     }
 
-    // MARK: - Geohash DMs initiation
-    @MainActor
-    func startGeohashDM(withPubkeyHex hex: String) {
-        let convKey = PeerID(nostr_: hex)
-        nostrKeyMapping[convKey] = hex
-        selectedPrivateChatPeer = convKey
-    }
 
-    @MainActor
-    func fullNostrHex(forSenderPeerID senderID: PeerID) -> String? {
-        return nostrKeyMapping[senderID]
-    }
-
-    @MainActor
-    func geohashDisplayName(for convKey: PeerID) -> String {
-        guard let full = nostrKeyMapping[convKey] else {
-            let suffix = String(convKey.id.suffix(4))
-            return "anon#\(suffix)"
-        }
-        let suffix = String(full.suffix(4))
-        if let nick = geoNicknames[full.lowercased()], !nick.isEmpty {
-            return nick + "#" + suffix
-        }
-        return "anon#\(suffix)"
-    }
     /// Add a local system message to a private chat (no network send)
     @MainActor
     func addLocalPrivateSystemMessage(_ content: String, to peerID: PeerID) {
@@ -3737,14 +2613,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     
     // MARK: - Message Handling
     
-    private func trimMessagesIfNeeded() {
+    func trimMessagesIfNeeded() {
         if messages.count > maxMessages {
             messages = Array(messages.suffix(maxMessages))
         }
     }
 
     @MainActor
-    private func refreshVisibleMessages(from channel: ChannelID? = nil) {
+    func refreshVisibleMessages(from channel: ChannelID? = nil) {
         let target = channel ?? activeChannel
         messages = timelineStore.messages(for: target)
     }
@@ -4629,7 +3505,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
     }
     
-    private func parseMentions(from content: String) -> [String] {
+    func parseMentions(from content: String) -> [String] {
         // Allow optional disambiguation suffix '#abcd' for duplicate nicknames
         let regex = Patterns.mention
         let nsContent = content as NSString
@@ -4673,7 +3549,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         updateMessageDeliveryStatus(messageID, status: status)
     }
     
-    private func updateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
+    func updateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
         
         // Helper function to check if we should skip this update
         func shouldSkipUpdate(currentStatus: DeliveryStatus?, newStatus: DeliveryStatus) -> Bool {
@@ -4717,7 +3593,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     }
     
     // MARK: - Helper for System Messages
-    private func addSystemMessage(_ content: String, timestamp: Date = Date()) {
+    func addSystemMessage(_ content: String, timestamp: Date = Date()) {
         let systemMessage = BitchatMessage(
             sender: "system",
             content: content,
@@ -4730,7 +3606,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     /// Add a system message to the mesh timeline only (never geohash).
     /// If mesh is currently active, also append to the visible `messages`.
     @MainActor
-    private func addMeshOnlySystemMessage(_ content: String) {
+    func addMeshOnlySystemMessage(_ content: String) {
         let systemMessage = BitchatMessage(
             sender: "system",
             content: content,
@@ -4806,341 +3682,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                                 timestamp: Date())
     }
     
-    // MARK: - Simplified Nostr Integration (Inlined from MessageRouter)
+
     
-    //
+
     
-    @MainActor
-    private func setupNostrMessageHandling() {
-        guard let currentIdentity = try? idBridge.getCurrentNostrIdentity() else { 
-            SecureLogger.warning("⚠️ No Nostr identity available for message handling", category: .session)
-            return 
-        }
-        
-        SecureLogger.debug("🔑 Setting up Nostr subscription for pubkey: \(currentIdentity.publicKeyHex.prefix(16))...", category: .session)
-        
-        // Subscribe to Nostr messages
-        let filter = NostrFilter.giftWrapsFor(
-            pubkey: currentIdentity.publicKeyHex,
-            since: Date().addingTimeInterval(-TransportConfig.nostrDMSubscribeLookbackSeconds)  // Last 24 hours
-        )
-        
-        nostrRelayManager?.subscribe(filter: filter, id: "chat-messages") { [weak self] event in
-            Task { @MainActor in
-                self?.handleNostrMessage(event)
-            }
-        }
-    }
-    
-    @MainActor
-    private func handleNostrMessage(_ giftWrap: NostrEvent) {
-        // Simple deduplication
-        if deduplicationService.hasProcessedNostrEvent(giftWrap.id) { return }
-        deduplicationService.recordNostrEvent(giftWrap.id)
-        
-        // Client-side filtering: ignore messages older than 24 hours
-        // Add 15 minutes buffer since gift wrap timestamps are randomized ±15 minutes
-        let messageAge = Date().timeIntervalSince1970 - TimeInterval(giftWrap.created_at)
-        if messageAge > 87300 { // 24 hours + 15 minutes
-            return // Ignoring old message
-        }
-        
-        processNostrMessage(giftWrap)
-    }
-    
-    @MainActor
-    private func processNostrMessage(_ giftWrap: NostrEvent) {
-        guard let currentIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
-        
-        do {
-            let (content, senderPubkey, rumorTimestamp) = try NostrProtocol.decryptPrivateMessage(
-                giftWrap: giftWrap,
-                recipientIdentity: currentIdentity
-            )
-            
-            // Expect embedded BitChat packet content
-            guard content.hasPrefix("bitchat1:") else {
-                SecureLogger.debug("Ignoring non-embedded Nostr DM content", category: .session)
-                return
-            }
 
-            guard let packetData = Self.base64URLDecode(String(content.dropFirst("bitchat1:".count))),
-                  let packet = BitchatPacket.from(packetData) else {
-                SecureLogger.error("Failed to decode embedded BitChat packet from Nostr DM", category: .session)
-                return
-            }
-
-            // Only process typed noiseEncrypted envelope for private messages/receipts
-            guard packet.type == MessageType.noiseEncrypted.rawValue else {
-                SecureLogger.warning("Unsupported embedded packet type: \(packet.type)", category: .session)
-                return
-            }
-
-            // Validate recipient
-            if PeerID(hexData: packet.recipientID) != meshService.myPeerID {
-                return
-            }
-
-            // Parse plaintext typed payload
-            guard let noisePayload = NoisePayload.decode(packet.payload) else {
-                SecureLogger.error("Failed to parse embedded NoisePayload", category: .session)
-                return
-            }
-
-            // Map sender by Nostr pubkey to Noise key when possible
-            let senderNoiseKey = findNoiseKey(for: senderPubkey)
-            let actualSenderNoiseKey = senderNoiseKey // may be nil
-            let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTimestamp))
-            let senderNickname = (actualSenderNoiseKey != nil) ? (FavoritesPersistenceService.shared.getFavoriteStatus(for: actualSenderNoiseKey!)?.peerNickname ?? "Unknown") : "Unknown"
-            // Stable target ID if we know Noise key; otherwise temporary Nostr-based peer
-            let targetPeerID = PeerID(str: actualSenderNoiseKey?.hexEncodedString()) ?? PeerID(nostr_: senderPubkey)
-
-            switch noisePayload.type {
-            case .privateMessage:
-                handlePrivateMessage(
-                    noisePayload,
-                    actualSenderNoiseKey: actualSenderNoiseKey,
-                    senderNickname: senderNickname,
-                    targetPeerID: targetPeerID,
-                    messageTimestamp: messageTimestamp,
-                    senderPubkey: senderPubkey
-                )
-
-            case .delivered:
-                guard let messageID = String(data: noisePayload.data, encoding: .utf8) else { return }
-                let peerName = senderNickname
-                // Update status to delivered
-                if let messages = privateChats[targetPeerID], let idx = messages.firstIndex(where: { $0.id == messageID }) {
-                    privateChats[targetPeerID]?[idx].deliveryStatus = .delivered(to: peerName, at: Date())
-                    objectWillChange.send()
-                }
-
-            case .readReceipt:
-                guard let messageID = String(data: noisePayload.data, encoding: .utf8) else { return }
-                let peerName = senderNickname
-                if let messages = privateChats[targetPeerID], let idx = messages.firstIndex(where: { $0.id == messageID }) {
-                    privateChats[targetPeerID]?[idx].deliveryStatus = .read(by: peerName, at: Date())
-                    objectWillChange.send()
-                }
-            case .verifyChallenge, .verifyResponse:
-                // Ignore verification payloads arriving via Nostr path for now
-                break
-            }
-            
-        } catch {
-            SecureLogger.error("Failed to decrypt Nostr message: \(error)", category: .session)
-        }
-    }
-    
-    @MainActor
-    private func handlePrivateMessage(
-        _ payload: NoisePayload,
-        actualSenderNoiseKey: Data?,
-        senderNickname: String,
-        targetPeerID: PeerID,
-        messageTimestamp: Date,
-        senderPubkey: String
-    ) {
-        guard let pm = PrivateMessagePacket.decode(from: payload.data) else { return }
-        let messageId = pm.messageID
-        let messageContent = pm.content
-
-        // Favorite/unfavorite notifications embedded as private messages
-        if messageContent.hasPrefix("[FAVORITED]") || messageContent.hasPrefix("[UNFAVORITED]") {
-            if let key = actualSenderNoiseKey {
-                handleFavoriteNotificationFromMesh(messageContent, from: PeerID(hexData: key), senderNickname: senderNickname)
-            }
-            return
-        }
-
-        if isDuplicateMessage(messageId, targetPeerID: targetPeerID) {
-            return
-        }
-
-        let wasReadBefore = sentReadReceipts.contains(messageId)
-
-        // Is viewing?
-        var isViewingThisChat = false
-        if selectedPrivateChatPeer == targetPeerID {
-            isViewingThisChat = true
-        } else if let selectedPeer = selectedPrivateChatPeer,
-                  let selectedPeerData = unifiedPeerService.getPeer(by: selectedPeer),
-                  let key = actualSenderNoiseKey,
-                  selectedPeerData.noisePublicKey == key {
-            isViewingThisChat = true
-        }
-
-        // Recency check
-        let isRecentMessage = Date().timeIntervalSince(messageTimestamp) < 30
-        let shouldMarkAsUnread = !wasReadBefore && !isViewingThisChat && (isRecentMessage || !isStartupPhase)
-
-        let message = BitchatMessage(
-            id: messageId,
-            sender: senderNickname,
-            content: messageContent,
-            timestamp: messageTimestamp,
-            isRelay: false,
-            isPrivate: true,
-            recipientNickname: nickname,
-            senderPeerID: targetPeerID,
-            deliveryStatus: .delivered(to: nickname, at: Date())
-        )
-        
-        addMessageToPrivateChatsIfNeeded(message, targetPeerID: targetPeerID)
-        mirrorToEphemeralIfNeeded(message, targetPeerID: targetPeerID, key: actualSenderNoiseKey)
-
-        sendDeliveryAckViaNostrEmbedded(
-            message,
-            wasReadBefore: wasReadBefore,
-            senderPubkey: senderPubkey,
-            key: actualSenderNoiseKey
-        )
-
-        if wasReadBefore {
-            // do nothing
-        } else if isViewingThisChat {
-            handleViewingThisChat(
-                message,
-                targetPeerID: targetPeerID,
-                key: actualSenderNoiseKey,
-                senderPubkey: senderPubkey
-            )
-        } else {
-            markAsUnreadIfNeeded(
-                shouldMarkAsUnread: shouldMarkAsUnread,
-                targetPeerID: targetPeerID,
-                key: actualSenderNoiseKey,
-                isRecentMessage: isRecentMessage,
-                senderNickname: senderNickname,
-                messageContent: messageContent
-            )
-        }
-
-        objectWillChange.send()
-    }
-    
-    private func isDuplicateMessage(_ messageId: String, targetPeerID: PeerID) -> Bool {
-        if privateChats[targetPeerID]?.contains(where: { $0.id == messageId }) == true {
-            return true
-        }
-        for (_, messages) in privateChats where messages.contains(where: { $0.id == messageId }) {
-            return true
-        }
-        return false
-    }
-    
-    private func addMessageToPrivateChatsIfNeeded(_ message: BitchatMessage, targetPeerID: PeerID) {
-        if privateChats[targetPeerID] == nil {
-            privateChats[targetPeerID] = []
-        }
-        if let idx = privateChats[targetPeerID]?.firstIndex(where: { $0.id == message.id }) {
-            privateChats[targetPeerID]?[idx] = message
-        } else {
-            privateChats[targetPeerID]?.append(message)
-        }
-        // Sanitize to avoid duplicate IDs
-        privateChatManager.sanitizeChat(for: targetPeerID)
-    }
-    
-    @MainActor
-    private func mirrorToEphemeralIfNeeded(_ message: BitchatMessage, targetPeerID: PeerID, key: Data?) {
-        guard let key,
-              let ephemeralPeerID = unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID,
-              ephemeralPeerID != targetPeerID
-        else {
-            return
-        }
-        
-        if privateChats[ephemeralPeerID] == nil {
-            privateChats[ephemeralPeerID] = []
-        }
-        if let idx = privateChats[ephemeralPeerID]?.firstIndex(where: { $0.id == message.id }) {
-            privateChats[ephemeralPeerID]?[idx] = message
-        } else {
-            privateChats[ephemeralPeerID]?.append(message)
-        }
-        privateChatManager.sanitizeChat(for: ephemeralPeerID)
-    }
-    
-    @MainActor
-    private func sendDeliveryAckViaNostrEmbedded(_ message: BitchatMessage, wasReadBefore: Bool, senderPubkey: String, key: Data?) {
-        guard !wasReadBefore else { return }
-        
-        if let key {
-            SecureLogger.debug("Sending DELIVERED ack for \(message.id.prefix(8))… via router", category: .session)
-            messageRouter.sendDeliveryAck(message.id, to: PeerID(hexData: key))
-        } else if let id = try? idBridge.getCurrentNostrIdentity() {
-            // Fallback: no Noise mapping yet — send directly to sender's Nostr pubkey
-            let nt = NostrTransport(keychain: keychain, idBridge: idBridge)
-            nt.senderPeerID = meshService.myPeerID
-            nt.sendDeliveryAckGeohash(for: message.id, toRecipientHex: senderPubkey, from: id)
-            SecureLogger.debug("Sent DELIVERED ack directly to Nostr pub=\(senderPubkey.prefix(8))… for mid=\(message.id.prefix(8))…", category: .session)
-        }
-    }
-    
-    @MainActor
-    private func handleViewingThisChat(_ message: BitchatMessage, targetPeerID: PeerID, key: Data?, senderPubkey: String) {
-        unreadPrivateMessages.remove(targetPeerID)
-        if let key,
-           let ephemeralPeerID = unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID {
-            unreadPrivateMessages.remove(ephemeralPeerID)
-        }
-        if !sentReadReceipts.contains(message.id) {
-            if let key {
-                let receipt = ReadReceipt(originalMessageID: message.id, readerID: meshService.myPeerID, readerNickname: nickname)
-                SecureLogger.debug("Viewing chat; sending READ ack for \(message.id.prefix(8))… via router", category: .session)
-                messageRouter.sendReadReceipt(receipt, to: PeerID(hexData: key))
-                sentReadReceipts.insert(message.id)
-            } else if let id = try? idBridge.getCurrentNostrIdentity() {
-                let nt = NostrTransport(keychain: keychain, idBridge: idBridge)
-                nt.senderPeerID = meshService.myPeerID
-                nt.sendReadReceiptGeohash(message.id, toRecipientHex: senderPubkey, from: id)
-                sentReadReceipts.insert(message.id)
-                SecureLogger.debug("Viewing chat; sent READ ack directly to Nostr pub=\(senderPubkey.prefix(8))… for mid=\(message.id.prefix(8))…", category: .session)
-            }
-        }
-    }
-    
-    @MainActor
-    private func markAsUnreadIfNeeded(
-        shouldMarkAsUnread: Bool,
-        targetPeerID: PeerID,
-        key: Data?,
-        isRecentMessage: Bool,
-        senderNickname: String,
-        messageContent: String
-    ) {
-        guard shouldMarkAsUnread else { return }
-        
-        unreadPrivateMessages.insert(targetPeerID)
-        if let key,
-           let ephemeralPeerID = unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID,
-           ephemeralPeerID != targetPeerID {
-            unreadPrivateMessages.insert(ephemeralPeerID)
-        }
-        if isRecentMessage {
-            NotificationService.shared.sendPrivateMessageNotification(
-                from: senderNickname,
-                message: messageContent,
-                peerID: targetPeerID
-            )
-        }
-    }
-    
-    @MainActor
-    private func handleFavoriteNotification(content: String, from nostrPubkey: String) {
-        let isFavorite = content.hasPrefix("FAVORITED")
-        guard let senderNoiseKey = findNoiseKey(for: nostrPubkey) else { return }
-        
-        FavoritesPersistenceService.shared.updatePeerFavoritedUs(
-            peerNoisePublicKey: senderNoiseKey,
-            favorited: isFavorite,
-            peerNostrPublicKey: nostrPubkey
-        )
-    }
     
     // MARK: - Base64URL utils
-    private static func base64URLDecode(_ s: String) -> Data? {
+    static func base64URLDecode(_ s: String) -> Data? {
         var str = s.replacingOccurrences(of: "-", with: "+")
                     .replacingOccurrences(of: "_", with: "/")
         // Add padding if needed
@@ -5151,415 +3700,19 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     
     //
     
-    @MainActor
-    private func handleFavoriteNotificationFromMesh(_ content: String, from peerID: PeerID, senderNickname: String) {
-        // Parse the message format: "[FAVORITED]:npub..." or "[UNFAVORITED]:npub..."
-        let isFavorite = content.hasPrefix("[FAVORITED]")
-        let parts = content.split(separator: ":")
-        
-        // Extract Nostr public key if included
-        var nostrPubkey: String? = nil
-        if parts.count > 1 {
-            nostrPubkey = String(parts[1])
-            SecureLogger.info("📝 Received Nostr npub in favorite notification: \(nostrPubkey ?? "none")", category: .session)
-        }
-        
-        // Get the noise public key for this peer
-        // Try both ephemeral ID and if that fails, get from peer service
-        // First try as hex-encoded Noise key (64 chars)
-        // If not a hex key, get from peer service (ephemeral ID)
-        let noiseKey = peerID.noiseKey ?? unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
-        
-        guard let finalNoiseKey = noiseKey else {
-            SecureLogger.warning("⚠️ Cannot get Noise key for peer \(peerID)", category: .session)
-            return
-        }
-        // Determine prior state to avoid duplicate system messages on repeated notifications
-        let prior = FavoritesPersistenceService.shared.getFavoriteStatus(for: finalNoiseKey)?.theyFavoritedUs ?? false
 
-        // Update the favorite relationship (idempotent storage)
-        FavoritesPersistenceService.shared.updatePeerFavoritedUs(
-            peerNoisePublicKey: finalNoiseKey,
-            favorited: isFavorite,
-            peerNickname: senderNickname,
-            peerNostrPublicKey: nostrPubkey
-        )
+    
 
-        // If they favorited us and provided their Nostr key, ensure it's stored (log only)
-        if isFavorite && nostrPubkey != nil {
-            SecureLogger.info("💾 Storing Nostr key association for \(senderNickname): \(nostrPubkey!.prefix(16))...", category: .session)
-        }
+    
 
-        // Only show a system message when the state changes, and only in mesh
-        if prior != isFavorite {
-            let action = isFavorite ? "favorited" : "unfavorited"
-            addMeshOnlySystemMessage("\(senderNickname) \(action) you")
-        }
-    }
     
-    @MainActor
-    private func findNoiseKey(for nostrPubkey: String) -> Data? {
-        // Convert hex to npub if needed for comparison
-        let npubToMatch: String
-        if nostrPubkey.hasPrefix("npub") {
-            npubToMatch = nostrPubkey
-        } else {
-            // Try to convert hex to npub
-            guard let pubkeyData = Data(hexString: nostrPubkey) else { 
-                SecureLogger.warning("⚠️ Invalid hex public key format: \(nostrPubkey.prefix(16))...", category: .session)
-                return nil 
-            }
-            
-            do {
-                npubToMatch = try Bech32.encode(hrp: "npub", data: pubkeyData)
-            } catch {
-                SecureLogger.warning("⚠️ Failed to convert hex to npub: \(error)", category: .session)
-                return nil
-            }
-        }
-        
-        // Search through favorites for matching Nostr pubkey
-        for (noiseKey, relationship) in FavoritesPersistenceService.shared.favorites {
-            if let storedNostrKey = relationship.peerNostrPublicKey {
-                // Compare npub format
-                if storedNostrKey == npubToMatch {
-                    // SecureLogger.debug("✅ Found Noise key for Nostr sender (npub match)", category: .session)
-                    return noiseKey
-                }
-                
-                // Also try hex comparison if stored value is hex
-                if !storedNostrKey.hasPrefix("npub") && storedNostrKey == nostrPubkey {
-                    SecureLogger.debug("✅ Found Noise key for Nostr sender (hex match)", category: .session)
-                    return noiseKey
-                }
-            }
-        }
-        
-        SecureLogger.debug("⚠️ No matching Noise key found for Nostr pubkey: \(nostrPubkey.prefix(16))... (tried npub: \(npubToMatch.prefix(16))...)", category: .session)
-        return nil
-    }
-    
-    @MainActor
-    private func sendFavoriteNotificationViaNostr(noisePublicKey: Data, isFavorite: Bool) {
-        messageRouter.sendFavoriteNotification(to: PeerID(hexData: noisePublicKey), isFavorite: isFavorite)
-    }
-    
-    @MainActor
-    func sendFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {
-        // Handle both ephemeral peer IDs and Noise key hex strings
-        var noiseKey: Data?
-        
-        // First check if peerID is a hex-encoded Noise key
-        if let hexKey = Data(hexString: peerID.id) {
-            noiseKey = hexKey
-        } else {
-            // It's an ephemeral peer ID, get the Noise key from UnifiedPeerService
-            if let peer = unifiedPeerService.getPeer(by: peerID) {
-                noiseKey = peer.noisePublicKey
-            }
-        }
-        
-        // Try mesh first for connected peers
-        if meshService.isPeerConnected(peerID) {
-            messageRouter.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
-            SecureLogger.debug("📤 Sent favorite notification via BLE to \(peerID)", category: .session)
-        } else if let key = noiseKey {
-            // Send via Nostr for offline peers (using router)
-            messageRouter.sendFavoriteNotification(to: PeerID(hexData: key), isFavorite: isFavorite)
-        } else {
-            SecureLogger.warning("⚠️ Cannot send favorite notification - peer not connected and no Nostr pubkey", category: .session)
-        }
-    }
-    
-    // MARK: - Message Processing Helpers
-    
-    /// Check if a message should be blocked based on sender
-    @MainActor
-    private func isMessageBlocked(_ message: BitchatMessage) -> Bool {
-        if let peerID = message.senderPeerID ?? getPeerIDForNickname(message.sender) {
-            // Check mesh/known peers first
-            if isPeerBlocked(peerID) { return true }
-            // Check geohash (Nostr) blocks using mapping to full pubkey
-            if peerID.isGeoChat || peerID.isGeoDM {
-                if let full = nostrKeyMapping[peerID]?.lowercased() {
-                    if identityManager.isNostrBlocked(pubkeyHexLowercased: full) { return true }
-                }
-            }
-            return false
-        }
-        return false
-    }
 
-    // MARK: - Geohash Nickname Resolution (for /block in geohash)
-    @MainActor
-    func nostrPubkeyForDisplayName(_ name: String) -> String? {
-        // Look up current visible geohash participants for an exact displayName match
-        for p in visibleGeohashPeople() {
-            if p.displayName == name { return p.id }
-        }
-        return nil
-    }
     
-    /// Process action messages (hugs, slaps) into system messages
-    private func processActionMessage(_ message: BitchatMessage) -> BitchatMessage {
-        let isActionMessage = message.content.hasPrefix("* ") && message.content.hasSuffix(" *") &&
-                              (message.content.contains("🫂") || message.content.contains("🐟") || 
-                               message.content.contains("took a screenshot"))
-        
-        if isActionMessage {
-            return BitchatMessage(
-                id: message.id,
-                sender: "system",
-                content: String(message.content.dropFirst(2).dropLast(2)), // Remove * * wrapper
-                timestamp: message.timestamp,
-                isRelay: message.isRelay,
-                originalSender: message.originalSender,
-                isPrivate: message.isPrivate,
-                recipientNickname: message.recipientNickname,
-                senderPeerID: message.senderPeerID,
-                mentions: message.mentions,
-                deliveryStatus: message.deliveryStatus
-            )
-        }
-        return message
-    }
-    
-    /// Migrate private chats when peer reconnects with new ID
-    @MainActor
-    private func migratePrivateChatsIfNeeded(for peerID: PeerID, senderNickname: String) {
-        let currentFingerprint = getFingerprint(for: peerID)
-        
-        if privateChats[peerID] == nil || privateChats[peerID]?.isEmpty == true {
-            var migratedMessages: [BitchatMessage] = []
-            var oldPeerIDsToRemove: [PeerID] = []
-            
-            // Only migrate messages from the last 24 hours to prevent old messages from flooding
-            let cutoffTime = Date().addingTimeInterval(-TransportConfig.uiMigrationCutoffSeconds)
-            
-            for (oldPeerID, messages) in privateChats {
-                if oldPeerID != peerID {
-                    let oldFingerprint = peerIDToPublicKeyFingerprint[oldPeerID]
-                    
-                    // Filter messages to only recent ones
-                    let recentMessages = messages.filter { $0.timestamp > cutoffTime }
-                    
-                    // Skip if no recent messages
-                    guard !recentMessages.isEmpty else { continue }
-                    
-                    // Check fingerprint match first (most reliable)
-                    if let currentFp = currentFingerprint,
-                       let oldFp = oldFingerprint,
-                       currentFp == oldFp {
-                        migratedMessages.append(contentsOf: recentMessages)
-                        
-                        // Only remove old peer ID if we migrated ALL its messages
-                        if recentMessages.count == messages.count {
-                            oldPeerIDsToRemove.append(oldPeerID)
-                        } else {
-                            // Keep old messages in original location but don't show in UI
-                            SecureLogger.info("📦 Partially migrating \(recentMessages.count) of \(messages.count) messages from \(oldPeerID)", category: .session)
-                        }
-                        
-                        SecureLogger.info("📦 Migrating \(recentMessages.count) recent messages from old peer ID \(oldPeerID) to \(peerID) (fingerprint match)", category: .session)
-                    } else if currentFingerprint == nil || oldFingerprint == nil {
-                        // Check if this chat contains messages with this sender by nickname
-                        let isRelevantChat = recentMessages.contains { msg in
-                            (msg.sender == senderNickname && msg.sender != nickname) ||
-                            (msg.sender == nickname && msg.recipientNickname == senderNickname)
-                        }
-                        
-                        if isRelevantChat {
-                            migratedMessages.append(contentsOf: recentMessages)
-                            
-                            // Only remove if all messages were migrated
-                            if recentMessages.count == messages.count {
-                                oldPeerIDsToRemove.append(oldPeerID)
-                            }
-                            
-                            SecureLogger.warning("📦 Migrating \(recentMessages.count) recent messages from old peer ID \(oldPeerID) to \(peerID) (nickname match)", category: .session)
-                        }
-                    }
-                }
-            }
-            
-            // Remove old peer ID entries
-            if !oldPeerIDsToRemove.isEmpty {
-                // Track if we need to update selectedPrivateChatPeer
-                let needsSelectedUpdate = oldPeerIDsToRemove.contains { selectedPrivateChatPeer == $0 }
-                
-                // Directly modify privateChats to minimize UI disruption
-                for oldPeerID in oldPeerIDsToRemove {
-                    privateChats.removeValue(forKey: oldPeerID)
-                    unreadPrivateMessages.remove(oldPeerID)
-                }
-                
-                // Add or update messages for the new peer ID
-                if var existingMessages = privateChats[peerID] {
-                    // Merge with existing messages, replace-by-id semantics
-                    for msg in migratedMessages {
-                        if let i = existingMessages.firstIndex(where: { $0.id == msg.id }) {
-                            existingMessages[i] = msg
-                        } else {
-                            existingMessages.append(msg)
-                        }
-                    }
-                    existingMessages.sort { $0.timestamp < $1.timestamp }
-                    privateChats[peerID] = existingMessages
-                } else {
-                    // Initialize with migrated messages
-                    privateChats[peerID] = migratedMessages
-                }
-                privateChatManager.sanitizeChat(for: peerID)
-                
-                // Update selectedPrivateChatPeer if it was pointing to an old ID
-                if needsSelectedUpdate {
-                    selectedPrivateChatPeer = peerID
-                    SecureLogger.info("📱 Updated selectedPrivateChatPeer from old ID to \(peerID) during migration", category: .session)
-                }
-            }
-        }
-    }
-    
-    /// Handle incoming private message
-    @MainActor
-    private func handlePrivateMessage(_ message: BitchatMessage) {
-        SecureLogger.debug("📥 handlePrivateMessage called for message from \(message.sender)", category: .session)
-        let senderPeerID = message.senderPeerID ?? getPeerIDForNickname(message.sender)
-        
-        guard let peerID = senderPeerID else { 
-            SecureLogger.warning("⚠️ Could not get peer ID for sender \(message.sender)", category: .session)
-            return 
-        }
-        
-        // Check if this is a favorite/unfavorite notification
-        if message.content.hasPrefix("[FAVORITED]") || message.content.hasPrefix("[UNFAVORITED]") {
-            handleFavoriteNotificationFromMesh(message.content, from: peerID, senderNickname: message.sender)
-            return  // Don't store as a regular message
-        }
-        
-        // Migrate chats if needed
-        migratePrivateChatsIfNeeded(for: peerID, senderNickname: message.sender)
-        
-        // IMPORTANT: Also consolidate messages from stable Noise key if this is an ephemeral peer
-        // This ensures Nostr messages appear in BLE chats
-        if peerID.id.count == 16 {  // This is an ephemeral peer ID (8 bytes = 16 hex chars)
-            if let peer = unifiedPeerService.getPeer(by: peerID) {
-                let stableKeyHex = PeerID(hexData: peer.noisePublicKey)
-                
-                // If we have messages stored under the stable key, merge them
-                if stableKeyHex != peerID, let nostrMessages = privateChats[stableKeyHex], !nostrMessages.isEmpty {
-                    // Merge messages from stable key into ephemeral peer ID storage
-                    if privateChats[peerID] == nil {
-                        privateChats[peerID] = []
-                    }
-                    
-                    // Add any messages that aren't already in the ephemeral storage
-                    let existingMessageIds = Set(privateChats[peerID]?.map { $0.id } ?? [])
-                    for nostrMessage in nostrMessages {
-                        if !existingMessageIds.contains(nostrMessage.id) {
-                            privateChats[peerID]?.append(nostrMessage)
-                        }
-                    }
-                    
-                    // Sort by timestamp
-                    privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                    
-                    // Clean up the stable key storage to avoid duplication
-                    privateChats.removeValue(forKey: stableKeyHex)
-                    
-                    SecureLogger.info("📥 Consolidated \(nostrMessages.count) Nostr messages from stable key to ephemeral peer \(peerID)", category: .session)
-                }
-            }
-        }
-        
-        // Initialize chat if needed
-        if privateChats[peerID] == nil {
-            var chats = privateChats
-            chats[peerID] = []
-            privateChats = chats
-        }
-        
-        // Fix delivery status for incoming messages
-        var messageToStore = message
-        if message.sender != nickname {
-            if messageToStore.deliveryStatus == nil || messageToStore.deliveryStatus == .sending {
-                messageToStore.deliveryStatus = .delivered(to: nickname, at: Date())
-            }
-        }
-        
-        // Process action messages
-        messageToStore = processActionMessage(messageToStore)
-        
-        // Store message
-        var chats = privateChats
-        chats[peerID]?.append(messageToStore)
-        privateChats = chats
-        
-        // UI updates via @Published reassignment above
-        
-        // Handle fingerprint-based chat updates
-        if let chatFingerprint = selectedPrivateChatFingerprint,
-           let senderFingerprint = peerIDToPublicKeyFingerprint[peerID],
-           chatFingerprint == senderFingerprint && selectedPrivateChatPeer != peerID {
-            selectedPrivateChatPeer = peerID
-        }
-        
-        updatePrivateChatPeerIfNeeded()
-        
-        // Handle notifications and read receipts
-        // Check if we should send notification (only for truly unread and recent messages)
-        if selectedPrivateChatPeer != peerID {
-            unreadPrivateMessages.insert(peerID)
-            // Avoid notifying for messages that have been marked read already (resubscribe/dup cases)
-            if !sentReadReceipts.contains(message.id) {
-                NotificationService.shared.sendPrivateMessageNotification(
-                    from: message.sender,
-                    message: message.content,
-                    peerID: peerID
-                )
-            }
-        } else {
-            // User is viewing this chat - no notification needed
-            unreadPrivateMessages.remove(peerID)
-            
-            // Also clean up any old peer IDs from unread set that no longer exist
-            // This prevents stale unread indicators
-            cleanupStaleUnreadPeerIDs()
-            
-            // Send read receipt if needed
-            if !sentReadReceipts.contains(message.id) {
-                let receipt = ReadReceipt(
-                    originalMessageID: message.id,
-                    readerID: meshService.myPeerID,
-                    readerNickname: nickname
-                )
-                
-                let recipientID = message.senderPeerID ?? peerID
-                
-                Task { @MainActor in
-                    var originalTransport: String? = nil
-                    if let noiseKey = Data(hexString: recipientID.id),
-                       let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey),
-                       favoriteStatus.peerNostrPublicKey != nil,
-                       self.meshService.peerNickname(peerID: recipientID) == nil {
-                        originalTransport = "nostr"
-                    }
-                    
-                    self.sendReadReceipt(receipt, to: recipientID, originalTransport: originalTransport)
-                }
-                sentReadReceipts.insert(message.id)
-            }
-            
-            // Mark other messages as read
-            DispatchQueue.main.asyncAfter(deadline: .now() + TransportConfig.uiReadReceiptRetryShortSeconds) { [weak self] in
-                self?.markPrivateMessagesAsRead(from: peerID)
-            }
-        }
-    }
+
     
     /// Handle incoming public message
     @MainActor
-    private func handlePublicMessage(_ message: BitchatMessage) {
+    func handlePublicMessage(_ message: BitchatMessage) {
         let finalMessage = processActionMessage(message)
 
         // Drop if sender is blocked (covers geohash via Nostr pubkey mapping)
@@ -5613,10 +3766,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
     }
     
-    /// Check for mentions and send notifications
-    
-private func checkForMentions(_ message: BitchatMessage) {
-    // Determine our acceptable mention token. If any connected peer shares our nickname,
+        /// Check for mentions and send notifications
+        
+        func checkForMentions(_ message: BitchatMessage) {    // Determine our acceptable mention token. If any connected peer shares our nickname,
     // require the disambiguated form '<nickname>#<peerIDprefix>' to trigger.
     var myTokens: Set<String> = [nickname]
     let meshPeers = meshService.getPeerNicknames()
@@ -5633,9 +3785,8 @@ private func checkForMentions(_ message: BitchatMessage) {
     }
 }
 
-/// Send haptic feedback for special messages (iOS only)
-    private func sendHapticFeedback(for message: BitchatMessage) {
-        #if os(iOS)
+    /// Send haptic feedback for special messages (iOS only)
+    func sendHapticFeedback(for message: BitchatMessage) {        #if os(iOS)
         guard UIApplication.shared.applicationState == .active else { return }
         
         // Build acceptable target tokens: base nickname and, if in a location channel, nickname with '#abcd'

@@ -120,7 +120,7 @@ struct ChatViewModelReceivingTests {
 
     @Test @MainActor
     func didReceiveMessage_callsDelegate() async {
-        let (viewModel, transport) = makeTestableViewModel()
+        let (_, transport) = makeTestableViewModel()
 
         let message = BitchatMessage(
             id: "msg-001",
