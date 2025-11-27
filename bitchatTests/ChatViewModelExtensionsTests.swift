@@ -206,16 +206,6 @@ struct ChatViewModelPrivateChatExtensionTests {
         viewModel.nostrKeyMapping[blockedPeerID] = hexPubkey
         viewModel.identityManager.setNostrBlocked(hexPubkey, isBlocked: true)
         
-        let message = BitchatMessage(
-            id: "msg-blocked",
-            sender: "BlockedUser",
-            content: "Spam",
-            timestamp: Date(),
-            isRelay: false,
-            isPrivate: true,
-            senderPeerID: blockedPeerID
-        )
-        
         // Force isGeoChat/isGeoDM check to be true by setting prefix?
         // Or ensure the logic covers it.
         // The logic is:
