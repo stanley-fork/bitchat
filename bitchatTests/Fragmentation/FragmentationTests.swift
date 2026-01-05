@@ -263,6 +263,13 @@ extension FragmentationTests {
                 group.addTask {
                     await withCheckedContinuation { continuation in
                         self.lock.lock()
+                        // Recheck count after acquiring lock to avoid race condition
+                        // where message arrives between initial check and continuation install
+                        if self._publicMessages.count >= count {
+                            self.lock.unlock()
+                            continuation.resume()
+                            return
+                        }
                         self.publicMessageContinuation = continuation
                         self.lock.unlock()
                     }
@@ -290,6 +297,13 @@ extension FragmentationTests {
                 group.addTask {
                     await withCheckedContinuation { continuation in
                         self.lock.lock()
+                        // Recheck count after acquiring lock to avoid race condition
+                        // where message arrives between initial check and continuation install
+                        if self._receivedMessages.count >= count {
+                            self.lock.unlock()
+                            continuation.resume()
+                            return
+                        }
                         self.receivedMessageContinuation = continuation
                         self.lock.unlock()
                     }
