@@ -184,8 +184,8 @@ struct BinaryProtocol {
         if version == 2 && payloadDataSize > Int(UInt32.max) { return nil }
 
         guard let headerSize = headerSize(for: version) else { return nil }
-        let estimatedHeader = headerSize + senderIDSize + (packet.recipientID == nil ? 0 : recipientIDSize)
-        let estimatedPayload = payloadDataSize + routeLength
+        let estimatedHeader = headerSize + senderIDSize + (packet.recipientID == nil ? 0 : recipientIDSize) + routeLength
+        let estimatedPayload = payloadDataSize
         let estimatedSignature = (packet.signature == nil ? 0 : signatureSize)
         var data = Data()
         data.reserveCapacity(estimatedHeader + estimatedPayload + estimatedSignature + 255)
