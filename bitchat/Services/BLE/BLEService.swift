@@ -731,8 +731,6 @@ final class BLEService: NSObject {
                 version: 2
             )
 
-            self.applyRouteIfAvailable(&packet, to: peerID)
-
             if let signed = self.noiseService.signPacket(packet) {
                 packet = signed
             }
@@ -761,7 +759,6 @@ final class BLEService: NSObject {
                     signature: nil,
                     ttl: messageTTL
                 )
-                applyRouteIfAvailable(&packet, to: peerID)
                 broadcastPacket(packet)
             } catch {
                 SecureLogger.error("Failed to send read receipt: \(error)")
@@ -780,21 +777,30 @@ final class BLEService: NSObject {
     // MARK: - Packet Broadcasting
     
     private func broadcastPacket(_ packet: BitchatPacket, transferId: String? = nil) {
+        // Apply route if recipient exists (centralized route application)
+        let packetToSend: BitchatPacket
+        if let recipientID = packet.recipientID,
+           let recipientPeerID = PeerID(hexData: recipientID) {
+            packetToSend = applyRouteIfAvailable(packet, to: recipientPeerID)
+        } else {
+            packetToSend = packet
+        }
+        
         // Encode once using a small per-type padding policy, then delegate by type
-        let padForBLE = padPolicy(for: packet.type)
-        if packet.type == MessageType.fileTransfer.rawValue {
-            sendFragmentedPacket(packet, pad: padForBLE, maxChunk: nil, directedOnlyPeer: nil, transferId: transferId)
+        let padForBLE = padPolicy(for: packetToSend.type)
+        if packetToSend.type == MessageType.fileTransfer.rawValue {
+            sendFragmentedPacket(packetToSend, pad: padForBLE, maxChunk: nil, directedOnlyPeer: nil, transferId: transferId)
             return
         }
-        guard let data = packet.toBinaryData(padding: padForBLE) else {
+        guard let data = packetToSend.toBinaryData(padding: padForBLE) else {
             SecureLogger.error("❌ Failed to convert packet to binary data", category: .session)
             return
         }
-        if packet.type == MessageType.noiseEncrypted.rawValue {
-            sendEncrypted(packet, data: data, pad: padForBLE)
+        if packetToSend.type == MessageType.noiseEncrypted.rawValue {
+            sendEncrypted(packetToSend, data: data, pad: padForBLE)
             return
         }
-        sendGenericBroadcast(packet, data: data, pad: padForBLE)
+        sendGenericBroadcast(packetToSend, data: data, pad: padForBLE)
     }
 
     // MARK: - Broadcast helpers (single responsibility)
@@ -1243,7 +1249,6 @@ final class BLEService: NSObject {
                     signature: nil,
                     ttl: messageTTL
                 )
-                applyRouteIfAvailable(&packet, to: peerID)
                 broadcastPacket(packet)
             } catch {
                 SecureLogger.error("Failed to send delivery ACK: \(error)")
@@ -2459,10 +2464,23 @@ extension BLEService {
         meshTopology.computeRoute(from: myPeerIDData, to: routingData(for: peerID))
     }
 
-    private func applyRouteIfAvailable(_ packet: inout BitchatPacket, to recipient: PeerID) {
-        guard let route = computeRoute(to: recipient), route.count >= 2 else { return }
-        packet.route = route
+    private func applyRouteIfAvailable(_ packet: BitchatPacket, to recipient: PeerID) -> BitchatPacket {
+        guard let route = computeRoute(to: recipient), route.count >= 2 else {
+            return packet
+        }
         meshTopology.recordRoute(route)
+        // Return new packet with route applied and version upgraded to 2
+        return BitchatPacket(
+            type: packet.type,
+            senderID: packet.senderID,
+            recipientID: packet.recipientID,
+            timestamp: packet.timestamp,
+            payload: packet.payload,
+            signature: packet.signature,
+            ttl: packet.ttl,
+            version: 2,
+            route: route
+        )
     }
 
     private func routingPeer(from data: Data) -> PeerID? {
@@ -2556,7 +2574,6 @@ extension BLEService {
                 signature: nil,
                 ttl: messageTTL
             )
-            applyRouteIfAvailable(&packet, to: peerID)
             broadcastPacket(packet)
         } catch {
             SecureLogger.error("Failed to send verification payload: \(error)")
@@ -2784,7 +2801,6 @@ extension BLEService {
                     signature: nil,
                     ttl: messageTTL
                 )
-                applyRouteIfAvailable(&packet, to: recipientID)
                 
                 broadcastPacket(packet)
                 
@@ -2833,7 +2849,6 @@ extension BLEService {
                 signature: nil,
                 ttl: messageTTL
             )
-            applyRouteIfAvailable(&packet, to: peerID)
             broadcastPacket(packet)
         } catch {
             SecureLogger.error("Failed to initiate handshake: \(error)")
@@ -2876,7 +2891,6 @@ extension BLEService {
                     signature: nil,
                     ttl: messageTTL
                 )
-                applyRouteIfAvailable(&packet, to: peerID)
 
                 // We're already on messageQueue from the callback
                 broadcastPacket(packet)
@@ -3692,7 +3706,6 @@ extension BLEService {
                         signature: nil,
                         ttl: messageTTL
                     )
-                    applyRouteIfAvailable(&responsePacket, to: peerID)
                     // We're on messageQueue from delegate callback
                     broadcastPacket(responsePacket)
                 }
