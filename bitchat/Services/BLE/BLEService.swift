@@ -2465,22 +2465,28 @@ extension BLEService {
     }
 
     private func applyRouteIfAvailable(_ packet: BitchatPacket, to recipient: PeerID) -> BitchatPacket {
-        guard let route = computeRoute(to: recipient), route.count >= 2 else {
+        guard let route = computeRoute(to: recipient), route.count >= 1 else {
             return packet
         }
         meshTopology.recordRoute(route)
-        // Return new packet with route applied and version upgraded to 2
-        return BitchatPacket(
+        // Create new packet with route applied and version upgraded to 2
+        let routedPacket = BitchatPacket(
             type: packet.type,
             senderID: packet.senderID,
             recipientID: packet.recipientID,
             timestamp: packet.timestamp,
             payload: packet.payload,
-            signature: packet.signature,
+            signature: nil, // Will be re-signed below
             ttl: packet.ttl,
             version: 2,
             route: route
         )
+        // Re-sign the packet since route and version changed
+        guard let signedPacket = noiseService.signPacket(routedPacket) else {
+            SecureLogger.error("❌ Failed to re-sign packet with route", category: .security)
+            return packet // Return original packet if signing fails
+        }
+        return signedPacket
     }
 
     private func routingPeer(from data: Data) -> PeerID? {
@@ -2490,16 +2496,43 @@ extension BLEService {
     private func forwardAlongRouteIfNeeded(_ packet: BitchatPacket) -> Bool {
         guard let route = packet.route, !route.isEmpty else { return false }
         let myRoutingData = routingData(for: myPeerID) ?? (myPeerIDData.isEmpty ? nil : myPeerIDData)
-        guard let selfData = myRoutingData,
-              let index = route.firstIndex(of: selfData) else { return false }
-
-        // No further hops: respect explicit route termination
-        if index == route.count - 1 {
+        guard let selfData = myRoutingData else { return false }
+        
+        // Route contains only intermediate hops (start and end excluded)
+        // If we're not in the route, we're the sender - forward to first hop
+        guard let index = route.firstIndex(of: selfData) else {
+            // We're the sender, forward to first intermediate hop
+            guard packet.ttl > 1 else { return true }
+            let firstHopData = route[0]
+            guard let nextPeer = routingPeer(from: firstHopData),
+                  isPeerConnected(nextPeer) else {
+                return false
+            }
+            registerDirectLink(with: nextPeer)
+            var relayPacket = packet
+            relayPacket.ttl = packet.ttl - 1
+            sendPacketDirected(relayPacket, to: nextPeer)
             return true
         }
 
-        guard packet.ttl > 1 else { return true }
+        // We're an intermediate node in the route
+        // If we're the last intermediate hop, forward to destination
+        if index == route.count - 1 {
+            guard packet.ttl > 1 else { return true }
+            guard let recipientID = packet.recipientID,
+                  let destinationPeer = PeerID(hexData: recipientID),
+                  isPeerConnected(destinationPeer) else {
+                return false
+            }
+            registerDirectLink(with: destinationPeer)
+            var relayPacket = packet
+            relayPacket.ttl = packet.ttl - 1
+            sendPacketDirected(relayPacket, to: destinationPeer)
+            return true
+        }
 
+        // Forward to next intermediate hop
+        guard packet.ttl > 1 else { return true }
         let nextHopData = route[index + 1]
         guard let nextPeer = routingPeer(from: nextHopData),
               isPeerConnected(nextPeer) else {
