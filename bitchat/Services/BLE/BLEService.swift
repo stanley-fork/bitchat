@@ -779,8 +779,7 @@ final class BLEService: NSObject {
     private func broadcastPacket(_ packet: BitchatPacket, transferId: String? = nil) {
         // Apply route if recipient exists (centralized route application)
         let packetToSend: BitchatPacket
-        if let recipientID = packet.recipientID,
-           let recipientPeerID = PeerID(hexData: recipientID) {
+        if let recipientPeerID = PeerID(hexData: packet.recipientID) {
             packetToSend = applyRouteIfAvailable(packet, to: recipientPeerID)
         } else {
             packetToSend = packet
@@ -2519,8 +2518,7 @@ extension BLEService {
         // If we're the last intermediate hop, forward to destination
         if index == route.count - 1 {
             guard packet.ttl > 1 else { return true }
-            guard let recipientID = packet.recipientID,
-                  let destinationPeer = PeerID(hexData: recipientID),
+            guard let destinationPeer = PeerID(hexData: packet.recipientID),
                   isPeerConnected(destinationPeer) else {
                 return false
             }

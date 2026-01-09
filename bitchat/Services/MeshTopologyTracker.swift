@@ -76,7 +76,7 @@ final class MeshTopologyTracker {
 
     func computeRoute(from start: Data?, to goal: Data?, maxHops: Int = 10) -> [Data]? {
         guard let source = sanitize(start), let target = sanitize(goal) else { return nil }
-        if source == target { return nil } // Direct connection, no intermediate hops
+        if source == target { return [] } // Direct connection, no intermediate hops
 
         let graph = queue.sync { adjacency }
         guard graph[source] != nil, graph[target] != nil else { return nil }
@@ -97,7 +97,7 @@ final class MeshTopologyTracker {
                 nextPath.append(neighbor)
                 if neighbor == target {
                     // Remove start and end, return only intermediate hops
-                    guard nextPath.count >= 2 else { return nil }
+                    guard nextPath.count >= 2 else { return [] }
                     return Array(nextPath.dropFirst().dropLast())
                 }
                 if nextPath.count <= maxHops {
