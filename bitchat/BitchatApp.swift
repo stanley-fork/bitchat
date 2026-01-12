@@ -63,6 +63,10 @@ struct BitchatApp: App {
 
                     // Initialize network activation policy; will start Tor/Nostr only when allowed
                     NetworkActivationService.shared.start()
+                    
+                    // Start presence service (will wait for Tor readiness)
+                    GeohashPresenceService.shared.start()
+
                     // Check for shared content
                     checkForSharedContent()
                 }
