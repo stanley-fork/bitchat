@@ -52,6 +52,15 @@ final class BLEService: NSObject {
     // 2. BLE Centrals (when acting as peripheral)
     private var subscribedCentrals: [CBCentral] = []
     private var centralToPeerID: [String: PeerID] = [:]  // Central UUID -> Peer ID mapping
+
+    // BCH-01-004: Rate-limiting for subscription-triggered announces
+    // Tracks subscription attempts per central to prevent enumeration attacks
+    private struct SubscriptionRateLimitState {
+        var lastAnnounceTime: Date
+        var attemptCount: Int
+        var currentBackoffSeconds: TimeInterval
+    }
+    private var centralSubscriptionRateLimits: [String: SubscriptionRateLimitState] = [:]  // Central UUID -> rate limit state
     
     // 3. Peer Information (single source of truth)
     private struct PeerInfo {
@@ -575,6 +584,9 @@ final class BLEService: NSObject {
         subscribedCentrals.removeAll()
         centralToPeerID.removeAll()
         meshTopology.reset()
+
+        // BCH-01-004: Clear rate-limit state
+        centralSubscriptionRateLimits.removeAll()
     }
     
     // MARK: Connectivity and peers
@@ -2179,15 +2191,83 @@ extension BLEService: CBPeripheralManagerDelegate {
     }
     
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        SecureLogger.debug("📥 Central subscribed: \(central.identifier.uuidString)", category: .session)
+        let centralUUID = central.identifier.uuidString
+        SecureLogger.debug("📥 Central subscribed: \(centralUUID)", category: .session)
         subscribedCentrals.append(central)
-        // Send announce to the newly subscribed central after a small delay to avoid overwhelming
+
+        // BCH-01-004: Rate-limit subscription-triggered announces to prevent enumeration attacks
+        let now = Date()
+        var state = centralSubscriptionRateLimits[centralUUID]
+
+        // Clean up stale entries periodically
+        cleanupStaleSubscriptionRateLimits()
+
+        // Check if this central is rate-limited
+        if let existingState = state {
+            let timeSinceLastAnnounce = now.timeIntervalSince(existingState.lastAnnounceTime)
+
+            // If within backoff period, skip the announce
+            if timeSinceLastAnnounce < existingState.currentBackoffSeconds {
+                SecureLogger.warning("🛡️ BCH-01-004: Rate-limited announce for central \(centralUUID.prefix(8))... (backoff: \(Int(existingState.currentBackoffSeconds))s, attempts: \(existingState.attemptCount))", category: .security)
+
+                // Increment attempt count and increase backoff
+                let newAttemptCount = existingState.attemptCount + 1
+                let newBackoff = min(
+                    existingState.currentBackoffSeconds * TransportConfig.bleSubscriptionRateLimitBackoffFactor,
+                    TransportConfig.bleSubscriptionRateLimitMaxBackoffSeconds
+                )
+                centralSubscriptionRateLimits[centralUUID] = SubscriptionRateLimitState(
+                    lastAnnounceTime: existingState.lastAnnounceTime,
+                    attemptCount: newAttemptCount,
+                    currentBackoffSeconds: newBackoff
+                )
+
+                // If too many rapid attempts, this is likely an enumeration attack - don't respond
+                if newAttemptCount >= TransportConfig.bleSubscriptionRateLimitMaxAttempts {
+                    SecureLogger.warning("🚨 BCH-01-004: Possible enumeration attack from central \(centralUUID.prefix(8))... - suppressing announce", category: .security)
+                    return
+                }
+
+                // Still flush directed packets and rebroadcast for legitimate mesh operation
+                messageQueue.asyncAfter(deadline: .now() + TransportConfig.blePostAnnounceDelaySeconds) { [weak self] in
+                    self?.flushDirectedSpool()
+                    self?.rebroadcastRecentAnnounces()
+                }
+                return
+            }
+
+            // Outside backoff period - allow announce but track it
+            state = SubscriptionRateLimitState(
+                lastAnnounceTime: now,
+                attemptCount: 1,
+                currentBackoffSeconds: TransportConfig.bleSubscriptionRateLimitMinSeconds
+            )
+        } else {
+            // First subscription from this central - track it
+            state = SubscriptionRateLimitState(
+                lastAnnounceTime: now,
+                attemptCount: 1,
+                currentBackoffSeconds: TransportConfig.bleSubscriptionRateLimitMinSeconds
+            )
+        }
+        centralSubscriptionRateLimits[centralUUID] = state
+
+        // Send announce to the newly subscribed central after a small delay
         messageQueue.asyncAfter(deadline: .now() + TransportConfig.blePostAnnounceDelaySeconds) { [weak self] in
             self?.sendAnnounce(forceSend: true)
             // Flush any spooled directed packets now that we have a central subscribed
             self?.flushDirectedSpool()
             // Rebroadcast a couple of recent announces to seed the new link
             self?.rebroadcastRecentAnnounces()
+        }
+    }
+
+    /// BCH-01-004: Clean up stale rate-limit entries to prevent memory growth
+    private func cleanupStaleSubscriptionRateLimits() {
+        let now = Date()
+        let windowSeconds = TransportConfig.bleSubscriptionRateLimitWindowSeconds
+        centralSubscriptionRateLimits = centralSubscriptionRateLimits.filter { _, state in
+            now.timeIntervalSince(state.lastAnnounceTime) < windowSeconds
         }
     }
     
