@@ -833,16 +833,20 @@ final class NoiseHandshakeState {
         return currentPattern >= messagePatterns.count
     }
     
-    func getTransportCiphers(useExtractedNonce: Bool) throws -> (send: NoiseCipherState, receive: NoiseCipherState) {
+    func getTransportCiphers(useExtractedNonce: Bool) throws -> (send: NoiseCipherState, receive: NoiseCipherState, handshakeHash: Data) {
         guard isHandshakeComplete() else {
             throw NoiseError.handshakeNotComplete
         }
-        
+
+        // BCH-01-010: Capture handshake hash BEFORE split() clears symmetric state
+        let finalHandshakeHash = symmetricState.getHandshakeHash()
+
         let (c1, c2) = symmetricState.split(useExtractedNonce: useExtractedNonce)
-        
+
         // Initiator uses c1 for sending, c2 for receiving
         // Responder uses c2 for sending, c1 for receiving
-        return role == .initiator ? (c1, c2) : (c2, c1)
+        let ciphers = role == .initiator ? (c1, c2) : (c2, c1)
+        return (send: ciphers.0, receive: ciphers.1, handshakeHash: finalHandshakeHash)
     }
     
     func getRemoteStaticPublicKey() -> Curve25519.KeyAgreement.PublicKey? {
