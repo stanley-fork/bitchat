@@ -2055,13 +2055,42 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
             } catch {
                 SecureLogger.error("Failed to clear media files during panic: \(error)", category: .session)
             }
+
+            // BCH-01-013: Clear iOS app switcher snapshots
+            // These are stored in Library/Caches/Snapshots/<bundle_id>/
+            #if os(iOS)
+            Self.clearAppSwitcherSnapshots()
+            #endif
         }
 
         // Force immediate UI update for panic mode
         // UI updates immediately - no flushing needed
 
     }
-    
+
+    /// BCH-01-013: Clear iOS app switcher snapshots during panic mode
+    /// iOS stores preview screenshots in Library/Caches/Snapshots/<bundle_id>/
+    /// These could reveal sensitive information visible in the app at the time
+    #if os(iOS)
+    private static func clearAppSwitcherSnapshots() {
+        do {
+            let cacheDir = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+            let snapshotsDir = cacheDir.appendingPathComponent("Snapshots", isDirectory: true)
+
+            // Clear all snapshots (iOS stores them in subdirectories by bundle ID and scene)
+            if FileManager.default.fileExists(atPath: snapshotsDir.path) {
+                let contents = try FileManager.default.contentsOfDirectory(at: snapshotsDir, includingPropertiesForKeys: nil)
+                for item in contents {
+                    try FileManager.default.removeItem(at: item)
+                }
+                SecureLogger.info("🗑️ Cleared app switcher snapshots during panic clear", category: .session)
+            }
+        } catch {
+            SecureLogger.error("Failed to clear app switcher snapshots: \(error)", category: .session)
+        }
+    }
+    #endif
+
     // MARK: - Autocomplete
     
     func updateAutocomplete(for text: String, cursorPosition: Int) {
