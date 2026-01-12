@@ -17,7 +17,7 @@ final class BLEService: NSObject {
     // MARK: - Constants
     
     #if DEBUG
-    static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C") // testnet
+    static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A") // testnet
     #else
     static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C") // mainnet
     #endif
@@ -1758,8 +1758,9 @@ func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeriph
                     peers[peerID] = info
                 }
             }
-            clearDirectLink(with: peerID)
+            refreshLocalTopology()
         }
+
         
         // Restart scanning with allow duplicates for faster rediscovery
         if centralManager?.state == .poweredOn {
@@ -2046,7 +2047,7 @@ extension BLEService: CBPeripheralDelegate {
                     peripherals[peripheralUUID] = state
                 }
                 peerToPeripheralUUID[senderID] = peripheralUUID
-                registerDirectLink(with: senderID)
+                refreshLocalTopology()
             }
 
             let msgID = makeMessageID(for: packet)
@@ -2213,7 +2214,7 @@ extension BLEService: CBPeripheralManagerDelegate {
             
             // Clean up mappings
             centralToPeerID.removeValue(forKey: centralUUID)
-            clearDirectLink(with: peerID)
+            refreshLocalTopology()
             
             // Update UI immediately
             notifyUI { [weak self] in
@@ -2332,7 +2333,7 @@ extension BLEService: CBPeripheralManagerDelegate {
                 if packet.type == MessageType.announce.rawValue {
                     if packet.ttl == messageTTL {
                         centralToPeerID[centralUUID] = senderID
-                        registerDirectLink(with: senderID)
+                        refreshLocalTopology()
                     }
                     // Record ingress link for last-hop suppression then process
                     let msgID = makeMessageID(for: packet)
@@ -2447,17 +2448,11 @@ extension BLEService {
         peerID.toShort().routingData
     }
 
-    private func registerDirectLink(with peerID: PeerID) {
-        meshTopology.recordDirectLink(between: myPeerIDData, and: routingData(for: peerID))
-    }
-
-    private func clearDirectLink(with peerID: PeerID) {
-        meshTopology.removeDirectLink(between: myPeerIDData, and: routingData(for: peerID))
-    }
-
-    private func registerRoute(_ route: [Data]?) {
-        guard let hops = route, !hops.isEmpty else { return }
-        meshTopology.recordRoute(hops)
+    private func refreshLocalTopology() {
+        let neighbors: [Data] = collectionsQueue.sync {
+            peers.values.filter { $0.isConnected }.compactMap { $0.peerID.routingData }
+        }
+        meshTopology.updateNeighbors(for: myPeerIDData, neighbors: neighbors)
     }
 
     private func computeRoute(to peerID: PeerID) -> [Data]? {
@@ -2468,7 +2463,6 @@ extension BLEService {
         guard let route = computeRoute(to: recipient), route.count >= 1 else {
             return packet
         }
-        meshTopology.recordRoute(route)
         // Create new packet with route applied and version upgraded to 2
         let routedPacket = BitchatPacket(
             type: packet.type,
@@ -2508,7 +2502,6 @@ extension BLEService {
                   isPeerConnected(nextPeer) else {
                 return false
             }
-            registerDirectLink(with: nextPeer)
             var relayPacket = packet
             relayPacket.ttl = packet.ttl - 1
             sendPacketDirected(relayPacket, to: nextPeer)
@@ -2523,7 +2516,6 @@ extension BLEService {
                   isPeerConnected(destinationPeer) else {
                 return false
             }
-            registerDirectLink(with: destinationPeer)
             var relayPacket = packet
             relayPacket.ttl = packet.ttl - 1
             sendPacketDirected(relayPacket, to: destinationPeer)
@@ -2538,7 +2530,6 @@ extension BLEService {
             return false
         }
 
-        registerDirectLink(with: nextPeer)
         var relayPacket = packet
         relayPacket.ttl = packet.ttl - 1
         sendPacketDirected(relayPacket, to: nextPeer)
@@ -3306,10 +3297,6 @@ extension BLEService {
             return
         }
 
-        registerRoute(packet.route)
-        if peerID != myPeerID && packet.ttl == messageTTL {
-            registerDirectLink(with: peerID)
-        }
         
         // Deduplication (thread-safe)
         let senderID = PeerID(hexData: packet.senderID)
@@ -3437,6 +3424,11 @@ extension BLEService {
         guard let announcement = AnnouncementPacket.decode(from: packet.payload) else {
             SecureLogger.error("❌ Failed to decode announce packet from \(peerID)", category: .session)
             return
+        }
+        
+        // Update topology with their claimed neighbors
+        if let neighbors = announcement.directNeighbors {
+            meshTopology.updateNeighbors(for: peerID.routingData, neighbors: neighbors)
         }
         
         // Verify that the sender's derived ID from the announced noise public key matches the packet senderID
@@ -4037,6 +4029,11 @@ extension BLEService {
                 self.delegate?.didUpdatePeerList(currentPeerIDs)
             }
         }
+        
+        // Refresh local topology to keep our own entry fresh and sync any changes
+        refreshLocalTopology()
+        // Prune stale topology nodes (using safe retention window)
+        meshTopology.prune(olderThan: 60.0)
     }
     
     private func performCleanup() {
