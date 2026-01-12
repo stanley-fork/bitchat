@@ -56,7 +56,8 @@ extension ChatViewModel {
     }
     
     func subscribeNostrEvent(_ event: NostrEvent) {
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue,
+        guard (event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue || 
+               event.kind == NostrProtocol.EventKind.geohashPresence.rawValue),
               !deduplicationService.hasProcessedNostrEvent(event.id)
         else {
             return
@@ -85,6 +86,11 @@ extension ChatViewModel {
 
         // Update participants last-seen for this pubkey
         participantTracker.recordParticipant(pubkeyHex: event.pubkey)
+        
+        // If presence heartbeat (Kind 20001), stop here - no content to display
+        if event.kind == NostrProtocol.EventKind.geohashPresence.rawValue {
+            return
+        }
         
         // Track teleported tag (only our format ["t","teleport"]) for icon state
         let hasTeleportTag = event.tags.contains(where: { tag in
@@ -239,8 +245,9 @@ extension ChatViewModel {
     }
     
     func handleNostrEvent(_ event: NostrEvent) {
-        // Only handle ephemeral kind 20000 with matching tag
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue else { return }
+        // Only handle ephemeral kind 20000 or presence kind 20001 with matching tag
+        guard (event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue ||
+               event.kind == NostrProtocol.EventKind.geohashPresence.rawValue) else { return }
         
         // Deduplicate
         if deduplicationService.hasProcessedNostrEvent(event.id) { return }
@@ -249,6 +256,11 @@ extension ChatViewModel {
         // Log incoming tags for diagnostics
         let tagSummary = event.tags.map { "[" + $0.joined(separator: ",") + "]" }.joined(separator: ",")
         SecureLogger.debug("GeoTeleport: recv pub=\(event.pubkey.prefix(8))… tags=\(tagSummary)", category: .session)
+        
+        // If this pubkey is blocked, skip mapping, participants, and timeline
+        if identityManager.isNostrBlocked(pubkeyHexLowercased: event.pubkey) {
+            return
+        }
         
         // Track teleport tag for participants – only our format ["t", "teleport"]
         let hasTeleportTag: Bool = event.tags.contains { tag in
@@ -273,6 +285,9 @@ extension ChatViewModel {
             }
         }
         
+        // Update participants last-seen for this pubkey
+        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
+
         // Skip only very recent self-echo from relay; include older self events for hydration
         if isSelf {
             let eventTime = Date(timeIntervalSince1970: TimeInterval(event.created_at))
@@ -287,17 +302,14 @@ extension ChatViewModel {
             geoNicknames[event.pubkey.lowercased()] = nick
         }
         
-        // If this pubkey is blocked, skip mapping, participants, and timeline
-        if identityManager.isNostrBlocked(pubkeyHexLowercased: event.pubkey) {
-            return
-        }
-        
         // Store mapping for geohash DM initiation
         nostrKeyMapping[PeerID(nostr_: event.pubkey)] = event.pubkey
         nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
         
-        // Update participants last-seen for this pubkey
-        participantTracker.recordParticipant(pubkeyHex: event.pubkey)
+        // If presence heartbeat (Kind 20001), stop here - no content to display
+        if event.kind == NostrProtocol.EventKind.geohashPresence.rawValue {
+            return
+        }
         
         let senderName = displayNameForNostrPubkey(event.pubkey)
         let content = event.content
@@ -464,7 +476,8 @@ extension ChatViewModel {
     }
     
     func subscribeNostrEvent(_ event: NostrEvent, gh: String) {
-        guard event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue else { return }
+        guard (event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue ||
+               event.kind == NostrProtocol.EventKind.geohashPresence.rawValue) else { return }
 
         // Compute current participant count (5-minute window) BEFORE updating with this event
         let existingCount = participantTracker.participantCount(for: gh)
