@@ -52,6 +52,15 @@ final class BLEService: NSObject {
     // 2. BLE Centrals (when acting as peripheral)
     private var subscribedCentrals: [CBCentral] = []
     private var centralToPeerID: [String: PeerID] = [:]  // Central UUID -> Peer ID mapping
+
+    // BCH-01-004: Rate-limiting for subscription-triggered announces
+    // Tracks subscription attempts per central to prevent enumeration attacks
+    private struct SubscriptionRateLimitState {
+        var lastAnnounceTime: Date
+        var attemptCount: Int
+        var currentBackoffSeconds: TimeInterval
+    }
+    private var centralSubscriptionRateLimits: [String: SubscriptionRateLimitState] = [:]  // Central UUID -> rate limit state
     
     // 3. Peer Information (single source of truth)
     private struct PeerInfo {
@@ -550,7 +559,7 @@ final class BLEService: NSObject {
     
     func emergencyDisconnectAll() {
         stopServices()
-        
+
         // Clear all sessions and peers
         let cancelledTransfers: [(id: String, items: [DispatchWorkItem])] = collectionsQueue.sync(flags: .barrier) {
             let entries = activeTransfers.map { ($0.key, $0.value.workItems) }
@@ -565,16 +574,19 @@ final class BLEService: NSObject {
             entry.items.forEach { $0.cancel() }
             TransferProgressManager.shared.cancel(id: entry.id)
         }
-        
+
         // Clear processed messages
         messageDeduplicator.reset()
-        
+
         // Clear peripheral references
         peripherals.removeAll()
         peerToPeripheralUUID.removeAll()
         subscribedCentrals.removeAll()
         centralToPeerID.removeAll()
         meshTopology.reset()
+
+        // BCH-01-004: Clear rate-limit state
+        centralSubscriptionRateLimits.removeAll()
     }
     
     // MARK: Connectivity and peers
@@ -716,7 +728,10 @@ final class BLEService: NSObject {
                 SecureLogger.error("❌ Failed to encode file packet for private send", category: .session)
                 return
             }
-            guard let recipientData = Data(hexString: peerID.id) else {
+            // Normalize to short form (SHA256-derived 16-hex) for wire protocol compatibility
+            // This ensures 64-hex Noise keys are converted to the canonical routing format
+            let targetID = peerID.toShort()
+            guard let recipientData = Data(hexString: targetID.id) else {
                 SecureLogger.error("❌ Invalid recipient peer ID for file transfer: \(peerID)", category: .session)
                 return
             }
@@ -751,7 +766,7 @@ final class BLEService: NSObject {
             SecureLogger.debug("📤 Sending READ receipt for message \(receipt.originalMessageID) to \(peerID)", category: .session)
             do {
                 let encrypted = try noiseService.encrypt(payload, for: peerID)
-                var packet = BitchatPacket(
+                let packet = BitchatPacket(
                     type: MessageType.noiseEncrypted.rawValue,
                     senderID: myPeerIDData,
                     recipientID: Data(hexString: peerID.id),
@@ -1155,6 +1170,9 @@ final class BLEService: NSObject {
             return
         }
 
+        // BCH-01-002: Enforce storage quota before saving
+        enforceIncomingFilesQuota(reservingBytes: filePacket.content.count)
+
         let fallbackExt = mime.defaultExtension
         let subdirectory: String
         switch mime.category {
@@ -1240,7 +1258,7 @@ final class BLEService: NSObject {
         if noiseService.hasEstablishedSession(with: peerID) {
             do {
                 let encrypted = try noiseService.encrypt(payload, for: peerID)
-                var packet = BitchatPacket(
+                let packet = BitchatPacket(
                     type: MessageType.noiseEncrypted.rawValue,
                     senderID: myPeerIDData,
                     recipientID: Data(hexString: peerID.id),
@@ -1387,6 +1405,72 @@ final class BLEService: NSObject {
         } catch {
             SecureLogger.error("❌ Failed to persist incoming media: \(error)", category: .session)
             return nil
+        }
+    }
+
+    // MARK: - Storage Quota Management (BCH-01-002)
+
+    /// Maximum total storage for incoming files (100 MB)
+    private static let incomingFilesQuota: Int64 = 100 * 1024 * 1024
+
+    /// Enforces storage quota for incoming files by deleting oldest files when quota is exceeded.
+    /// Call before saving a new incoming file.
+    private func enforceIncomingFilesQuota(reservingBytes: Int) {
+        do {
+            let base = try applicationFilesDirectory()
+            let incomingDirs = [
+                base.appendingPathComponent("voicenotes/incoming", isDirectory: true),
+                base.appendingPathComponent("images/incoming", isDirectory: true),
+                base.appendingPathComponent("files/incoming", isDirectory: true)
+            ]
+
+            // Gather all incoming files with their sizes and modification dates
+            var allFiles: [(url: URL, size: Int64, modified: Date)] = []
+            let fileManager = FileManager.default
+
+            for dir in incomingDirs {
+                guard fileManager.fileExists(atPath: dir.path) else { continue }
+                guard let contents = try? fileManager.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+
+                for fileURL in contents {
+                    guard let attrs = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                          let size = attrs.fileSize,
+                          let modified = attrs.contentModificationDate else { continue }
+                    allFiles.append((url: fileURL, size: Int64(size), modified: modified))
+                }
+            }
+
+            // Calculate current usage
+            let currentUsage = allFiles.reduce(0) { $0 + $1.size }
+            let targetUsage = Self.incomingFilesQuota - Int64(reservingBytes)
+
+            guard currentUsage > targetUsage else { return }
+
+            // Sort by modification date (oldest first) and delete until under quota
+            let sortedFiles = allFiles.sorted { $0.modified < $1.modified }
+            var freedSpace: Int64 = 0
+            let needToFree = currentUsage - targetUsage
+
+            for file in sortedFiles {
+                guard freedSpace < needToFree else { break }
+                do {
+                    try fileManager.removeItem(at: file.url)
+                    freedSpace += file.size
+                    SecureLogger.debug("🗑️ BCH-01-002: Deleted old incoming file to free space: \(file.url.lastPathComponent)", category: .security)
+                } catch {
+                    SecureLogger.warning("⚠️ Failed to delete old file for quota: \(error)", category: .security)
+                }
+            }
+
+            if freedSpace > 0 {
+                SecureLogger.info("📊 BCH-01-002: Freed \(ByteCountFormatter.string(fromByteCount: freedSpace, countStyle: .file)) to stay within incoming files quota", category: .security)
+            }
+        } catch {
+            SecureLogger.warning("⚠️ Could not enforce storage quota: \(error)", category: .security)
         }
     }
 
@@ -2179,15 +2263,85 @@ extension BLEService: CBPeripheralManagerDelegate {
     }
     
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        SecureLogger.debug("📥 Central subscribed: \(central.identifier.uuidString)", category: .session)
+        let centralUUID = central.identifier.uuidString
+        SecureLogger.debug("📥 Central subscribed: \(centralUUID)", category: .session)
         subscribedCentrals.append(central)
-        // Send announce to the newly subscribed central after a small delay to avoid overwhelming
+
+        // BCH-01-004: Rate-limit subscription-triggered announces to prevent enumeration attacks
+        let now = Date()
+        var state = centralSubscriptionRateLimits[centralUUID]
+
+        // Clean up stale entries periodically
+        cleanupStaleSubscriptionRateLimits()
+
+        // Check if this central is rate-limited
+        if let existingState = state {
+            let timeSinceLastAnnounce = now.timeIntervalSince(existingState.lastAnnounceTime)
+
+            // If within backoff period, skip the announce
+            if timeSinceLastAnnounce < existingState.currentBackoffSeconds {
+                SecureLogger.warning("🛡️ BCH-01-004: Rate-limited announce for central \(centralUUID.prefix(8))... (backoff: \(Int(existingState.currentBackoffSeconds))s, attempts: \(existingState.attemptCount))", category: .security)
+
+                // Increment attempt count and increase backoff
+                // Update lastAnnounceTime to 'now' so each blocked attempt extends the suppression window
+                // This prevents attackers from waiting out the backoff while spamming attempts
+                let newAttemptCount = existingState.attemptCount + 1
+                let newBackoff = min(
+                    existingState.currentBackoffSeconds * TransportConfig.bleSubscriptionRateLimitBackoffFactor,
+                    TransportConfig.bleSubscriptionRateLimitMaxBackoffSeconds
+                )
+                centralSubscriptionRateLimits[centralUUID] = SubscriptionRateLimitState(
+                    lastAnnounceTime: now,  // Reset timer on each blocked attempt
+                    attemptCount: newAttemptCount,
+                    currentBackoffSeconds: newBackoff
+                )
+
+                // If too many rapid attempts, this is likely an enumeration attack - don't respond
+                if newAttemptCount >= TransportConfig.bleSubscriptionRateLimitMaxAttempts {
+                    SecureLogger.warning("🚨 BCH-01-004: Possible enumeration attack from central \(centralUUID.prefix(8))... - suppressing announce", category: .security)
+                    return
+                }
+
+                // Still flush directed packets and rebroadcast for legitimate mesh operation
+                messageQueue.asyncAfter(deadline: .now() + TransportConfig.blePostAnnounceDelaySeconds) { [weak self] in
+                    self?.flushDirectedSpool()
+                    self?.rebroadcastRecentAnnounces()
+                }
+                return
+            }
+
+            // Outside backoff period - allow announce but track it
+            state = SubscriptionRateLimitState(
+                lastAnnounceTime: now,
+                attemptCount: 1,
+                currentBackoffSeconds: TransportConfig.bleSubscriptionRateLimitMinSeconds
+            )
+        } else {
+            // First subscription from this central - track it
+            state = SubscriptionRateLimitState(
+                lastAnnounceTime: now,
+                attemptCount: 1,
+                currentBackoffSeconds: TransportConfig.bleSubscriptionRateLimitMinSeconds
+            )
+        }
+        centralSubscriptionRateLimits[centralUUID] = state
+
+        // Send announce to the newly subscribed central after a small delay
         messageQueue.asyncAfter(deadline: .now() + TransportConfig.blePostAnnounceDelaySeconds) { [weak self] in
             self?.sendAnnounce(forceSend: true)
             // Flush any spooled directed packets now that we have a central subscribed
             self?.flushDirectedSpool()
             // Rebroadcast a couple of recent announces to seed the new link
             self?.rebroadcastRecentAnnounces()
+        }
+    }
+
+    /// BCH-01-004: Clean up stale rate-limit entries to prevent memory growth
+    private func cleanupStaleSubscriptionRateLimits() {
+        let now = Date()
+        let windowSeconds = TransportConfig.bleSubscriptionRateLimitWindowSeconds
+        centralSubscriptionRateLimits = centralSubscriptionRateLimits.filter { _, state in
+            now.timeIntervalSince(state.lastAnnounceTime) < windowSeconds
         }
     }
     
@@ -2588,7 +2742,7 @@ extension BLEService {
         }
         do {
             let encrypted = try noiseService.encrypt(typedPayload, for: peerID)
-            var packet = BitchatPacket(
+            let packet = BitchatPacket(
                 type: MessageType.noiseEncrypted.rawValue,
                 senderID: myPeerIDData,
                 recipientID: Data(hexString: peerID.id),
@@ -2814,8 +2968,8 @@ extension BLEService {
                         recipientData.append(byte)
                     }
                 }
-                
-                var packet = BitchatPacket(
+
+                let packet = BitchatPacket(
                     type: MessageType.noiseEncrypted.rawValue,
                     senderID: myPeerIDData,
                     recipientID: recipientData,
@@ -2863,7 +3017,7 @@ extension BLEService {
             let handshakeData = try noiseService.initiateHandshake(with: peerID)
             
             // Send handshake init
-            var packet = BitchatPacket(
+            let packet = BitchatPacket(
                 type: MessageType.noiseHandshake.rawValue,
                 senderID: myPeerIDData,
                 recipientID: Data(hexString: peerID.id),
@@ -2905,7 +3059,7 @@ extension BLEService {
 
                 let encrypted = try noiseService.encrypt(messagePayload, for: peerID)
 
-                var packet = BitchatPacket(
+                let packet = BitchatPacket(
                     type: MessageType.noiseEncrypted.rawValue,
                     senderID: myPeerIDData,
                     recipientID: Data(hexString: peerID.id),
@@ -3426,11 +3580,6 @@ extension BLEService {
             return
         }
         
-        // Update topology with their claimed neighbors
-        if let neighbors = announcement.directNeighbors {
-            meshTopology.updateNeighbors(for: peerID.routingData, neighbors: neighbors)
-        }
-        
         // Verify that the sender's derived ID from the announced noise public key matches the packet senderID
         // This helps detect relayed or spoofed announces. Only warn in release; assert in debug.
         let derivedFromKey = PeerID(publicKey: announcement.noisePublicKey)
@@ -3503,6 +3652,9 @@ extension BLEService {
             // Require verified announce; ignore otherwise (no backward compatibility)
             if !verified {
                 SecureLogger.warning("❌ Ignoring unverified announce from \(peerID.id.prefix(8))…", category: .security)
+                // Reset flags to prevent post-barrier code from acting on unverified announces
+                isNewPeer = false
+                isReconnectedPeer = false
                 return
             }
 
@@ -3548,6 +3700,11 @@ extension BLEService {
                     SecureLogger.debug("🔄 Peer \(peerID) changed nickname: \(existingPeer?.nickname ?? "Unknown") -> \(announcement.nickname)", category: .session)
                 }
             }
+        }
+
+        // Update topology with verified neighbor claims (only for authenticated announces)
+        if verifiedAnnounce, let neighbors = announcement.directNeighbors {
+            meshTopology.updateNeighbors(for: peerID.routingData, neighbors: neighbors)
         }
 
         // Persist cryptographic identity and signing key for robust offline verification
@@ -3736,7 +3893,7 @@ extension BLEService {
             do {
                 if let response = try noiseService.processHandshakeMessage(from: peerID, message: packet.payload) {
                     // Send response
-                    var responsePacket = BitchatPacket(
+                    let responsePacket = BitchatPacket(
                         type: MessageType.noiseHandshake.rawValue,
                         senderID: myPeerIDData,
                         recipientID: Data(hexString: peerID.id),

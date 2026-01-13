@@ -129,7 +129,9 @@ struct NoiseProtocolName {
 /// - Warning: Nonce reuse would be catastrophic for security
 final class NoiseCipherState {
     // Constants for replay protection
-    private static let NONCE_SIZE_BYTES = 4
+    // BCH-01-010: Use full 8-byte nonces per Noise Protocol specification
+    // This provides 2^64 nonce space instead of limited 2^32
+    private static let NONCE_SIZE_BYTES = 8
     private static let REPLAY_WINDOW_SIZE = 1024
     private static let REPLAY_WINDOW_BYTES = REPLAY_WINDOW_SIZE / 8 // 128 bytes
     private static let HIGH_NONCE_WARNING_THRESHOLD: UInt64 = 1_000_000_000
@@ -165,19 +167,23 @@ final class NoiseCipherState {
     // MARK: - Sliding Window Replay Protection
     
     /// Check if nonce is valid for replay protection
+    /// BCH-01-010: Use safe arithmetic to prevent integer overflow
     private func isValidNonce(_ receivedNonce: UInt64) -> Bool {
-        if receivedNonce + UInt64(Self.REPLAY_WINDOW_SIZE) <= highestReceivedNonce {
+        // Safe overflow check: instead of (receivedNonce + WINDOW_SIZE <= highest)
+        // use (highest >= WINDOW_SIZE && receivedNonce <= highest - WINDOW_SIZE)
+        let windowSize = UInt64(Self.REPLAY_WINDOW_SIZE)
+        if highestReceivedNonce >= windowSize && receivedNonce <= highestReceivedNonce - windowSize {
             return false  // Too old, outside window
         }
-        
+
         if receivedNonce > highestReceivedNonce {
             return true  // Always accept newer nonces
         }
-        
+
         let offset = Int(highestReceivedNonce - receivedNonce)
         let byteIndex = offset / 8
         let bitIndex = offset % 8
-        
+
         return (replayWindow[byteIndex] & (1 << bitIndex)) == 0  // Not yet seen
     }
     
@@ -218,37 +224,29 @@ final class NoiseCipherState {
     
     /// Extract nonce from combined payload <nonce><ciphertext>
     /// Returns tuple of (nonce, ciphertext) or nil if invalid
+    /// BCH-01-010: Updated to extract full 8-byte nonce per Noise spec
     private func extractNonceFromCiphertextPayload(_ combinedPayload: Data) throws -> (nonce: UInt64, ciphertext: Data)? {
         guard combinedPayload.count >= Self.NONCE_SIZE_BYTES else {
             return nil
         }
-        
-        // Extract 4-byte nonce (big-endian)
+
+        // Extract 8-byte nonce (big-endian)
         let nonceData = combinedPayload.prefix(Self.NONCE_SIZE_BYTES)
         let extractedNonce = nonceData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> UInt64 in
-            let byteArray = bytes.bindMemory(to: UInt8.self)
-            var result: UInt64 = 0
-            for i in 0..<Self.NONCE_SIZE_BYTES {
-                result = (result << 8) | UInt64(byteArray[i])
-            }
-            return result
+            bytes.load(as: UInt64.self).bigEndian
         }
-        
+
         // Extract ciphertext (remaining bytes)
         let ciphertext = combinedPayload.dropFirst(Self.NONCE_SIZE_BYTES)
-        
+
         return (nonce: extractedNonce, ciphertext: Data(ciphertext))
     }
     
-    /// Convert nonce to 4-byte array (big-endian)
+    /// Convert nonce to 8-byte array (big-endian)
+    /// BCH-01-010: Write full 8-byte nonce per Noise spec
     private func nonceToBytes(_ nonce: UInt64) -> Data {
-        var bytes = Data(count: Self.NONCE_SIZE_BYTES)
-        withUnsafeBytes(of: nonce.bigEndian) { ptr in
-            // Copy only the last 4 bytes from the 8-byte UInt64
-            let sourceBytes = ptr.bindMemory(to: UInt8.self)
-            bytes.replaceSubrange(0..<Self.NONCE_SIZE_BYTES, with: sourceBytes.suffix(Self.NONCE_SIZE_BYTES))
-        }
-        return bytes
+        var nonceValue = nonce.bigEndian
+        return Data(bytes: &nonceValue, count: Self.NONCE_SIZE_BYTES)
     }
     
     func encrypt(plaintext: Data, associatedData: Data = Data()) throws -> Data {
@@ -258,9 +256,10 @@ final class NoiseCipherState {
         
         // Debug logging for nonce tracking
         let currentNonce = nonce
-        
-        // Check if nonce exceeds 4-byte limit (UInt32 max value)
-        guard nonce <= UInt64(UInt32.max) - 1 else {
+
+        // BCH-01-010: With 8-byte nonces, we have full 2^64 nonce space
+        // Check against UInt64.max - 1 to prevent overflow
+        guard nonce < UInt64.max else {
             throw NoiseError.nonceExceeded
         }
         
@@ -347,16 +346,20 @@ final class NoiseCipherState {
         
         do {
             let plaintext = try ChaChaPoly.open(sealedBox, using: key, authenticating: associatedData)
-            
+
+            // BCH-01-010: Atomic nonce state update
+            // Both replay window marking and nonce increment must complete together
+            // to prevent state desynchronization. We perform both after successful
+            // decryption only, ensuring state consistency on any failure path.
             if useExtractedNonce {
-                // Mark nonce as seen after successful decryption
                 markNonceAsSeen(decryptionNonce)
             }
             nonce += 1
+
             return plaintext
         } catch {
+            // Decryption failed - nonce state remains unchanged (atomic rollback)
             SecureLogger.debug("Decrypt failed: \(error) for nonce \(decryptionNonce)")
-            // Log authentication failures with nonce info
             SecureLogger.error("Decryption failed at nonce \(decryptionNonce)", category: .encryption)
             throw error
         }
@@ -455,13 +458,36 @@ final class NoiseSymmetricState {
         let output = hkdf(chainingKey: chainingKey, inputKeyMaterial: Data(), numOutputs: 2)
         let tempKey1 = SymmetricKey(data: output[0])
         let tempKey2 = SymmetricKey(data: output[1])
-        
+
         let c1 = NoiseCipherState(key: tempKey1, useExtractedNonce: useExtractedNonce)
         let c2 = NoiseCipherState(key: tempKey2, useExtractedNonce: useExtractedNonce)
-        
+
+        // BCH-01-010: Clear symmetric state after split per Noise spec
+        // The chaining key and hash should not be retained after handshake completes
+        clearSensitiveData()
+
         return (c1, c2)
     }
-    
+
+    /// BCH-01-010: Securely clear sensitive cryptographic state
+    /// Called after split() to clear chaining key and hash per Noise spec
+    func clearSensitiveData() {
+        // Clear chaining key by overwriting with zeros
+        let chainingKeyCount = chainingKey.count
+        chainingKey = Data(repeating: 0, count: chainingKeyCount)
+
+        // Clear hash by overwriting with zeros
+        let hashCount = hash.count
+        hash = Data(repeating: 0, count: hashCount)
+
+        // Clear the internal cipher state
+        cipherState.clearSensitiveData()
+    }
+
+    deinit {
+        clearSensitiveData()
+    }
+
     // HKDF implementation
     private func hkdf(chainingKey: Data, inputKeyMaterial: Data, numOutputs: Int) -> [Data] {
         let tempKey = HMAC<SHA256>.authenticationCode(for: inputKeyMaterial, using: SymmetricKey(data: chainingKey))
@@ -807,16 +833,20 @@ final class NoiseHandshakeState {
         return currentPattern >= messagePatterns.count
     }
     
-    func getTransportCiphers(useExtractedNonce: Bool) throws -> (send: NoiseCipherState, receive: NoiseCipherState) {
+    func getTransportCiphers(useExtractedNonce: Bool) throws -> (send: NoiseCipherState, receive: NoiseCipherState, handshakeHash: Data) {
         guard isHandshakeComplete() else {
             throw NoiseError.handshakeNotComplete
         }
-        
+
+        // BCH-01-010: Capture handshake hash BEFORE split() clears symmetric state
+        let finalHandshakeHash = symmetricState.getHandshakeHash()
+
         let (c1, c2) = symmetricState.split(useExtractedNonce: useExtractedNonce)
-        
+
         // Initiator uses c1 for sending, c2 for receiving
         // Responder uses c2 for sending, c1 for receiving
-        return role == .initiator ? (c1, c2) : (c2, c1)
+        let ciphers = role == .initiator ? (c1, c2) : (c2, c1)
+        return (send: ciphers.0, receive: ciphers.1, handshakeHash: finalHandshakeHash)
     }
     
     func getRemoteStaticPublicKey() -> Curve25519.KeyAgreement.PublicKey? {
@@ -877,22 +907,47 @@ enum NoiseError: Error {
     case nonceExceeded
 }
 
+// MARK: - Constant-Time Operations
+
+/// BCH-01-010: Constant-time comparison to prevent timing side-channel attacks
+/// This function compares two Data objects in constant time, preventing
+/// information leakage via timing analysis.
+private func constantTimeCompare(_ a: Data, _ b: Data) -> Bool {
+    guard a.count == b.count else { return false }
+
+    var result: UInt8 = 0
+    for i in 0..<a.count {
+        result |= a[a.startIndex.advanced(by: i)] ^ b[b.startIndex.advanced(by: i)]
+    }
+    return result == 0
+}
+
+/// BCH-01-010: Constant-time check if all bytes are zero
+private func constantTimeIsZero(_ data: Data) -> Bool {
+    var result: UInt8 = 0
+    for byte in data {
+        result |= byte
+    }
+    return result == 0
+}
+
 // MARK: - Key Validation
 
 extension NoiseHandshakeState {
     /// Validate a Curve25519 public key
     /// Checks for weak/invalid keys that could compromise security
+    /// BCH-01-010: Uses constant-time operations to prevent timing side-channels
     static func validatePublicKey(_ keyData: Data) throws -> Curve25519.KeyAgreement.PublicKey {
         // Check key length
         guard keyData.count == 32 else {
             throw NoiseError.invalidPublicKey
         }
-        
-        // Check for all-zero key (point at infinity)
-        if keyData.allSatisfy({ $0 == 0 }) {
+
+        // BCH-01-010: Constant-time check for all-zero key (point at infinity)
+        if constantTimeIsZero(keyData) {
             throw NoiseError.invalidPublicKey
         }
-        
+
         // Check for low-order points that could enable small subgroup attacks
         // These are the known bad points for Curve25519
         let lowOrderPoints: [Data] = [
@@ -913,13 +968,21 @@ extension NoiseHandshakeState {
                   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])  // Another bad point
         ]
-        
-        // Check against known bad points
-        if lowOrderPoints.contains(keyData) {
+
+        // BCH-01-010: Constant-time check against known bad points
+        // We check all points and accumulate matches to avoid early exit timing leaks
+        var foundBadPoint = false
+        for badPoint in lowOrderPoints {
+            if constantTimeCompare(keyData, badPoint) {
+                foundBadPoint = true
+            }
+        }
+
+        if foundBadPoint {
             SecureLogger.warning("Low-order point detected", category: .security)
             throw NoiseError.invalidPublicKey
         }
-        
+
         // Try to create the key - CryptoKit will validate curve points internally
         do {
             let publicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: keyData)
