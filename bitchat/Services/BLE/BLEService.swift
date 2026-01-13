@@ -550,7 +550,7 @@ final class BLEService: NSObject {
     
     func emergencyDisconnectAll() {
         stopServices()
-        
+
         // Clear all sessions and peers
         let cancelledTransfers: [(id: String, items: [DispatchWorkItem])] = collectionsQueue.sync(flags: .barrier) {
             let entries = activeTransfers.map { ($0.key, $0.value.workItems) }
@@ -565,10 +565,10 @@ final class BLEService: NSObject {
             entry.items.forEach { $0.cancel() }
             TransferProgressManager.shared.cancel(id: entry.id)
         }
-        
+
         // Clear processed messages
         messageDeduplicator.reset()
-        
+
         // Clear peripheral references
         peripherals.removeAll()
         peerToPeripheralUUID.removeAll()
@@ -1155,6 +1155,9 @@ final class BLEService: NSObject {
             return
         }
 
+        // BCH-01-002: Enforce storage quota before saving
+        enforceIncomingFilesQuota(reservingBytes: filePacket.content.count)
+
         let fallbackExt = mime.defaultExtension
         let subdirectory: String
         switch mime.category {
@@ -1387,6 +1390,72 @@ final class BLEService: NSObject {
         } catch {
             SecureLogger.error("❌ Failed to persist incoming media: \(error)", category: .session)
             return nil
+        }
+    }
+
+    // MARK: - Storage Quota Management (BCH-01-002)
+
+    /// Maximum total storage for incoming files (100 MB)
+    private static let incomingFilesQuota: Int64 = 100 * 1024 * 1024
+
+    /// Enforces storage quota for incoming files by deleting oldest files when quota is exceeded.
+    /// Call before saving a new incoming file.
+    private func enforceIncomingFilesQuota(reservingBytes: Int) {
+        do {
+            let base = try applicationFilesDirectory()
+            let incomingDirs = [
+                base.appendingPathComponent("voicenotes/incoming", isDirectory: true),
+                base.appendingPathComponent("images/incoming", isDirectory: true),
+                base.appendingPathComponent("files/incoming", isDirectory: true)
+            ]
+
+            // Gather all incoming files with their sizes and modification dates
+            var allFiles: [(url: URL, size: Int64, modified: Date)] = []
+            let fileManager = FileManager.default
+
+            for dir in incomingDirs {
+                guard fileManager.fileExists(atPath: dir.path) else { continue }
+                guard let contents = try? fileManager.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+
+                for fileURL in contents {
+                    guard let attrs = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                          let size = attrs.fileSize,
+                          let modified = attrs.contentModificationDate else { continue }
+                    allFiles.append((url: fileURL, size: Int64(size), modified: modified))
+                }
+            }
+
+            // Calculate current usage
+            let currentUsage = allFiles.reduce(0) { $0 + $1.size }
+            let targetUsage = Self.incomingFilesQuota - Int64(reservingBytes)
+
+            guard currentUsage > targetUsage else { return }
+
+            // Sort by modification date (oldest first) and delete until under quota
+            let sortedFiles = allFiles.sorted { $0.modified < $1.modified }
+            var freedSpace: Int64 = 0
+            let needToFree = currentUsage - targetUsage
+
+            for file in sortedFiles {
+                guard freedSpace < needToFree else { break }
+                do {
+                    try fileManager.removeItem(at: file.url)
+                    freedSpace += file.size
+                    SecureLogger.debug("🗑️ BCH-01-002: Deleted old incoming file to free space: \(file.url.lastPathComponent)", category: .security)
+                } catch {
+                    SecureLogger.warning("⚠️ Failed to delete old file for quota: \(error)", category: .security)
+                }
+            }
+
+            if freedSpace > 0 {
+                SecureLogger.info("📊 BCH-01-002: Freed \(ByteCountFormatter.string(fromByteCount: freedSpace, countStyle: .file)) to stay within incoming files quota", category: .security)
+            }
+        } catch {
+            SecureLogger.warning("⚠️ Could not enforce storage quota: \(error)", category: .security)
         }
     }
 
