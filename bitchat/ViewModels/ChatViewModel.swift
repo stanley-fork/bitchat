@@ -2072,7 +2072,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     /// iOS stores preview screenshots in Library/Caches/Snapshots/<bundle_id>/
     /// These could reveal sensitive information visible in the app at the time
     #if os(iOS)
-    private static func clearAppSwitcherSnapshots() {
+    private nonisolated static func clearAppSwitcherSnapshots() {
         do {
             let cacheDir = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
             let snapshotsDir = cacheDir.appendingPathComponent("Snapshots", isDirectory: true)
