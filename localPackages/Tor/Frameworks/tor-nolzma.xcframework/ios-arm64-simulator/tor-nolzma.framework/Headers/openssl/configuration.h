@@ -30,7 +30,7 @@ extern "C" {
 # ifndef OPENSSL_SYS_iOS
 #  define OPENSSL_SYS_iOS 1
 # endif
-# define OPENSSL_CONFIGURED_API 30500
+# define OPENSSL_CONFIGURED_API 30600
 # ifndef OPENSSL_RAND_SEED_OS
 #  define OPENSSL_RAND_SEED_OS
 # endif
@@ -43,6 +43,12 @@ extern "C" {
 # ifndef OPENSSL_NO_AFALGENG
 #  define OPENSSL_NO_AFALGENG
 # endif
+# ifndef OPENSSL_NO_ALLOCFAIL_TESTS
+#  define OPENSSL_NO_ALLOCFAIL_TESTS
+# endif
+# ifndef OPENSSL_NO_ARIA
+#  define OPENSSL_NO_ARIA
+# endif
 # ifndef OPENSSL_NO_ASAN
 #  define OPENSSL_NO_ASAN
 # endif
@@ -52,17 +58,35 @@ extern "C" {
 # ifndef OPENSSL_NO_ASYNC
 #  define OPENSSL_NO_ASYNC
 # endif
+# ifndef OPENSSL_NO_BF
+#  define OPENSSL_NO_BF
+# endif
 # ifndef OPENSSL_NO_BROTLI
 #  define OPENSSL_NO_BROTLI
 # endif
 # ifndef OPENSSL_NO_BROTLI_DYNAMIC
 #  define OPENSSL_NO_BROTLI_DYNAMIC
 # endif
+# ifndef OPENSSL_NO_CAMELLIA
+#  define OPENSSL_NO_CAMELLIA
+# endif
 # ifndef OPENSSL_NO_CAPIENG
 #  define OPENSSL_NO_CAPIENG
 # endif
+# ifndef OPENSSL_NO_CAST
+#  define OPENSSL_NO_CAST
+# endif
+# ifndef OPENSSL_NO_CMP
+#  define OPENSSL_NO_CMP
+# endif
+# ifndef OPENSSL_NO_CMS
+#  define OPENSSL_NO_CMS
+# endif
 # ifndef OPENSSL_NO_COMP
 #  define OPENSSL_NO_COMP
+# endif
+# ifndef OPENSSL_NO_CRMF
+#  define OPENSSL_NO_CRMF
 # endif
 # ifndef OPENSSL_NO_CRYPTO_MDEBUG
 #  define OPENSSL_NO_CRYPTO_MDEBUG
@@ -70,11 +94,23 @@ extern "C" {
 # ifndef OPENSSL_NO_CRYPTO_MDEBUG_BACKTRACE
 #  define OPENSSL_NO_CRYPTO_MDEBUG_BACKTRACE
 # endif
+# ifndef OPENSSL_NO_CT
+#  define OPENSSL_NO_CT
+# endif
 # ifndef OPENSSL_NO_DEMOS
 #  define OPENSSL_NO_DEMOS
 # endif
+# ifndef OPENSSL_NO_DES
+#  define OPENSSL_NO_DES
+# endif
 # ifndef OPENSSL_NO_DEVCRYPTOENG
 #  define OPENSSL_NO_DEVCRYPTOENG
+# endif
+# ifndef OPENSSL_NO_DGRAM
+#  define OPENSSL_NO_DGRAM
+# endif
+# ifndef OPENSSL_NO_DSO
+#  define OPENSSL_NO_DSO
 # endif
 # ifndef OPENSSL_NO_DTLS
 #  define OPENSSL_NO_DTLS
@@ -84,6 +120,9 @@ extern "C" {
 # endif
 # ifndef OPENSSL_NO_DTLS1_2
 #  define OPENSSL_NO_DTLS1_2
+# endif
+# ifndef OPENSSL_NO_EC2M
+#  define OPENSSL_NO_EC2M
 # endif
 # ifndef OPENSSL_NO_EGD
 #  define OPENSSL_NO_EGD
@@ -109,11 +148,20 @@ extern "C" {
 # ifndef OPENSSL_NO_FUZZ_LIBFUZZER
 #  define OPENSSL_NO_FUZZ_LIBFUZZER
 # endif
+# ifndef OPENSSL_NO_GOST
+#  define OPENSSL_NO_GOST
+# endif
 # ifndef OPENSSL_NO_H3DEMO
 #  define OPENSSL_NO_H3DEMO
 # endif
 # ifndef OPENSSL_NO_HQINTEROP
 #  define OPENSSL_NO_HQINTEROP
+# endif
+# ifndef OPENSSL_NO_HTTP
+#  define OPENSSL_NO_HTTP
+# endif
+# ifndef OPENSSL_NO_IDEA
+#  define OPENSSL_NO_IDEA
 # endif
 # ifndef OPENSSL_NO_JITTER
 #  define OPENSSL_NO_JITTER
@@ -121,11 +169,26 @@ extern "C" {
 # ifndef OPENSSL_NO_KTLS
 #  define OPENSSL_NO_KTLS
 # endif
+# ifndef OPENSSL_NO_LMS
+#  define OPENSSL_NO_LMS
+# endif
 # ifndef OPENSSL_NO_LOADERENG
 #  define OPENSSL_NO_LOADERENG
 # endif
 # ifndef OPENSSL_NO_MD2
 #  define OPENSSL_NO_MD2
+# endif
+# ifndef OPENSSL_NO_MD4
+#  define OPENSSL_NO_MD4
+# endif
+# ifndef OPENSSL_NO_MDC2
+#  define OPENSSL_NO_MDC2
+# endif
+# ifndef OPENSSL_NO_ML_DSA
+#  define OPENSSL_NO_ML_DSA
+# endif
+# ifndef OPENSSL_NO_ML_KEM
+#  define OPENSSL_NO_ML_KEM
 # endif
 # ifndef OPENSSL_NO_MSAN
 #  define OPENSSL_NO_MSAN
@@ -142,11 +205,50 @@ extern "C" {
 # ifndef OPENSSL_NO_PSK
 #  define OPENSSL_NO_PSK
 # endif
+# ifndef OPENSSL_NO_QLOG
+#  define OPENSSL_NO_QLOG
+# endif
+# ifndef OPENSSL_NO_QUIC
+#  define OPENSSL_NO_QUIC
+# endif
+# ifndef OPENSSL_NO_RC2
+#  define OPENSSL_NO_RC2
+# endif
+# ifndef OPENSSL_NO_RC4
+#  define OPENSSL_NO_RC4
+# endif
 # ifndef OPENSSL_NO_RC5
 #  define OPENSSL_NO_RC5
 # endif
+# ifndef OPENSSL_NO_RFC3779
+#  define OPENSSL_NO_RFC3779
+# endif
+# ifndef OPENSSL_NO_RMD160
+#  define OPENSSL_NO_RMD160
+# endif
+# ifndef OPENSSL_NO_SCRYPT
+#  define OPENSSL_NO_SCRYPT
+# endif
 # ifndef OPENSSL_NO_SCTP
 #  define OPENSSL_NO_SCTP
+# endif
+# ifndef OPENSSL_NO_SEED
+#  define OPENSSL_NO_SEED
+# endif
+# ifndef OPENSSL_NO_SIPHASH
+#  define OPENSSL_NO_SIPHASH
+# endif
+# ifndef OPENSSL_NO_SLH_DSA
+#  define OPENSSL_NO_SLH_DSA
+# endif
+# ifndef OPENSSL_NO_SM2
+#  define OPENSSL_NO_SM2
+# endif
+# ifndef OPENSSL_NO_SM3
+#  define OPENSSL_NO_SM3
+# endif
+# ifndef OPENSSL_NO_SM4
+#  define OPENSSL_NO_SM4
 # endif
 # ifndef OPENSSL_NO_SRP
 #  define OPENSSL_NO_SRP
@@ -172,17 +274,26 @@ extern "C" {
 # ifndef OPENSSL_NO_TRACE
 #  define OPENSSL_NO_TRACE
 # endif
+# ifndef OPENSSL_NO_TS
+#  define OPENSSL_NO_TS
+# endif
 # ifndef OPENSSL_NO_UBSAN
 #  define OPENSSL_NO_UBSAN
 # endif
 # ifndef OPENSSL_NO_UNIT_TEST
 #  define OPENSSL_NO_UNIT_TEST
 # endif
+# ifndef OPENSSL_NO_UNSTABLE_QLOG
+#  define OPENSSL_NO_UNSTABLE_QLOG
+# endif
 # ifndef OPENSSL_NO_UPLINK
 #  define OPENSSL_NO_UPLINK
 # endif
 # ifndef OPENSSL_NO_WEAK_SSL_CIPHERS
 #  define OPENSSL_NO_WEAK_SSL_CIPHERS
+# endif
+# ifndef OPENSSL_NO_WHIRLPOOL
+#  define OPENSSL_NO_WHIRLPOOL
 # endif
 # ifndef OPENSSL_NO_WINSTORE
 #  define OPENSSL_NO_WINSTORE
