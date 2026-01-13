@@ -3580,11 +3580,6 @@ extension BLEService {
             return
         }
         
-        // Update topology with their claimed neighbors
-        if let neighbors = announcement.directNeighbors {
-            meshTopology.updateNeighbors(for: peerID.routingData, neighbors: neighbors)
-        }
-        
         // Verify that the sender's derived ID from the announced noise public key matches the packet senderID
         // This helps detect relayed or spoofed announces. Only warn in release; assert in debug.
         let derivedFromKey = PeerID(publicKey: announcement.noisePublicKey)
@@ -3657,6 +3652,9 @@ extension BLEService {
             // Require verified announce; ignore otherwise (no backward compatibility)
             if !verified {
                 SecureLogger.warning("❌ Ignoring unverified announce from \(peerID.id.prefix(8))…", category: .security)
+                // Reset flags to prevent post-barrier code from acting on unverified announces
+                isNewPeer = false
+                isReconnectedPeer = false
                 return
             }
 
@@ -3702,6 +3700,11 @@ extension BLEService {
                     SecureLogger.debug("🔄 Peer \(peerID) changed nickname: \(existingPeer?.nickname ?? "Unknown") -> \(announcement.nickname)", category: .session)
                 }
             }
+        }
+
+        // Update topology with verified neighbor claims (only for authenticated announces)
+        if verifiedAnnounce, let neighbors = announcement.directNeighbors {
+            meshTopology.updateNeighbors(for: peerID.routingData, neighbors: neighbors)
         }
 
         // Persist cryptographic identity and signing key for robust offline verification
