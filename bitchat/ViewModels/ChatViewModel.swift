@@ -3052,20 +3052,27 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
             switch type {
             case .privateMessage:
                 guard let pm = PrivateMessagePacket.decode(from: payload) else { return }
+
+                // BCH-01-012: Check blocking before processing private message to prevent notification bypass
+                if isPeerBlocked(peerID) {
+                    SecureLogger.debug("🚫 Ignoring Noise payload from blocked peer: \(peerID)", category: .security)
+                    return
+                }
+
                 let senderName = unifiedPeerService.getPeer(by: peerID)?.nickname ?? "Unknown"
-            let pmMentions = parseMentions(from: pm.content)
-            let msg = BitchatMessage(
-                id: pm.messageID,
-                sender: senderName,
-                content: pm.content,
-                timestamp: timestamp,
-                isRelay: false,
-                originalSender: nil,
-                isPrivate: true,
-                recipientNickname: nickname,
-                senderPeerID: peerID,
-                mentions: pmMentions.isEmpty ? nil : pmMentions
-            )
+                let pmMentions = parseMentions(from: pm.content)
+                let msg = BitchatMessage(
+                    id: pm.messageID,
+                    sender: senderName,
+                    content: pm.content,
+                    timestamp: timestamp,
+                    isRelay: false,
+                    originalSender: nil,
+                    isPrivate: true,
+                    recipientNickname: nickname,
+                    senderPeerID: peerID,
+                    mentions: pmMentions.isEmpty ? nil : pmMentions
+                )
                 handlePrivateMessage(msg)
                 // Send delivery ACK back over BLE
                 meshService.sendDeliveryAck(for: pm.messageID, to: peerID)

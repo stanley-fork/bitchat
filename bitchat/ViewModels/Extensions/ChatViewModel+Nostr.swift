@@ -130,12 +130,21 @@ extension ChatViewModel {
             mentions: mentions.isEmpty ? nil : mentions
         )
         Task { @MainActor in
+            // BCH-01-012: Check blocking before any notifications
+            // handlePublicMessage has its own blocking check but returns silently,
+            // so we must also guard checkForMentions to prevent notification bypass
+            let isBlocked = identityManager.isNostrBlocked(pubkeyHexLowercased: event.pubkey.lowercased())
+
             handlePublicMessage(msg)
-            checkForMentions(msg)
-            sendHapticFeedback(for: msg)
+
+            // Only check mentions and send haptic if sender is not blocked
+            if !isBlocked {
+                checkForMentions(msg)
+                sendHapticFeedback(for: msg)
+            }
         }
     }
-    
+
     func subscribeGiftWrap(_ giftWrap: NostrEvent, id: NostrIdentity) {
         guard !deduplicationService.hasProcessedNostrEvent(giftWrap.id) else { return }
         deduplicationService.recordNostrEvent(giftWrap.id)
