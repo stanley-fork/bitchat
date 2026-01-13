@@ -740,15 +740,11 @@ extension ChatViewModel {
         
         if isViewing {
             // Mark read immediately if viewing
-            // Use router to send read receipt
+            // Use the incoming peerID directly - it has the established Noise session.
+            // Don't use PeerID(hexData: noiseKey) as that creates a 64-hex ID without a session.
+            // Use meshService directly (not messageRouter) so it queues if peer disconnects.
             let receipt = ReadReceipt(originalMessageID: message.id, readerID: meshService.myPeerID, readerNickname: nickname)
-            if let key = noiseKey {
-                 // Send via router to stable key if available (preferred for persistence/Nostr fallback)
-                 messageRouter.sendReadReceipt(receipt, to: PeerID(hexData: key))
-            } else {
-                 // Fallback to mesh direct
-                 meshService.sendReadReceipt(receipt, to: peerID)
-            }
+            meshService.sendReadReceipt(receipt, to: peerID)
             sentReadReceipts.insert(message.id)
         } else {
             // Notify
