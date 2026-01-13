@@ -728,7 +728,10 @@ final class BLEService: NSObject {
                 SecureLogger.error("❌ Failed to encode file packet for private send", category: .session)
                 return
             }
-            guard let recipientData = Data(hexString: peerID.id) else {
+            // Normalize to short form (SHA256-derived 16-hex) for wire protocol compatibility
+            // This ensures 64-hex Noise keys are converted to the canonical routing format
+            let targetID = peerID.toShort()
+            guard let recipientData = Data(hexString: targetID.id) else {
                 SecureLogger.error("❌ Invalid recipient peer ID for file transfer: \(peerID)", category: .session)
                 return
             }
