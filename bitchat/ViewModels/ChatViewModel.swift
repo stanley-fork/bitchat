@@ -3075,6 +3075,38 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         }
     }
 
+    /// Find message index trying both short (16-hex) and long (64-hex) peer ID formats.
+    /// Returns the peer ID where the message was found and its index, or nil if not found.
+    private func findMessageIndex(messageID: String, peerID: PeerID) -> (peerID: PeerID, index: Int)? {
+        // Try direct lookup first
+        if let messages = privateChats[peerID],
+           let idx = messages.firstIndex(where: { $0.id == messageID }) {
+            return (peerID, idx)
+        }
+
+        // Try with full noise key if peerID is short (16 hex chars)
+        if peerID.bare.count == 16,
+           let peer = unifiedPeerService.getPeer(by: peerID),
+           !peer.noisePublicKey.isEmpty {
+            let longID = PeerID(hexData: peer.noisePublicKey)
+            if let messages = privateChats[longID],
+               let idx = messages.firstIndex(where: { $0.id == messageID }) {
+                return (longID, idx)
+            }
+        }
+
+        // Try with short form if peerID is long (64 hex = noise key)
+        if peerID.bare.count == 64 {
+            let shortID = peerID.toShort()
+            if let messages = privateChats[shortID],
+               let idx = messages.firstIndex(where: { $0.id == messageID }) {
+                return (shortID, idx)
+            }
+        }
+
+        return nil
+    }
+
     // Low-level BLE events
     func didReceiveNoisePayload(from peerID: PeerID, type: NoisePayloadType, payload: Data, timestamp: Date) {
         Task { @MainActor in
@@ -3108,20 +3140,26 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
 
             case .delivered:
                 guard let messageID = String(data: payload, encoding: .utf8) else { return }
-                if let name = unifiedPeerService.getPeer(by: peerID)?.nickname {
-                    if let messages = privateChats[peerID], let idx = messages.firstIndex(where: { $0.id == messageID }) {
-                        privateChats[peerID]?[idx].deliveryStatus = .delivered(to: name, at: Date())
-                        objectWillChange.send()
-                    }
-                }
+                guard let name = unifiedPeerService.getPeer(by: peerID)?.nickname,
+                      let (foundPeerID, idx) = findMessageIndex(messageID: messageID, peerID: peerID) else { return }
+
+                // Don't downgrade from .read to .delivered
+                if case .read = privateChats[foundPeerID]?[idx].deliveryStatus { return }
+
+                privateChats[foundPeerID]?[idx].deliveryStatus = .delivered(to: name, at: Date())
+                objectWillChange.send()
 
             case .readReceipt:
                 guard let messageID = String(data: payload, encoding: .utf8) else { return }
-                if let name = unifiedPeerService.getPeer(by: peerID)?.nickname {
-                    if let messages = privateChats[peerID], let idx = messages.firstIndex(where: { $0.id == messageID }) {
-                        privateChats[peerID]?[idx].deliveryStatus = .read(by: name, at: Date())
-                        objectWillChange.send()
-                    }
+                guard let name = unifiedPeerService.getPeer(by: peerID)?.nickname,
+                      let (foundPeerID, idx) = findMessageIndex(messageID: messageID, peerID: peerID) else { return }
+
+                // Explicitly unwrap and re-assign to ensure the @Published setter is called
+                if var messages = privateChats[foundPeerID], idx < messages.count {
+                    messages[idx].deliveryStatus = .read(by: name, at: Date())
+                    privateChats[foundPeerID] = messages
+                    privateChatManager.objectWillChange.send()
+                    objectWillChange.send()
                 }
             case .verifyChallenge:
                 // Parse and respond
