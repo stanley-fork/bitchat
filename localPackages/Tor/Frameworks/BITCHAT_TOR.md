@@ -11,9 +11,9 @@
 - This xcframework is suitable for iOS and macOS targets that link the Objective‑C wrappers as source (or use CocoaPods to bring them in).
 
 **Component Versions**
-- Tor: 0.4.8.17
+- Tor: 0.4.8.21
 - libevent: 2.1.12
-- OpenSSL: 3.5.1
+- OpenSSL: 3.6.0
 - liblzma: not linked (intentionally disabled)
 
 **Build Environment**
@@ -22,24 +22,34 @@
 - Install prerequisites from repo root: `brew bundle`
 
 **Command Used**
-- Minimal build (nolzma), with persistent logs: `./build-xcframework.sh -md`
-  - `-m` = minimal mode
-  - `-d` = keep build dir and logs under `build/`
+- Minimal build (nolzma), size-optimized: `./build-minimal.sh`
+  - Build script located at: `~/Documents/vibe/Tor.framework-build/build-minimal.sh`
+  - Uses iCepa/Tor.framework as base, with custom size optimizations
+  - Outputs to: `~/Documents/vibe/Tor.framework-build/tor-nolzma.xcframework`
 
 **What Minimal Mode Does**
 - Targets: `iphoneos/arm64`, `iphonesimulator/arm64`, `macosx/arm64`.
 - Disables LZMA in Tor (`--enable-lzma=no`) and removes zstd.
-- Trims OpenSSL features: `no-zlib no-comp no-ssl3 no-tls1 no-tls1_1 no-dtls no-srp no-psk no-weak-ssl-ciphers no-engine no-ocsp`.
+- Aggressive OpenSSL trimming (removes ~3MB per slice):
+  - Protocol: `no-ssl3 no-tls1 no-tls1_1 no-dtls`
+  - Legacy ciphers: `no-des no-rc2 no-rc4 no-rc5 no-idea no-seed no-camellia no-aria no-bf no-cast`
+  - Unused hashes: `no-md4 no-mdc2 no-whirlpool no-rmd160`
+  - Post-quantum: `no-ml-dsa no-ml-kem no-slh-dsa no-lms`
+  - Chinese standards: `no-sm2 no-sm3 no-sm4`
+  - Certificate features: `no-cms no-ts no-cmp no-ct no-rfc3779`
+  - Other: `no-gost no-ec2m no-siphash no-scrypt no-legacy no-dso no-dgram no-http`
+  - See build script for full list
+- Tor client-only: `--disable-module-relay --disable-module-dirauth --disable-module-pow`
 - Compiles with size-first flags: `-Os -ffunction-sections -fdata-sections`; bitcode is not embedded.
 - Statically links Tor, libevent, and OpenSSL into a single library per slice inside the framework.
 - Copies public headers from Tor/libevent/OpenSSL into the framework `Headers` directory.
 
 **Resulting Slices (approx sizes)**
-- Folder size: ~73 MB (`tor-nolzma.xcframework`)
+- Folder size: ~67 MB (`tor-nolzma.xcframework`)
 - Binaries (non-fat, measured on this build):
-  - iOS arm64 (device): ~16.49 MB
-  - iOS arm64 (simulator): ~15.32 MB
-  - macOS arm64: ~15.60 MB
+  - iOS arm64 (device): ~14 MB
+  - iOS arm64 (simulator): ~13.8 MB
+  - macOS arm64: ~13.8 MB
 
 Note: Sizes vary slightly by Xcode/SDK versions and environment.
 
@@ -56,23 +66,31 @@ Note: Sizes vary slightly by Xcode/SDK versions and environment.
     - Vendor the ObjC sources from `Tor/Classes/CTor` and `Tor/Classes/Core` directly into your project.
 
 **Rebuilding**
-- Ensure prerequisites: `brew bundle`
-- Minimal nolzma, iOS+sim+macOS: `./build-xcframework.sh -m`
-- Logs (if `-d`): `build/*.log` and per-component logs like `build/libtor-nolzma-<sdk>-<arch>.log`
+- Ensure prerequisites: `brew install automake autoconf libtool gettext`
+- Clone iCepa/Tor.framework to `~/Documents/vibe/Tor.framework-build/`
+- Run: `cd ~/Documents/vibe/Tor.framework-build && ./build-minimal.sh`
+- Logs: `build/*.log` and per-component logs like `build/libtor-nolzma-<sdk>-<arch>.log`
+- Copy output to project: `cp -R tor-nolzma.xcframework /path/to/bitchat/localPackages/Tor/Frameworks/`
 
 **LZMA Trade‑off (for reference)**
 - We measured that enabling LZMA adds roughly ~0.25 MB per slice to the binary on this setup. For a 3‑slice xcframework, expect ~0.7–0.8 MB more overall.
 - If you want the LZMA variant with the same minimal trimming: `./build-xcframework.sh -Md` (outputs `tor.xcframework`).
 
 **Key Flags (for auditing)**
-- OpenSSL `./Configure` adds: `no-shared` and, in minimal modes, `no-zlib no-comp no-ssl3 no-tls1 no-tls1_1 no-dtls no-srp no-psk no-weak-ssl-ciphers no-engine no-ocsp`
-- libevent `./configure`: `--disable-openssl --disable-samples --disable-regress --enable-static --disable-shared`
+- OpenSSL `./Configure` (aggressive trimming):
+  - `no-shared no-zlib no-comp no-ssl3 no-tls1 no-tls1_1 no-dtls`
+  - `no-srp no-psk no-weak-ssl-ciphers no-engine no-ocsp no-cms no-ts`
+  - `no-idea no-seed no-camellia no-aria no-bf no-cast no-des no-rc2 no-rc4`
+  - `no-md4 no-mdc2 no-whirlpool no-rmd160 no-sm2 no-sm3 no-sm4`
+  - `no-siphash no-scrypt no-legacy no-dso no-dgram no-http`
+- libevent `./configure`: `--disable-openssl --disable-samples --disable-libevent-regress --enable-static --disable-shared`
 - Tor `./configure` (highlights):
-  - `--enable-pic --disable-module-relay --disable-module-dirauth --disable-unittests`
+  - `--enable-pic --disable-module-relay --disable-module-dirauth --disable-module-pow --disable-unittests`
   - `--enable-static-openssl --enable-static-libevent`
   - `--disable-asciidoc --disable-manpage --disable-html-manual --disable-zstd`
   - `--enable-lzma=no` (in this build)
 - Compiler flags: `-Os -ffunction-sections -fdata-sections`; no bitcode
+- Linker flags: `-Wl,-dead_strip`
 - Minimum OS: iOS 12.0, macOS 10.13
 
 **Verification Tips**
