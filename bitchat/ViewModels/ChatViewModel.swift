@@ -3155,7 +3155,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                       let (foundPeerID, idx) = findMessageIndex(messageID: messageID, peerID: peerID) else { return }
 
                 // Explicitly unwrap and re-assign to ensure the @Published setter is called
-                if var messages = privateChats[foundPeerID], idx < messages.count {
+                if let messages = privateChats[foundPeerID], idx < messages.count {
                     messages[idx].deliveryStatus = .read(by: name, at: Date())
                     privateChats[foundPeerID] = messages
                     privateChatManager.objectWillChange.send()
