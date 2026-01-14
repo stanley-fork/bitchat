@@ -129,9 +129,7 @@ struct NoiseProtocolName {
 /// - Warning: Nonce reuse would be catastrophic for security
 final class NoiseCipherState {
     // Constants for replay protection
-    // BCH-01-010: Use full 8-byte nonces per Noise Protocol specification
-    // This provides 2^64 nonce space instead of limited 2^32
-    private static let NONCE_SIZE_BYTES = 8
+    private static let NONCE_SIZE_BYTES = 4
     private static let REPLAY_WINDOW_SIZE = 1024
     private static let REPLAY_WINDOW_BYTES = REPLAY_WINDOW_SIZE / 8 // 128 bytes
     private static let HIGH_NONCE_WARNING_THRESHOLD: UInt64 = 1_000_000_000
@@ -224,29 +222,37 @@ final class NoiseCipherState {
     
     /// Extract nonce from combined payload <nonce><ciphertext>
     /// Returns tuple of (nonce, ciphertext) or nil if invalid
-    /// BCH-01-010: Updated to extract full 8-byte nonce per Noise spec
     private func extractNonceFromCiphertextPayload(_ combinedPayload: Data) throws -> (nonce: UInt64, ciphertext: Data)? {
         guard combinedPayload.count >= Self.NONCE_SIZE_BYTES else {
             return nil
         }
-
-        // Extract 8-byte nonce (big-endian)
+        
+        // Extract 4-byte nonce (big-endian)
         let nonceData = combinedPayload.prefix(Self.NONCE_SIZE_BYTES)
         let extractedNonce = nonceData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> UInt64 in
-            bytes.load(as: UInt64.self).bigEndian
+            let byteArray = bytes.bindMemory(to: UInt8.self)
+            var result: UInt64 = 0
+            for i in 0..<Self.NONCE_SIZE_BYTES {
+                result = (result << 8) | UInt64(byteArray[i])
+            }
+            return result
         }
-
+        
         // Extract ciphertext (remaining bytes)
         let ciphertext = combinedPayload.dropFirst(Self.NONCE_SIZE_BYTES)
-
+        
         return (nonce: extractedNonce, ciphertext: Data(ciphertext))
     }
     
-    /// Convert nonce to 8-byte array (big-endian)
-    /// BCH-01-010: Write full 8-byte nonce per Noise spec
+    /// Convert nonce to 4-byte array (big-endian)
     private func nonceToBytes(_ nonce: UInt64) -> Data {
-        var nonceValue = nonce.bigEndian
-        return Data(bytes: &nonceValue, count: Self.NONCE_SIZE_BYTES)
+        var bytes = Data(count: Self.NONCE_SIZE_BYTES)
+        withUnsafeBytes(of: nonce.bigEndian) { ptr in
+            // Copy only the last 4 bytes from the 8-byte UInt64
+            let sourceBytes = ptr.bindMemory(to: UInt8.self)
+            bytes.replaceSubrange(0..<Self.NONCE_SIZE_BYTES, with: sourceBytes.suffix(Self.NONCE_SIZE_BYTES))
+        }
+        return bytes
     }
     
     func encrypt(plaintext: Data, associatedData: Data = Data()) throws -> Data {
@@ -256,10 +262,9 @@ final class NoiseCipherState {
         
         // Debug logging for nonce tracking
         let currentNonce = nonce
-
-        // BCH-01-010: With 8-byte nonces, we have full 2^64 nonce space
-        // Check against UInt64.max - 1 to prevent overflow
-        guard nonce < UInt64.max else {
+        
+        // Check if nonce exceeds 4-byte limit (UInt32 max value)
+        guard nonce <= UInt64(UInt32.max) - 1 else {
             throw NoiseError.nonceExceeded
         }
         
