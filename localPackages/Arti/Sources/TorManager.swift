@@ -290,6 +290,7 @@ public final class TorManager: ObservableObject {
 
     public func ensureRunningOnForeground() {
         if !allowAutoStart { return }
+        SecureLogger.debug("TorManager: ensureRunningOnForeground() started", category: .session)
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             let claimed: Bool = await MainActor.run {
@@ -299,12 +300,6 @@ public final class TorManager: ObservableObject {
             }
             if !claimed { return }
 
-            // Try to wake if dormant
-            if await self.wakeFromDormant() {
-                await MainActor.run { self.restarting = false }
-                return
-            }
-
             // Check if already ready
             let alreadyReady = await MainActor.run { self.isReady }
             if alreadyReady {
@@ -312,41 +307,21 @@ public final class TorManager: ObservableObject {
                 return
             }
 
-            // Restart
+            // Arti doesn't support dormant/wake (it's a no-op stub), so always do full restart
             await self.restartArti()
             await MainActor.run { self.restarting = false }
         }
     }
 
     public func goDormantOnBackground() {
+        // Arti doesn't support real dormant mode, so just mark as not ready.
+        // iOS will suspend the runtime anyway. On foreground we do a full restart.
+        // Clear isStarting so foreground recovery can proceed if bootstrap was interrupted.
         SecureLogger.debug("TorManager: goDormantOnBackground() called", category: .session)
-        Task.detached { [weak self] in
-            guard let self = self else { return }
-            let result = arti_go_dormant()
-            if result == 0 {
-                SecureLogger.info("TorManager: signalled DORMANT", category: .session)
-                await MainActor.run {
-                    self.isDormant = true
-                    self.isReady = false
-                    self.socksReady = false
-                    self.isStarting = false
-                }
-            } else {
-                // Dormant not supported, do full shutdown
-                SecureLogger.warning("TorManager: DORMANT failed; shutting down", category: .session)
-                _ = arti_stop()
-                await MainActor.run {
-                    self.isDormant = false
-                    self.isReady = false
-                    self.socksReady = false
-                    self.bootstrapProgress = 0
-                    self.bootstrapSummary = ""
-                    self.isStarting = false
-                    self.didStart = false
-                    self.bootstrapMonitorStarted = false
-                    // Note: Don't clear startedAt - it will be set fresh on next start
-                }
-            }
+        Task { @MainActor in
+            self.isReady = false
+            self.socksReady = false
+            self.isStarting = false
         }
     }
 
@@ -377,31 +352,6 @@ public final class TorManager: ObservableObject {
                 // Clearing it here races with startup and defeats the grace period
             }
         }
-    }
-
-    private func wakeFromDormant() async -> Bool {
-        let wasDormant = await MainActor.run { self.isDormant }
-        if !wasDormant { return false }
-
-        let result = arti_wake()
-        if result != 0 { return false }
-
-        await MainActor.run {
-            self.isDormant = false
-            self.isStarting = true
-            self.socksReady = false
-        }
-
-        let ready = await waitForSocksReady(timeout: 12.0)
-        await MainActor.run {
-            self.socksReady = ready
-            self.isStarting = !ready
-        }
-
-        if ready {
-            SecureLogger.info("TorManager: woke from dormant", category: .session)
-        }
-        return ready
     }
 
     private func restartArti() async {

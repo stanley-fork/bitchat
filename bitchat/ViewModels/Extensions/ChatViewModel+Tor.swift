@@ -24,7 +24,7 @@ extension ChatViewModel {
             }
         }
     }
-    
+
     @objc func handleTorWillRestart() {
         Task { @MainActor in
             self.torRestartPending = true
