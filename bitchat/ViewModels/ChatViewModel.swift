@@ -448,7 +448,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         self.deduplicationService = MessageDeduplicationService()
 
         // Wire up dependencies
-        self.commandProcessor.chatViewModel = self
+        self.commandProcessor.contextProvider = self
         self.participantTracker.configure(context: self)
         
         // Subscribe to privateChatManager changes to trigger UI updates
