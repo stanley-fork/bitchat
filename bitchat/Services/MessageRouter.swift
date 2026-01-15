@@ -34,9 +34,20 @@ final class MessageRouter {
         }
     }
 
+    // MARK: - Transport Selection
+
+    private func reachableTransport(for peerID: PeerID) -> Transport? {
+        transports.first { $0.isPeerReachable(peerID) }
+    }
+
+    private func connectedTransport(for peerID: PeerID) -> Transport? {
+        transports.first { $0.isPeerConnected(peerID) }
+    }
+
+    // MARK: - Message Sending
+
     func sendPrivate(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String) {
-        // Try to find a reachable transport
-        if let transport = transports.first(where: { $0.isPeerReachable(peerID) }) {
+        if let transport = reachableTransport(for: peerID) {
             SecureLogger.debug("Routing PM via \(type(of: transport)) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
             transport.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname, messageID: messageID)
         } else {
@@ -48,38 +59,26 @@ final class MessageRouter {
     }
 
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
-        if let transport = transports.first(where: { $0.isPeerReachable(peerID) }) {
+        if let transport = reachableTransport(for: peerID) {
             SecureLogger.debug("Routing READ ack via \(type(of: transport)) to \(peerID.id.prefix(8))… id=\(receipt.originalMessageID.prefix(8))…", category: .session)
             transport.sendReadReceipt(receipt, to: peerID)
         } else if !transports.isEmpty {
-            // Fallback to last transport (usually Nostr) if neither is explicitly reachable?
-            // Or better: just try the first one that supports it?
-            // Existing logic preferred mesh, then nostr.
-            // If neither reachable, existing logic queued it (via mesh usually) or sent via nostr.
-            // Let's stick to "try reachable". If none, maybe pick the first one to queue?
-            // Actually, for READ receipts, we might want to just fire-and-forget on the "best effort" transport.
-            // But let's stick to the reachable check.
             SecureLogger.debug("No reachable transport for READ ack to \(peerID.id.prefix(8))…", category: .session)
         }
     }
 
     func sendDeliveryAck(_ messageID: String, to peerID: PeerID) {
-        if let transport = transports.first(where: { $0.isPeerReachable(peerID) }) {
+        if let transport = reachableTransport(for: peerID) {
             SecureLogger.debug("Routing DELIVERED ack via \(type(of: transport)) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
             transport.sendDeliveryAck(for: messageID, to: peerID)
         }
     }
 
     func sendFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {
-        if let transport = transports.first(where: { $0.isPeerConnected(peerID) }) {
+        if let transport = connectedTransport(for: peerID) {
             transport.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
-        } else if let transport = transports.first(where: { $0.isPeerReachable(peerID) }) {
-             transport.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
-        } else {
-            // Fallback: try all? or just the last one?
-            // Old logic: if mesh connected, mesh. Else nostr.
-            // Note: NostrTransport.isPeerReachable now returns true if mapped.
-            // If not mapped, we can't send via Nostr anyway.
+        } else if let transport = reachableTransport(for: peerID) {
+            transport.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
         }
     }
 
@@ -89,16 +88,16 @@ final class MessageRouter {
         guard let queued = outbox[peerID], !queued.isEmpty else { return }
         SecureLogger.debug("Flushing outbox for \(peerID.id.prefix(8))… count=\(queued.count)", category: .session)
         var remaining: [(content: String, nickname: String, messageID: String)] = []
-        
+
         for (content, nickname, messageID) in queued {
-            if let transport = transports.first(where: { $0.isPeerReachable(peerID) }) {
+            if let transport = reachableTransport(for: peerID) {
                 SecureLogger.debug("Outbox -> \(type(of: transport)) for \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
                 transport.sendPrivateMessage(content, to: peerID, recipientNickname: nickname, messageID: messageID)
             } else {
                 remaining.append((content, nickname, messageID))
             }
         }
-        
+
         if remaining.isEmpty {
             outbox.removeValue(forKey: peerID)
         } else {
