@@ -13,6 +13,7 @@ struct GossipSyncManagerTests {
 
         try await confirmation("sync request sent") { sent in
             delegate.onSend = {
+                delegate.onSend = nil
                 sent()
             }
 
@@ -34,7 +35,7 @@ struct GossipSyncManagerTests {
             }
 
             manager.scheduleInitialSyncToPeer(PeerID(str: "FFFFFFFFFFFFFFFF"), delaySeconds: 0.0)
-            try await sleep(0.002)
+            try await TestHelpers.waitFor({ delegate.lastPacket != nil }, timeout: TestConstants.shortTimeout)
         }
 
         let lastPacket = try #require(delegate.lastPacket, "Expected sync packet to be sent")
@@ -240,7 +241,7 @@ struct GossipSyncManagerTests {
         let request = RequestSyncPacket(p: 4, m: 1, data: Data(), types: .fragment)
         manager.handleRequestSync(from: peer, request: request)
 
-        try await sleep(0.01)
+        try await TestHelpers.waitFor({ delegate.packets.count == 1 }, timeout: TestConstants.shortTimeout)
         let sentPackets = delegate.packets
         #expect(sentPackets.count == 1)
         #expect(sentPackets[0].type == MessageType.fragment.rawValue)
