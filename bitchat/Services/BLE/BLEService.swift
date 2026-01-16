@@ -138,11 +138,6 @@ final class BLEService: NSObject {
     private var pendingMessagesAfterHandshake: [PeerID: [(content: String, messageID: String)]] = [:]
     // Noise typed payloads (ACKs, read receipts, etc.) pending handshake
     private var pendingNoisePayloadsAfterHandshake: [PeerID: [Data]] = [:]
-    // Keep a tiny buffer of the last few unique announces we've seen (by sender)
-    private var recentAnnounceBySender: [PeerID: BitchatPacket] = [:]
-    private var recentAnnounceOrder: [PeerID] = []
-    private let recentAnnounceBufferCap = 3
-    
     // Queue for notifications that failed due to full queue
     private var pendingNotifications: [(data: Data, centrals: [CBCentral]?)] = []
 
@@ -354,8 +349,6 @@ final class BLEService: NSObject {
         }
 
         collectionsQueue.sync(flags: .barrier) {
-            recentAnnounceBySender.removeAll()
-            recentAnnounceOrder.removeAll()
             pendingPeripheralWrites.removeAll()
             pendingFragmentTransfers.removeAll()
             pendingNotifications.removeAll()
@@ -1053,34 +1046,6 @@ final class BLEService: NSObject {
         }
     }
 
-    private func rebroadcastRecentAnnounces() {
-        // Snapshot sender order to preserve ordering and avoid holding locks while sending
-        let packets: [BitchatPacket] = collectionsQueue.sync {
-            recentAnnounceOrder.compactMap { recentAnnounceBySender[$0] }
-        }
-        guard !packets.isEmpty else { return }
-        for (idx, pkt) in packets.enumerated() {
-            // Stagger slightly to avoid bursts
-            let delayMs = idx * 20
-            messageQueue.asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in
-                self?.broadcastPacket(pkt)
-            }
-        }
-    }
-    
-    private func sendData(_ data: Data, to peripheral: CBPeripheral) {
-        // Fire-and-forget: Simple send without complex fallback logic
-        guard peripheral.state == .connected else { return }
-        
-        let peripheralUUID = peripheral.identifier.uuidString
-        guard let state = peripherals[peripheralUUID],
-              let characteristic = state.characteristic else { return }
-        
-        // Fire-and-forget principle: always use .withoutResponse for speed
-        // CoreBluetooth will handle fragmentation at L2CAP layer
-        writeOrEnqueue(data, to: peripheral, characteristic: characteristic, priority: .high)
-    }
-
     private func handleFileTransfer(_ packet: BitchatPacket, from peerID: PeerID) {
         if peerID == myPeerID && packet.ttl != 0 { return }
 
@@ -1474,17 +1439,6 @@ final class BLEService: NSObject {
         }
     }
 
-    private func sendLeave() {
-        SecureLogger.debug("👋 Sending leave announcement", category: .session)
-        let packet = BitchatPacket(
-            type: MessageType.leave.rawValue,
-            ttl: messageTTL,
-            senderID: myPeerID,
-            payload: Data(myNickname.utf8)
-        )
-        broadcastPacket(packet)
-    }
-    
     private func sendAnnounce(forceSend: Bool = false) {
         // Throttle announces to prevent flooding
         let now = Date()
@@ -2059,8 +2013,6 @@ extension BLEService: CBPeripheralDelegate {
                 self?.sendAnnounce(forceSend: true)
                 // Try flushing any spooled directed packets now that we have a link
                 self?.flushDirectedSpool()
-                // Rebroadcast a couple of recent announces to seed the new link
-                self?.rebroadcastRecentAnnounces()
             }
         } else {
             SecureLogger.warning("⚠️ Characteristic does not support notifications", category: .session)
@@ -2302,10 +2254,9 @@ extension BLEService: CBPeripheralManagerDelegate {
                     return
                 }
 
-                // Still flush directed packets and rebroadcast for legitimate mesh operation
+                // Still flush directed packets for legitimate mesh operation
                 messageQueue.asyncAfter(deadline: .now() + TransportConfig.blePostAnnounceDelaySeconds) { [weak self] in
                     self?.flushDirectedSpool()
-                    self?.rebroadcastRecentAnnounces()
                 }
                 return
             }
@@ -2331,8 +2282,6 @@ extension BLEService: CBPeripheralManagerDelegate {
             self?.sendAnnounce(forceSend: true)
             // Flush any spooled directed packets now that we have a central subscribed
             self?.flushDirectedSpool()
-            // Rebroadcast a couple of recent announces to seed the new link
-            self?.rebroadcastRecentAnnounces()
         }
     }
 
@@ -3714,9 +3663,6 @@ extension BLEService {
             signingPublicKey: announcement.signingPublicKey,
             claimedNickname: announcement.nickname
         )
-
-        // Record this announce for lightweight rebroadcast buffer (exclude self)
-        // (recentAnnounces has been removed in the refactor)
 
         // Notify UI on main thread
         notifyUI { [weak self] in
