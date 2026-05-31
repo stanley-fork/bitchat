@@ -79,21 +79,12 @@ final class BLEService: NSObject {
     // 4. Efficient Message Deduplication
     private let messageDeduplicator = MessageDeduplicator()
     private var selfBroadcastMessageIDs: [String: (id: String, timestamp: Date)] = [:]
-    private lazy var mediaDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter
-    }()
     private let meshTopology = MeshTopologyTracker()
     
     // 5. Fragment Reassembly (necessary for messages > MTU)
     private var fragmentAssemblyBuffer = BLEFragmentAssemblyBuffer()
-    private struct ActiveTransferState {
-        let totalFragments: Int
-        var sentFragments: Int
-        var workItems: [DispatchWorkItem]
-    }
-    private var activeTransfers: [String: ActiveTransferState] = [:]
+    private var outboundFragmentTransfers = BLEOutboundFragmentTransferScheduler()
+    private let incomingFileStore = BLEIncomingFileStore()
     // Backoff for peripherals that recently timed out connecting
     private var recentConnectTimeouts: [String: Date] = [:] // Peripheral UUID -> last timeout
     
@@ -131,10 +122,8 @@ final class BLEService: NSObject {
     private let bleQueue = DispatchQueue(label: "mesh.bluetooth", qos: .userInitiated)
     private let bleQueueKey = DispatchSpecificKey<Void>()
     
-    // Queue for messages pending handshake completion
-    private var pendingMessagesAfterHandshake: [PeerID: [(content: String, messageID: String)]] = [:]
-    // Noise typed payloads (ACKs, read receipts, etc.) pending handshake
-    private var pendingNoisePayloadsAfterHandshake: [PeerID: [Data]] = [:]
+    // Noise messages and typed payloads pending handshake completion.
+    private var pendingNoiseSessionQueues = BLENoiseSessionQueues()
     // Queue for notifications that failed due to full queue
     private var pendingNotifications = BLEOutboundNotificationBuffer<CBCentral>()
 
@@ -148,15 +137,7 @@ final class BLEService: NSObject {
     // Ingress link tracking for duplicate and last-hop suppression
     private var ingressLinks = BLEIngressLinkRegistry()
 
-    private struct PendingFragmentTransfer {
-        let packet: BitchatPacket
-        let pad: Bool
-        let maxChunk: Int?
-        let directedPeer: PeerID?
-        let transferId: String?
-    }
     private var pendingPeripheralWrites = BLEOutboundWriteBuffer()
-    private var pendingFragmentTransfers: [PendingFragmentTransfer] = []
     // Debounce duplicate disconnect notifies
     private var recentDisconnectNotifies: [PeerID: Date] = [:]
     // Store-and-forward for directed messages when we have no links
@@ -344,20 +325,25 @@ final class BLEService: NSObject {
 
     func resetIdentityForPanic(currentNickname: String) {
         messageQueue.sync(flags: .barrier) {
-            pendingMessagesAfterHandshake.removeAll()
-            pendingNoisePayloadsAfterHandshake.removeAll()
+            pendingNoiseSessionQueues.removeAll()
         }
 
-        collectionsQueue.sync(flags: .barrier) {
+        let cancelledTransfers = collectionsQueue.sync(flags: .barrier) {
             pendingPeripheralWrites.removeAll()
-            pendingFragmentTransfers.removeAll()
             pendingNotifications.removeAll()
+            let transfers = outboundFragmentTransfers.removeAll()
             fragmentAssemblyBuffer.removeAll()
             pendingDirectedRelays.removeAll()
             ingressLinks.removeAll()
             recentPacketTimestamps.removeAll()
             scheduledRelays.values.forEach { $0.cancel() }
             scheduledRelays.removeAll()
+            return transfers
+        }
+
+        for entry in cancelledTransfers {
+            entry.workItems.forEach { $0.cancel() }
+            TransferProgressManager.shared.cancel(id: entry.id)
         }
 
         bleQueue.sync {
@@ -516,7 +502,7 @@ final class BLEService: NSObject {
 
         // Send immediately to all connected peers (synchronized access to BLE state)
         if let data = leavePacket.toBinaryData(padding: false) {
-            let leavePriority = priority(for: leavePacket, data: data)
+            let leavePriority = BLEOutboundPacketPolicy.priority(for: leavePacket, data: data)
 
             // Snapshot BLE state under bleQueue to avoid races with delegate callbacks
             let (peripheralStates, centralsCount, char) = bleQueue.sync {
@@ -568,13 +554,11 @@ final class BLEService: NSObject {
 
         // Clear all sessions and peers
         let cancelledTransfers: [(id: String, items: [DispatchWorkItem])] = collectionsQueue.sync(flags: .barrier) {
-            let entries = activeTransfers.map { ($0.key, $0.value.workItems) }
+            let entries = outboundFragmentTransfers.removeAll().map { ($0.id, $0.workItems) }
             peers.removeAll()
             fragmentAssemblyBuffer.removeAll()
-            activeTransfers.removeAll()
             // Also clear pending message queues to avoid stale state across sessions
-            pendingMessagesAfterHandshake.removeAll()
-            pendingNoisePayloadsAfterHandshake.removeAll()
+            pendingNoiseSessionQueues.removeAll()
             pendingDirectedRelays.removeAll()
             return entries
         }
@@ -672,17 +656,22 @@ final class BLEService: NSObject {
     func cancelTransfer(_ transferId: String) {
         collectionsQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
-            if let state = self.activeTransfers.removeValue(forKey: transferId) {
-                state.workItems.forEach { $0.cancel() }
+
+            switch self.outboundFragmentTransfers.cancelTransfer(transferId) {
+            case let .active(id, workItems):
+                workItems.forEach { $0.cancel() }
                 TransferProgressManager.shared.cancel(id: transferId)
-                SecureLogger.debug("🛑 Cancelled transfer \(transferId.prefix(8))…", category: .session)
+                SecureLogger.debug("🛑 Cancelled transfer \(id.prefix(8))…", category: .session)
                 self.messageQueue.async { [weak self] in
                     self?.startNextPendingTransferIfNeeded()
                 }
-            } else if let pendingIndex = self.pendingFragmentTransfers.firstIndex(where: { $0.transferId == transferId }) {
-                self.pendingFragmentTransfers.remove(at: pendingIndex)
+
+            case let .pending(id):
                 TransferProgressManager.shared.cancel(id: transferId)
-                SecureLogger.debug("🛑 Removed pending transfer \(transferId.prefix(8))… before start", category: .session)
+                SecureLogger.debug("🛑 Removed pending transfer \(id.prefix(8))… before start", category: .session)
+
+            case .missing:
+                break
             }
         }
     }
@@ -748,7 +737,7 @@ final class BLEService: NSObject {
             // This ensures 64-hex Noise keys are converted to the canonical routing format
             let targetID = peerID.toShort()
             guard let recipientData = Data(hexString: targetID.id) else {
-                SecureLogger.error("❌ Invalid recipient peer ID for file transfer: \(peerID)", category: .session)
+                SecureLogger.error("❌ Invalid recipient peer ID for file transfer: \(peerID.id.prefix(8))…", category: .session)
                 return
             }
 
@@ -774,35 +763,22 @@ final class BLEService: NSObject {
 
     
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
-        // Create typed payload: [type byte] + [message ID]
-        var payload = Data([NoisePayloadType.readReceipt.rawValue])
-        payload.append(contentsOf: receipt.originalMessageID.utf8)
+        let payload = BLENoisePayloadFactory.readReceipt(originalMessageID: receipt.originalMessageID)
 
         if noiseService.hasEstablishedSession(with: peerID) {
-            SecureLogger.debug("📤 Sending READ receipt for message \(receipt.originalMessageID) to \(peerID)", category: .session)
+            SecureLogger.debug("📤 Sending READ receipt id=\(receipt.originalMessageID.prefix(8))… to \(peerID.id.prefix(8))…", category: .session)
             do {
-                let encrypted = try noiseService.encrypt(payload, for: peerID)
-                let packet = BitchatPacket(
-                    type: MessageType.noiseEncrypted.rawValue,
-                    senderID: myPeerIDData,
-                    recipientID: Data(hexString: peerID.id),
-                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                    payload: encrypted,
-                    signature: nil,
-                    ttl: messageTTL
-                )
-                broadcastPacket(packet)
+                broadcastPacket(try makeEncryptedNoisePacket(payload, to: peerID))
             } catch {
                 SecureLogger.error("Failed to send read receipt: \(error)")
             }
         } else {
             // Queue for after handshake and initiate if needed
-            collectionsQueue.async(flags: .barrier) { [weak self] in
-                guard let self = self else { return }
-                self.pendingNoisePayloadsAfterHandshake[peerID, default: []].append(payload)
+            collectionsQueue.sync(flags: .barrier) {
+                pendingNoiseSessionQueues.appendTypedPayload(payload, for: peerID)
             }
             if !noiseService.hasSession(with: peerID) { initiateNoiseHandshake(with: peerID) }
-            SecureLogger.debug("🕒 Queued READ receipt for \(peerID) until handshake completes", category: .session)
+            SecureLogger.debug("🕒 Queued READ receipt for \(peerID.id.prefix(8))… until handshake completes", category: .session)
         }
     }
     
@@ -889,7 +865,7 @@ final class BLEService: NSObject {
         }
         
         // Encode once using a small per-type padding policy, then delegate by type
-        let padForBLE = padPolicy(for: packetToSend.type)
+        let padForBLE = BLEOutboundPacketPolicy.padsBLEFrame(for: packetToSend.type)
         if packetToSend.type == MessageType.fileTransfer.rawValue {
             sendFragmentedPacket(packetToSend, pad: padForBLE, maxChunk: nil, directedOnlyPeer: nil, transferId: transferId)
             return
@@ -905,52 +881,39 @@ final class BLEService: NSObject {
         sendGenericBroadcast(packetToSend, data: data, pad: padForBLE)
     }
 
-    // MARK: - Broadcast helpers (single responsibility)
-    private func padPolicy(for type: UInt8) -> Bool {
-        switch MessageType(rawValue: type) {
-        case .noiseEncrypted, .noiseHandshake:
-            return true
-        case .none, .announce, .message, .leave, .requestSync, .fragment, .fileTransfer:
-            return false
-        }
-    }
-
     private func sendEncrypted(_ packet: BitchatPacket, data: Data, pad: Bool) {
         guard let recipientPeerID = PeerID(hexData: packet.recipientID) else { return }
         var sentEncrypted = false
 
-        let outboundPriority = priority(for: packet, data: data)
+        let outboundPriority = BLEOutboundPacketPolicy.priority(for: packet, data: data)
 
         // Per-link limits for the specific peer
-        var peripheralMaxLen: Int?
-        if let perUUID = (DispatchQueue.getSpecific(key: bleQueueKey) != nil) ? peerToPeripheralUUID[recipientPeerID] : bleQueue.sync(execute: { peerToPeripheralUUID[recipientPeerID] }) {
-            if let state = (DispatchQueue.getSpecific(key: bleQueueKey) != nil) ? peripherals[perUUID] : bleQueue.sync(execute: { peripherals[perUUID] }) {
-                peripheralMaxLen = state.peripheral.maximumWriteValueLength(for: .withoutResponse)
+        let directPeripheralState: PeripheralState? = {
+            if DispatchQueue.getSpecific(key: bleQueueKey) != nil {
+                return peerToPeripheralUUID[recipientPeerID].flatMap { peripherals[$0] }
             }
-        }
-        var centralMaxLen: Int?
-        do {
-            let (centrals, mapping) = snapshotSubscribedCentrals()
-            if let central = centrals.first(where: { mapping[$0.identifier.uuidString] == recipientPeerID }) {
-                centralMaxLen = central.maximumUpdateValueLength
+            return bleQueue.sync {
+                peerToPeripheralUUID[recipientPeerID].flatMap { peripherals[$0] }
             }
-        }
-        if let pm = peripheralMaxLen, data.count > pm {
-            let overhead = 13 + 8 + 8 + 13
-            let chunk = max(64, pm - overhead)
+        }()
+        let (centrals, mapping) = snapshotSubscribedCentrals()
+        let recipientCentral = centrals.first { mapping[$0.identifier.uuidString] == recipientPeerID }
+
+        if let peripheralMaxLen = directPeripheralState?.peripheral.maximumWriteValueLength(for: .withoutResponse),
+           data.count > peripheralMaxLen {
+            let chunk = BLEOutboundPacketPolicy.fragmentChunkSize(forLinkLimit: peripheralMaxLen)
             sendFragmentedPacket(packet, pad: pad, maxChunk: chunk, directedOnlyPeer: recipientPeerID)
             return
         }
-        if let cm = centralMaxLen, data.count > cm {
-            let overhead = 13 + 8 + 8 + 13
-            let chunk = max(64, cm - overhead)
+        if let centralMaxLen = recipientCentral?.maximumUpdateValueLength,
+           data.count > centralMaxLen {
+            let chunk = BLEOutboundPacketPolicy.fragmentChunkSize(forLinkLimit: centralMaxLen)
             sendFragmentedPacket(packet, pad: pad, maxChunk: chunk, directedOnlyPeer: recipientPeerID)
             return
         }
 
         // Direct write via peripheral link
-        if let peripheralUUID = (DispatchQueue.getSpecific(key: bleQueueKey) != nil) ? peerToPeripheralUUID[recipientPeerID] : bleQueue.sync(execute: { peerToPeripheralUUID[recipientPeerID] }),
-           let state = (DispatchQueue.getSpecific(key: bleQueueKey) != nil) ? peripherals[peripheralUUID] : bleQueue.sync(execute: { peripherals[peripheralUUID] }),
+        if let state = directPeripheralState,
            state.isConnected,
            let characteristic = state.characteristic {
             writeOrEnqueue(data, to: state.peripheral, characteristic: characteristic, priority: outboundPriority)
@@ -958,12 +921,12 @@ final class BLEService: NSObject {
         }
 
         // Notify via central link (dual-role)
-        if let characteristic = characteristic, !sentEncrypted {
-            let (centrals, mapping) = snapshotSubscribedCentrals()
-            for central in centrals where mapping[central.identifier.uuidString] == recipientPeerID {
-                let success = peripheralManager?.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) ?? false
-                if success { sentEncrypted = true; break }
-                enqueuePendingNotification(data: data, centrals: [central], context: "encrypted")
+        if let characteristic = characteristic, !sentEncrypted, let recipientCentral {
+            let success = peripheralManager?.updateValue(data, for: characteristic, onSubscribedCentrals: [recipientCentral]) ?? false
+            if success {
+                sentEncrypted = true
+            } else {
+                enqueuePendingNotification(data: data, centrals: [recipientCentral], context: "encrypted")
             }
         }
 
@@ -1006,7 +969,7 @@ final class BLEService: NSObject {
 
     private func sendOnAllLinks(packet: BitchatPacket, data: Data, pad: Bool, directedOnlyPeer: PeerID?) {
         // Determine the last-hop peer/link for this message to avoid echoing back over either BLE role.
-        let messageID = makeMessageID(for: packet)
+        let messageID = BLEOutboundPacketPolicy.messageID(for: packet)
         let ingressRecord = collectionsQueue.sync { ingressLinks.record(for: packet) }
         let excludedPeerLinks = links(to: ingressRecord?.peerID)
         let directedPeerHint: PeerID? = {
@@ -1016,7 +979,7 @@ final class BLEService: NSObject {
             }
             return nil
         }()
-        let outboundPriority = priority(for: packet, data: data)
+        let outboundPriority = BLEOutboundPacketPolicy.priority(for: packet, data: data)
 
         let states = snapshotPeripheralStates()
         var minCentralWriteLen: Int?
@@ -1024,35 +987,20 @@ final class BLEService: NSObject {
             let m = s.peripheral.maximumWriteValueLength(for: .withoutResponse)
             minCentralWriteLen = minCentralWriteLen.map { min($0, m) } ?? m
         }
-        var snapshotCentrals: [CBCentral] = []
-        if let _ = characteristic {
-            let (centrals, _) = snapshotSubscribedCentrals()
-            snapshotCentrals = centrals
-        }
-        var minNotifyLen: Int?
-        if !snapshotCentrals.isEmpty {
-            minNotifyLen = snapshotCentrals.map { $0.maximumUpdateValueLength }.min()
-        }
+        let subscribedCentrals = characteristic == nil ? [] : snapshotSubscribedCentrals().0
+        let minNotifyLen = subscribedCentrals.map { $0.maximumUpdateValueLength }.min()
+
         // Avoid re-fragmenting fragment packets
         if packet.type != MessageType.fragment.rawValue,
            let minLen = [minCentralWriteLen, minNotifyLen].compactMap({ $0 }).min(),
            data.count > minLen {
-            let overhead = 13 + 8 + 8 + 13
-            let chunk = max(64, minLen - overhead)
+            let chunk = BLEOutboundPacketPolicy.fragmentChunkSize(forLinkLimit: minLen)
             sendFragmentedPacket(packet, pad: pad, maxChunk: chunk, directedOnlyPeer: directedOnlyPeer)
             return
         }
         // Build link lists and apply K-of-N fanout for broadcasts; always exclude ingress link
         let connectedPeripheralIDs: [String] = states.filter { $0.isConnected }.map { $0.peripheral.identifier.uuidString }
-        let subscribedCentrals: [CBCentral]
-        var centralIDs: [String] = []
-        if let _ = characteristic {
-            let (centrals, _) = snapshotSubscribedCentrals()
-            subscribedCentrals = centrals
-            centralIDs = centrals.map { $0.identifier.uuidString }
-        } else {
-            subscribedCentrals = []
-        }
+        let centralIDs = subscribedCentrals.map { $0.identifier.uuidString }
 
         let selectedLinks = BLEFanoutSelector.selectLinks(
             peripheralIDs: connectedPeripheralIDs,
@@ -1102,7 +1050,7 @@ final class BLEService: NSObject {
 
     // MARK: - Directed store-and-forward
     private func spoolDirectedPacket(_ packet: BitchatPacket, recipientPeerID: PeerID) {
-        let msgID = makeMessageID(for: packet)
+        let msgID = BLEOutboundPacketPolicy.messageID(for: packet)
         collectionsQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             var byMsg = self.pendingDirectedRelays[recipientPeerID] ?? [:]
@@ -1219,9 +1167,9 @@ final class BLEService: NSObject {
         }
 
         // BCH-01-002: Enforce storage quota before saving
-        enforceIncomingFilesQuota(reservingBytes: filePacket.content.count)
+        incomingFileStore.enforceQuota(reservingBytes: filePacket.content.count)
 
-        guard let destination = saveIncomingFile(
+        guard let destination = incomingFileStore.save(
             data: filePacket.content,
             preferredName: filePacket.fileName,
             subdirectory: "\(mime.category.mediaDir)/incoming",
@@ -1255,18 +1203,20 @@ final class BLEService: NSObject {
     }
     
     func sendFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {
-        SecureLogger.debug("🔔 sendFavoriteNotification called - peerID: \(peerID), isFavorite: \(isFavorite)", category: .session)
+        SecureLogger.debug("🔔 sendFavoriteNotification peer=\(peerID.id.prefix(8))… isFavorite=\(isFavorite)", category: .session)
         
         // Include Nostr public key in the notification
         var content = isFavorite ? "[FAVORITED]" : "[UNFAVORITED]"
+        var includesNostrIdentity = false
         
         // Add our Nostr public key if available
         if let myNostrIdentity = try? idBridge.getCurrentNostrIdentity() {
             content += ":" + myNostrIdentity.npub
-            SecureLogger.debug("📝 Sending favorite notification with Nostr npub: \(myNostrIdentity.npub)", category: .session)
+            includesNostrIdentity = true
+            SecureLogger.debug("📝 Favorite notification includes Nostr npub=\(myNostrIdentity.npub.prefix(16))…", category: .session)
         }
         
-        SecureLogger.debug("📤 Sending favorite notification to \(peerID): \(content)", category: .session)
+        SecureLogger.debug("📤 Sending favorite notification to \(peerID.id.prefix(8))… isFavorite=\(isFavorite) includesNostrIdentity=\(includesNostrIdentity)", category: .session)
         sendPrivateMessage(content, to: peerID, messageID: UUID().uuidString)
     }
     
@@ -1275,34 +1225,21 @@ final class BLEService: NSObject {
     }
     
     func sendDeliveryAck(for messageID: String, to peerID: PeerID) {
-        // Create typed payload: [type byte] + [message ID]
-        var payload = Data([NoisePayloadType.delivered.rawValue])
-        payload.append(contentsOf: messageID.utf8)
+        let payload = BLENoisePayloadFactory.delivered(messageID: messageID)
 
         if noiseService.hasEstablishedSession(with: peerID) {
             do {
-                let encrypted = try noiseService.encrypt(payload, for: peerID)
-                let packet = BitchatPacket(
-                    type: MessageType.noiseEncrypted.rawValue,
-                    senderID: myPeerIDData,
-                    recipientID: Data(hexString: peerID.id),
-                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                    payload: encrypted,
-                    signature: nil,
-                    ttl: messageTTL
-                )
-                broadcastPacket(packet)
+                broadcastPacket(try makeEncryptedNoisePacket(payload, to: peerID))
             } catch {
                 SecureLogger.error("Failed to send delivery ACK: \(error)")
             }
         } else {
             // Queue for after handshake and initiate if needed
-            collectionsQueue.async(flags: .barrier) { [weak self] in
-                guard let self = self else { return }
-                self.pendingNoisePayloadsAfterHandshake[peerID, default: []].append(payload)
+            collectionsQueue.sync(flags: .barrier) {
+                pendingNoiseSessionQueues.appendTypedPayload(payload, for: peerID)
             }
             if !noiseService.hasSession(with: peerID) { initiateNoiseHandshake(with: peerID) }
-            SecureLogger.debug("🕒 Queued DELIVERED ack for \(peerID) until handshake completes", category: .session)
+            SecureLogger.debug("🕒 Queued DELIVERED ack for \(peerID.id.prefix(8))… until handshake completes", category: .session)
         }
     }
 
@@ -1324,180 +1261,6 @@ final class BLEService: NSObject {
             self.deliverTransportEvent(.peerListUpdated(currentPeerIDs))
         }
     }
-    
-    // MARK: - Helper Functions
-
-    private func applicationFilesDirectory() throws -> URL {
-        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        let filesDir = base.appendingPathComponent("files", isDirectory: true)
-        try FileManager.default.createDirectory(at: filesDir, withIntermediateDirectories: true, attributes: nil)
-        return filesDir
-    }
-
-    private func sanitizeFileName(_ name: String?, defaultName: String, fallbackExtension: String?) -> String {
-        var candidate = name ?? ""
-
-        // Security: Remove null bytes (path traversal vector)
-        candidate = candidate.replacingOccurrences(of: "\0", with: "")
-
-        // Security: Unicode normalization prevents fullwidth character bypass
-        candidate = candidate.precomposedStringWithCanonicalMapping
-
-        // Security: Remove ALL path separators (not just strip last component)
-        candidate = candidate.replacingOccurrences(of: "/", with: "_")
-        candidate = candidate.replacingOccurrences(of: "\\", with: "_")
-
-        // Security: Remove control characters and dangerous filesystem chars
-        let invalid = CharacterSet(charactersIn: "<>:\"|?*\0").union(.controlCharacters)
-        candidate = candidate.components(separatedBy: invalid).joined(separator: "_")
-
-        candidate = candidate.trimmed
-        if candidate.isEmpty { candidate = defaultName }
-
-        // Security: Reject dotfiles (hidden file attacks)
-        if candidate.hasPrefix(".") {
-            candidate = "_" + candidate
-        }
-
-        // Truncate while preserving extension
-        if candidate.count > 120 {
-            let ext = (candidate as NSString).pathExtension
-            let base = (candidate as NSString).deletingPathExtension
-            if ext.isEmpty {
-                candidate = String(candidate.prefix(120))
-            } else {
-                let maxBase = max(10, 120 - ext.count - 1)
-                candidate = String(base.prefix(maxBase)) + "." + ext
-            }
-        }
-
-        if let fallbackExtension = fallbackExtension, (candidate as NSString).pathExtension.isEmpty {
-            candidate += ".\(fallbackExtension)"
-        }
-
-        if candidate.isEmpty { candidate = defaultName }
-        return candidate
-    }
-
-    private func uniqueFileURL(in directory: URL, fileName: String) -> URL {
-        var candidate = directory.appendingPathComponent(fileName)
-
-        // Security: Validate path doesn't escape directory
-        if !candidate.path.hasPrefix(directory.path) {
-            SecureLogger.warning("⚠️ Path traversal blocked: \(fileName)", category: .security)
-            return directory.appendingPathComponent("blocked_\(UUID().uuidString)")
-        }
-
-        if !FileManager.default.fileExists(atPath: candidate.path) {
-            return candidate
-        }
-
-        let baseName = (fileName as NSString).deletingPathExtension
-        let ext = (fileName as NSString).pathExtension
-        var counter = 1
-
-        // Limit iterations to prevent DoS
-        while counter < 100 {
-            let newName = ext.isEmpty ? "\(baseName) (\(counter))" : "\(baseName) (\(counter)).\(ext)"
-            candidate = directory.appendingPathComponent(newName)
-
-            // Validate each iteration
-            guard candidate.path.hasPrefix(directory.path) else {
-                return directory.appendingPathComponent("blocked_\(UUID().uuidString)")
-            }
-
-            if !FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-            counter += 1
-        }
-
-        // Fallback: UUID to guarantee uniqueness
-        return directory.appendingPathComponent("\(baseName)_\(UUID().uuidString).\(ext.isEmpty ? "dat" : ext)")
-    }
-
-    private func saveIncomingFile(data: Data, preferredName: String?, subdirectory: String, fallbackExtension: String?, defaultPrefix: String) -> URL? {
-        do {
-            let base = try applicationFilesDirectory().appendingPathComponent(subdirectory, isDirectory: true)
-            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: nil)
-            let timestamp = mediaDateFormatter.string(from: Date())
-            let defaultName = "\(defaultPrefix)_\(timestamp)"
-            let sanitized = sanitizeFileName(preferredName, defaultName: defaultName, fallbackExtension: fallbackExtension)
-            let destination = uniqueFileURL(in: base, fileName: sanitized)
-            try data.write(to: destination, options: .atomic)
-            return destination
-        } catch {
-            SecureLogger.error("❌ Failed to persist incoming media: \(error)", category: .session)
-            return nil
-        }
-    }
-
-    // MARK: - Storage Quota Management (BCH-01-002)
-
-    /// Maximum total storage for incoming files (100 MB)
-    private static let incomingFilesQuota: Int64 = 100 * 1024 * 1024
-
-    /// Enforces storage quota for incoming files by deleting oldest files when quota is exceeded.
-    /// Call before saving a new incoming file.
-    private func enforceIncomingFilesQuota(reservingBytes: Int) {
-        do {
-            let base = try applicationFilesDirectory()
-            let incomingDirs = [
-                base.appendingPathComponent("voicenotes/incoming", isDirectory: true),
-                base.appendingPathComponent("images/incoming", isDirectory: true),
-                base.appendingPathComponent("files/incoming", isDirectory: true)
-            ]
-
-            // Gather all incoming files with their sizes and modification dates
-            var allFiles: [(url: URL, size: Int64, modified: Date)] = []
-            let fileManager = FileManager.default
-
-            for dir in incomingDirs {
-                guard fileManager.fileExists(atPath: dir.path) else { continue }
-                guard let contents = try? fileManager.contentsOfDirectory(
-                    at: dir,
-                    includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-                    options: [.skipsHiddenFiles]
-                ) else { continue }
-
-                for fileURL in contents {
-                    guard let attrs = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
-                          let size = attrs.fileSize,
-                          let modified = attrs.contentModificationDate else { continue }
-                    allFiles.append((url: fileURL, size: Int64(size), modified: modified))
-                }
-            }
-
-            // Calculate current usage
-            let currentUsage = allFiles.reduce(0) { $0 + $1.size }
-            let targetUsage = Self.incomingFilesQuota - Int64(reservingBytes)
-
-            guard currentUsage > targetUsage else { return }
-
-            // Sort by modification date (oldest first) and delete until under quota
-            let sortedFiles = allFiles.sorted { $0.modified < $1.modified }
-            var freedSpace: Int64 = 0
-            let needToFree = currentUsage - targetUsage
-
-            for file in sortedFiles {
-                guard freedSpace < needToFree else { break }
-                do {
-                    try fileManager.removeItem(at: file.url)
-                    freedSpace += file.size
-                    SecureLogger.debug("🗑️ BCH-01-002: Deleted old incoming file to free space: \(file.url.lastPathComponent)", category: .security)
-                } catch {
-                    SecureLogger.warning("⚠️ Failed to delete old file for quota: \(error)", category: .security)
-                }
-            }
-
-            if freedSpace > 0 {
-                SecureLogger.info("📊 BCH-01-002: Freed \(ByteCountFormatter.string(fromByteCount: freedSpace, countStyle: .file)) to stay within incoming files quota", category: .security)
-            }
-        } catch {
-            SecureLogger.warning("⚠️ Could not enforce storage quota: \(error)", category: .security)
-        }
-    }
-
     private func sendAnnounce(forceSend: Bool = false) {
         // Throttle announces to prevent flooding
         let now = Date()
@@ -2257,7 +2020,7 @@ extension BLEService: CBPeripheralDelegate {
         let senderID = PeerID(hexData: packet.senderID)
 
         if packet.type != MessageType.announce.rawValue {
-            SecureLogger.debug("📦 Decoded notification packet type: \(packet.type) from sender: \(senderID)", category: .session)
+            SecureLogger.debug("📦 Decoded notification packet type: \(packet.type) from sender: \(senderID.id.prefix(8))…", category: .session)
         }
 
         if packet.type == MessageType.announce.rawValue {
@@ -2440,7 +2203,7 @@ extension BLEService: CBPeripheralManagerDelegate {
     
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         let centralUUID = central.identifier.uuidString
-        SecureLogger.debug("📥 Central subscribed: \(centralUUID)", category: .session)
+        SecureLogger.debug("📥 Central subscribed: \(centralUUID.prefix(8))…", category: .session)
         subscribedCentrals.append(central)
 
         // BCH-01-004: Rate-limit subscription-triggered announces to prevent enumeration attacks
@@ -2519,7 +2282,7 @@ extension BLEService: CBPeripheralManagerDelegate {
     }
     
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
-        SecureLogger.debug("📤 Central unsubscribed: \(central.identifier.uuidString)", category: .session)
+        SecureLogger.debug("📤 Central unsubscribed: \(central.identifier.uuidString.prefix(8))…", category: .session)
         subscribedCentrals.removeAll { $0.identifier == central.identifier }
         
         // Ensure we're still advertising for other devices to find us
@@ -2648,7 +2411,7 @@ extension BLEService: CBPeripheralManagerDelegate {
 
             case let .oversized(metadata):
                 logAccumulatedCentralWrite(metadata, centralUUID: centralUUID)
-                SecureLogger.warning("⚠️ Dropping oversized pending write buffer (\(metadata.accumulatedBytes) bytes) for central \(centralUUID)", category: .session)
+                SecureLogger.warning("⚠️ Dropping oversized pending write buffer (\(metadata.accumulatedBytes) bytes) for central \(centralUUID.prefix(8))…", category: .session)
                 logFailedSingleWriteIfNeeded(hasMultiple: hasMultiple, sortedRequests: sorted)
             }
         }
@@ -2659,7 +2422,7 @@ extension BLEService: CBPeripheralManagerDelegate {
               packetType != MessageType.announce.rawValue else { return }
 
         SecureLogger.debug(
-            "📥 Accumulated write from central \(centralUUID): size=\(metadata.accumulatedBytes) (+\(metadata.appendedBytes)) bytes (type=\(packetType)), offsets=\(metadata.offsets)",
+            "📥 Accumulated write from central \(centralUUID.prefix(8))…: size=\(metadata.accumulatedBytes) (+\(metadata.appendedBytes)) bytes (type=\(packetType)), offsets=\(metadata.offsets)",
             category: .session
         )
     }
@@ -2686,7 +2449,7 @@ extension BLEService: CBPeripheralManagerDelegate {
         }
 
         if packet.type != MessageType.announce.rawValue {
-            SecureLogger.debug("📦 Decoded (combined) packet type: \(packet.type) from sender: \(claimedSenderID)", category: .session)
+            SecureLogger.debug("📦 Decoded (combined) packet type: \(packet.type) from sender: \(claimedSenderID.id.prefix(8))…", category: .session)
         }
 
         if !subscribedCentrals.contains(central) {
@@ -2936,7 +2699,7 @@ extension BLEService {
     
     private func configureNoiseServiceCallbacks(for service: NoiseEncryptionService) {
         service.onPeerAuthenticated = { [weak self] peerID, fingerprint in
-            SecureLogger.debug("🔐 Noise session authenticated with \(peerID), fingerprint: \(fingerprint.prefix(16))...")
+            SecureLogger.debug("🔐 Noise session authenticated with \(peerID.id.prefix(8))…, fingerprint: \(fingerprint.prefix(16))…")
             self?.messageQueue.async { [weak self] in
                 self?.sendPendingMessagesAfterHandshake(for: peerID)
                 self?.sendPendingNoisePayloadsAfterHandshake(for: peerID)
@@ -2961,30 +2724,30 @@ extension BLEService {
             // No session yet - queue the payload SYNCHRONOUSLY before initiating handshake
             // to prevent race where fast handshake completion drains empty queue
             collectionsQueue.sync(flags: .barrier) {
-                if self.pendingNoisePayloadsAfterHandshake[peerID] == nil {
-                    self.pendingNoisePayloadsAfterHandshake[peerID] = []
-                }
-                self.pendingNoisePayloadsAfterHandshake[peerID]?.append(typedPayload)
-                SecureLogger.debug("📥 Queued noise payload for \(peerID) pending handshake", category: .session)
+                self.pendingNoiseSessionQueues.appendTypedPayload(typedPayload, for: peerID)
+                SecureLogger.debug("📥 Queued noise payload for \(peerID.id.prefix(8))… pending handshake", category: .session)
             }
             initiateNoiseHandshake(with: peerID)
             return
         }
         do {
-            let encrypted = try noiseService.encrypt(typedPayload, for: peerID)
-            let packet = BitchatPacket(
-                type: MessageType.noiseEncrypted.rawValue,
-                senderID: myPeerIDData,
-                recipientID: Data(hexString: peerID.id),
-                timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                payload: encrypted,
-                signature: nil,
-                ttl: messageTTL
-            )
-            broadcastPacket(packet)
+            broadcastPacket(try makeEncryptedNoisePacket(typedPayload, to: peerID))
         } catch {
             SecureLogger.error("Failed to send verification payload: \(error)")
         }
+    }
+
+    private func makeEncryptedNoisePacket(_ typedPayload: Data, to peerID: PeerID) throws -> BitchatPacket {
+        let encrypted = try noiseService.encrypt(typedPayload, for: peerID)
+        return BitchatPacket(
+            type: MessageType.noiseEncrypted.rawValue,
+            senderID: myPeerIDData,
+            recipientID: Data(hexString: peerID.id),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: encrypted,
+            signature: nil,
+            ttl: messageTTL
+        )
     }
     
     // MARK: Link capability snapshots (thread-safe via bleQueue)
@@ -3006,31 +2769,6 @@ extension BLEService {
     
     // MARK: Helpers: IDs, selection, and write backpressure
     
-    private func makeMessageID(for packet: BitchatPacket) -> String {
-        BLEIngressLinkRegistry.messageID(for: packet)
-    }
-
-    private func priority(for packet: BitchatPacket, data: Data) -> BLEOutboundWritePriority {
-        guard let messageType = MessageType(rawValue: packet.type) else { return .low }
-        switch messageType {
-        case .fragment:
-            let total = fragmentTotalCount(from: packet.payload)
-            return BLEOutboundWritePriority.fragment(totalFragments: total)
-        case .fileTransfer:
-            return .fileTransfer
-        default:
-            return .high
-        }
-    }
-
-    private func fragmentTotalCount(from payload: Data) -> Int {
-        guard payload.count >= 12 else { return Int(UInt16.max) }
-        let totalHigh = Int(payload[10])
-        let totalLow = Int(payload[11])
-        let total = (totalHigh << 8) | totalLow
-        return max(total, 1)
-    }
-
     private func writeOrEnqueue(_ data: Data, to peripheral: CBPeripheral, characteristic: CBCharacteristic, priority: BLEOutboundWritePriority) {
         // BLE operations run on bleQueue; keep queue affinity
         bleQueue.async { [weak self] in
@@ -3139,52 +2877,18 @@ extension BLEService {
     // MARK: Private Message Handling
     
     private func sendPrivateMessage(_ content: String, to recipientID: PeerID, messageID: String) {
-        SecureLogger.debug("📨 Sending PM to \(recipientID): \(content.prefix(30))...", category: .session)
+        SecureLogger.debug("📨 Sending PM to \(recipientID.id.prefix(8))… id=\(messageID.prefix(8))… chars=\(content.count) bytes=\(content.utf8.count)", category: .session)
         
         // Check if we have an established Noise session
         if noiseService.hasEstablishedSession(with: recipientID) {
             // Encrypt and send
             do {
-                // Create TLV-encoded private message
-                let privateMessage = PrivateMessagePacket(messageID: messageID, content: content)
-                guard let tlvData = privateMessage.encode() else {
+                guard let messagePayload = BLENoisePayloadFactory.privateMessage(content: content, messageID: messageID) else {
                     SecureLogger.error("Failed to encode private message with TLV")
                     return
                 }
                 
-                // Create message payload with TLV: [type byte] + [TLV data]
-                var messagePayload = Data([NoisePayloadType.privateMessage.rawValue])
-                messagePayload.append(tlvData)
-                
-                let encrypted = try noiseService.encrypt(messagePayload, for: recipientID)
-                
-                // Convert recipientID to Data (assuming it's a hex string)
-                var recipientData = Data()
-                var tempID = recipientID.id
-                while tempID.count >= 2 {
-                    let hexByte = String(tempID.prefix(2))
-                    if let byte = UInt8(hexByte, radix: 16) {
-                        recipientData.append(byte)
-                    }
-                    tempID = String(tempID.dropFirst(2))
-                }
-                if tempID.count == 1 {
-                    if let byte = UInt8(tempID, radix: 16) {
-                        recipientData.append(byte)
-                    }
-                }
-
-                let packet = BitchatPacket(
-                    type: MessageType.noiseEncrypted.rawValue,
-                    senderID: myPeerIDData,
-                    recipientID: recipientData,
-                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                    payload: encrypted,
-                    signature: nil,
-                    ttl: messageTTL
-                )
-                
-                broadcastPacket(packet)
+                broadcastPacket(try makeEncryptedNoisePacket(messagePayload, to: recipientID))
                 
                 // Notify delegate that message was sent
                 notifyUI { [weak self] in
@@ -3195,14 +2899,11 @@ extension BLEService {
             }
         } else {
             // Queue message for sending after handshake completes
-            SecureLogger.debug("🤝 No session with \(recipientID), initiating handshake and queueing message", category: .session)
+            SecureLogger.debug("🤝 No session with \(recipientID.id.prefix(8))…, initiating handshake and queueing message", category: .session)
             
             // Queue the message (especially important for favorite notifications)
             collectionsQueue.sync(flags: .barrier) {
-                if pendingMessagesAfterHandshake[recipientID] == nil {
-                    pendingMessagesAfterHandshake[recipientID] = []
-                }
-                pendingMessagesAfterHandshake[recipientID]?.append((content, messageID))
+                pendingNoiseSessionQueues.appendPrivateMessage(content: content, messageID: messageID, for: recipientID)
             }
             
             initiateNoiseHandshake(with: recipientID)
@@ -3239,61 +2940,43 @@ extension BLEService {
     
     private func sendPendingMessagesAfterHandshake(for peerID: PeerID) {
         // Atomically take all pending messages to process (prevents concurrent modification)
-        let pendingMessages = collectionsQueue.sync(flags: .barrier) { () -> [(content: String, messageID: String)]? in
-            let messages = pendingMessagesAfterHandshake[peerID]
-            pendingMessagesAfterHandshake.removeValue(forKey: peerID)
-            return messages
+        let pendingMessages = collectionsQueue.sync(flags: .barrier) { () -> [BLEPendingPrivateMessage] in
+            pendingNoiseSessionQueues.takePrivateMessages(for: peerID)
         }
 
-        guard let messages = pendingMessages, !messages.isEmpty else { return }
+        guard !pendingMessages.isEmpty else { return }
 
-        SecureLogger.debug("📤 Sending \(messages.count) pending messages after handshake to \(peerID)", category: .session)
+        SecureLogger.debug("📤 Sending \(pendingMessages.count) pending messages after handshake to \(peerID.id.prefix(8))…", category: .session)
 
         // Track failed messages for re-queuing
-        var failedMessages: [(content: String, messageID: String)] = []
+        var failedMessages: [BLEPendingPrivateMessage] = []
 
         // Send each pending message directly (we know session is established)
-        for (content, messageID) in messages {
+        for message in pendingMessages {
             do {
                 // Use the same TLV format as normal sends to keep receiver decoding consistent
-                let privateMessage = PrivateMessagePacket(messageID: messageID, content: content)
-                guard let tlvData = privateMessage.encode() else {
+                guard let messagePayload = BLENoisePayloadFactory.privateMessage(content: message.content, messageID: message.messageID) else {
                     SecureLogger.error("Failed to encode pending private message TLV")
-                    failedMessages.append((content, messageID))
+                    failedMessages.append(message)
                     continue
                 }
 
-                var messagePayload = Data([NoisePayloadType.privateMessage.rawValue])
-                messagePayload.append(tlvData)
-
-                let encrypted = try noiseService.encrypt(messagePayload, for: peerID)
-
-                let packet = BitchatPacket(
-                    type: MessageType.noiseEncrypted.rawValue,
-                    senderID: myPeerIDData,
-                    recipientID: Data(hexString: peerID.id),
-                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                    payload: encrypted,
-                    signature: nil,
-                    ttl: messageTTL
-                )
-
                 // We're already on messageQueue from the callback
-                broadcastPacket(packet)
+                broadcastPacket(try makeEncryptedNoisePacket(messagePayload, to: peerID))
 
                 // Notify delegate that message was sent
                 notifyUI { [weak self] in
-                    self?.deliverTransportEvent(.messageDeliveryStatusUpdated(messageID: messageID, status: .sent))
+                    self?.deliverTransportEvent(.messageDeliveryStatusUpdated(messageID: message.messageID, status: .sent))
                 }
 
-                SecureLogger.debug("✅ Sent pending message \(messageID) to \(peerID) after handshake", category: .session)
+                SecureLogger.debug("✅ Sent pending message id=\(message.messageID.prefix(8))… to \(peerID.id.prefix(8))… after handshake", category: .session)
             } catch {
                 SecureLogger.error("Failed to send pending message after handshake: \(error)")
-                failedMessages.append((content, messageID))
+                failedMessages.append(message)
 
                 // Notify delegate of failure
                 notifyUI { [weak self] in
-                    self?.deliverTransportEvent(.messageDeliveryStatusUpdated(messageID: messageID, status: .failed(reason: "Encryption failed")))
+                    self?.deliverTransportEvent(.messageDeliveryStatusUpdated(messageID: message.messageID, status: .failed(reason: "Encryption failed")))
                 }
             }
         }
@@ -3302,12 +2985,9 @@ extension BLEService {
         if !failedMessages.isEmpty {
             collectionsQueue.async(flags: .barrier) { [weak self] in
                 guard let self = self else { return }
-                if self.pendingMessagesAfterHandshake[peerID] == nil {
-                    self.pendingMessagesAfterHandshake[peerID] = []
-                }
                 // Prepend failed messages to maintain order
-                self.pendingMessagesAfterHandshake[peerID]?.insert(contentsOf: failedMessages, at: 0)
-                SecureLogger.warning("⚠️ Re-queued \(failedMessages.count) failed messages for \(peerID)", category: .session)
+                self.pendingNoiseSessionQueues.prependPrivateMessages(failedMessages, for: peerID)
+                SecureLogger.warning("⚠️ Re-queued \(failedMessages.count) failed messages for \(peerID.id.prefix(8))…", category: .session)
             }
         }
     }
@@ -3315,68 +2995,49 @@ extension BLEService {
     // MARK: Fragmentation (Required for messages > BLE MTU)
     
     private func sendFragmentedPacket(_ packet: BitchatPacket, pad: Bool, maxChunk: Int? = nil, directedOnlyPeer: PeerID? = nil, transferId: String? = nil) {
-        let context = PendingFragmentTransfer(packet: packet, pad: pad, maxChunk: maxChunk, directedPeer: directedOnlyPeer, transferId: transferId)
-        if packet.type == MessageType.fileTransfer.rawValue {
-            let shouldQueue = collectionsQueue.sync {
-                self.activeTransfers.count >= TransportConfig.bleMaxConcurrentTransfers
-            }
-            if shouldQueue {
-                queueFragmentTransfer(context, prioritizeFront: false)
-                return
-            }
+        let request = BLEOutboundFragmentTransferRequest(
+            packet: packet,
+            pad: pad,
+            maxChunk: maxChunk,
+            directedPeer: directedOnlyPeer,
+            transferId: transferId
+        )
+
+        let result = collectionsQueue.sync(flags: .barrier) {
+            outboundFragmentTransfers.submit(request, maxConcurrentTransfers: TransportConfig.bleMaxConcurrentTransfers)
         }
-        startFragmentedPacket(context)
+        handleFragmentTransferSubmitResult(result)
     }
 
-    private func queueFragmentTransfer(_ context: PendingFragmentTransfer, prioritizeFront: Bool) {
-        collectionsQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
-            if prioritizeFront {
-                self.pendingFragmentTransfers.insert(context, at: 0)
+    private func handleFragmentTransferSubmitResult(_ result: BLEOutboundFragmentTransferScheduler.SubmitResult) {
+        switch result {
+        case let .start(request, reservedTransferId):
+            startFragmentedPacket(request, reservedTransferId: reservedTransferId)
+
+        case let .queued(_, transferId, _):
+            if let transferId {
+                SecureLogger.debug("🚦 Queued media transfer \(transferId.prefix(8))… waiting for slot", category: .session)
             } else {
-                self.pendingFragmentTransfers.append(context)
+                SecureLogger.debug("🚦 Queued fragment transfer waiting for slot", category: .session)
             }
-        }
-        if let transferId = context.transferId {
-            SecureLogger.debug("🚦 Queued media transfer \(transferId.prefix(8))… waiting for slot", category: .session)
-        } else {
-            SecureLogger.debug("🚦 Queued fragment transfer waiting for slot", category: .session)
         }
     }
 
-    private func startFragmentedPacket(_ context: PendingFragmentTransfer) {
-        let packet = context.packet
-        let isFileTransfer = packet.type == MessageType.fileTransfer.rawValue
-        var reservedTransferId: String?
+    private func startFragmentedPacket(_ request: BLEOutboundFragmentTransferRequest, reservedTransferId: String?) {
+        let packet = request.packet
 
-        let releaseReservedSlot: (String) -> Void = { id in
+        let releaseReservedSlot: (String) -> Void = { [weak self] id in
+            guard let self = self else { return }
             TransferProgressManager.shared.cancel(id: id)
             self.collectionsQueue.async(flags: .barrier) { [weak self] in
-                self?.activeTransfers.removeValue(forKey: id)
+                _ = self?.outboundFragmentTransfers.releaseReservation(id)
             }
             self.messageQueue.async { [weak self] in
                 self?.startNextPendingTransferIfNeeded()
             }
         }
 
-        if isFileTransfer {
-            let candidateId = context.transferId ?? packet.payload.sha256Hex()
-            var didReserve = false
-            collectionsQueue.sync(flags: .barrier) {
-                if self.activeTransfers.count < TransportConfig.bleMaxConcurrentTransfers,
-                   self.activeTransfers[candidateId] == nil {
-                    self.activeTransfers[candidateId] = ActiveTransferState(totalFragments: 0, sentFragments: 0, workItems: [])
-                    didReserve = true
-                }
-            }
-            guard didReserve else {
-                queueFragmentTransfer(context, prioritizeFront: true)
-                return
-            }
-            reservedTransferId = candidateId
-        }
-
-        guard let fullData = packet.toBinaryData(padding: context.pad) else {
+        guard let fullData = packet.toBinaryData(padding: request.pad) else {
             if let id = reservedTransferId {
                 releaseReservedSlot(id)
             }
@@ -3398,7 +3059,7 @@ extension BLEService {
             calculatedChunk = max(64, bleMaxMTU - overhead)
         }
 
-        let chunk = context.maxChunk ?? calculatedChunk
+        let chunk = request.maxChunk ?? calculatedChunk
         let safeChunk = max(64, chunk)
         let fragments = stride(from: 0, to: fullData.count, by: safeChunk).map { offset in
             Data(fullData[offset..<min(offset + safeChunk, fullData.count)])
@@ -3423,12 +3084,12 @@ extension BLEService {
                 }
             }
         }
-        let perFragMs = (context.directedPeer != nil || packet.recipientID != nil) ? TransportConfig.bleFragmentSpacingDirectedMs : TransportConfig.bleFragmentSpacingMs
+        let perFragMs = (request.directedPeer != nil || packet.recipientID != nil) ? TransportConfig.bleFragmentSpacingDirectedMs : TransportConfig.bleFragmentSpacingMs
 
         let transferIdentifier: String? = {
             guard let id = reservedTransferId else { return nil }
             collectionsQueue.sync(flags: .barrier) {
-                self.activeTransfers[id] = ActiveTransferState(totalFragments: totalFragments, sentFragments: 0, workItems: [])
+                _ = self.outboundFragmentTransfers.activateReservedTransfer(id: id, totalFragments: totalFragments, workItems: [])
             }
             TransferProgressManager.shared.start(id: id, totalFragments: totalFragments)
             return id
@@ -3445,7 +3106,7 @@ extension BLEService {
             payload.append(fragment)
 
             let fragmentRecipient: Data? = {
-                if let only = context.directedPeer { return Data(hexString: only.id) }
+                if let only = request.directedPeer { return Data(hexString: only.id) }
                 return packet.recipientID
             }()
 
@@ -3465,7 +3126,7 @@ extension BLEService {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
                 if let transferId = transferIdentifier {
-                    let isActive = self.collectionsQueue.sync { self.activeTransfers[transferId] != nil }
+                    let isActive = self.collectionsQueue.sync { self.outboundFragmentTransfers.isActive(transferId) }
                     guard isActive else { return }
                 }
                 if fragmentRecipient == nil || fragmentRecipient?.allSatisfy({ $0 == 0xFF }) == true {
@@ -3483,9 +3144,7 @@ extension BLEService {
         if let transferId = transferIdentifier {
             let workItems = scheduledItems.map { $0.item }
             collectionsQueue.async(flags: .barrier) { [weak self] in
-                guard let self = self, var state = self.activeTransfers[transferId] else { return }
-                state.workItems = workItems
-                self.activeTransfers[transferId] = state
+                _ = self?.outboundFragmentTransfers.updateWorkItems(workItems, for: transferId)
             }
         }
 
@@ -3499,16 +3158,17 @@ extension BLEService {
 
     private func markFragmentSent(transferId: String) {
         collectionsQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self, var state = self.activeTransfers[transferId] else { return }
-            state.sentFragments = min(state.sentFragments + 1, state.totalFragments)
-            let isComplete = state.sentFragments >= state.totalFragments
-            if isComplete {
-                self.activeTransfers.removeValue(forKey: transferId)
-            } else {
-                self.activeTransfers[transferId] = state
+            guard let self = self else { return }
+
+            switch self.outboundFragmentTransfers.markFragmentSent(transferId: transferId) {
+            case .progress, .complete:
+                TransferProgressManager.shared.recordFragmentSent(id: transferId)
+
+            case .missing:
+                return
             }
-            TransferProgressManager.shared.recordFragmentSent(id: transferId)
-            if isComplete {
+
+            if !self.outboundFragmentTransfers.isActive(transferId) {
                 self.messageQueue.async { [weak self] in
                     self?.startNextPendingTransferIfNeeded()
                 }
@@ -3517,20 +3177,13 @@ extension BLEService {
     }
 
     private func startNextPendingTransferIfNeeded() {
-        collectionsQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
-            let limit = TransportConfig.bleMaxConcurrentTransfers
-            var availableSlots = max(0, limit - self.activeTransfers.count)
-            guard availableSlots > 0, !self.pendingFragmentTransfers.isEmpty else { return }
-            var toStart: [PendingFragmentTransfer] = []
-            while availableSlots > 0, !self.pendingFragmentTransfers.isEmpty {
-                toStart.append(self.pendingFragmentTransfers.removeFirst())
-                availableSlots -= 1
-            }
-            for context in toStart {
-                self.messageQueue.async { [weak self] in
-                    self?.startFragmentedPacket(context)
-                }
+        let results = collectionsQueue.sync(flags: .barrier) {
+            outboundFragmentTransfers.reservePendingStarts(maxConcurrentTransfers: TransportConfig.bleMaxConcurrentTransfers)
+        }
+
+        for result in results {
+            messageQueue.async { [weak self] in
+                self?.handleFragmentTransferSubmitResult(result)
             }
         }
     }
@@ -3627,7 +3280,7 @@ extension BLEService {
         // Only log non-announce packets to reduce noise
         if packet.type != MessageType.announce.rawValue {
             // Log packet details for debugging
-            SecureLogger.debug("📦 Handling packet type \(packet.type) from \(senderID), messageID: \(messageID)", category: .session)
+            SecureLogger.debug("📦 Handling packet type \(packet.type) from \(senderID.id.prefix(8))…, messageID: \(messageID.prefix(24))…", category: .session)
         }
         
         // Efficient deduplication
@@ -3639,7 +3292,7 @@ extension BLEService {
             // Announce packets (type 1) are sent every 10 seconds for peer discovery
             // It's normal to see these as duplicates - don't log them to reduce noise
             if packet.type != MessageType.announce.rawValue {
-                SecureLogger.debug("⚠️ Duplicate packet ignored: \(messageID)", category: .session)
+                SecureLogger.debug("⚠️ Duplicate packet ignored: \(messageID.prefix(24))…", category: .session)
             }
             // In sparse graphs (<=2 neighbors), keep the pending relay to ensure bridging.
             // In denser graphs, cancel the pending relay to reduce redundant floods.
@@ -3744,7 +3397,7 @@ extension BLEService {
     
     private func handleAnnounce(_ packet: BitchatPacket, from peerID: PeerID) {
         guard let announcement = AnnouncementPacket.decode(from: packet.payload) else {
-            SecureLogger.error("❌ Failed to decode announce packet from \(peerID)", category: .session)
+            SecureLogger.error("❌ Failed to decode announce packet from \(peerID.id.prefix(8))…", category: .session)
             return
         }
         
@@ -3865,7 +3518,7 @@ extension BLEService {
                         lastReconnectLogAt[peerID] = now
                     }
                 } else if existingPeer?.nickname != announcement.nickname {
-                    SecureLogger.debug("🔄 Peer \(peerID) changed nickname: \(existingPeer?.nickname ?? "Unknown") -> \(announcement.nickname)", category: .session)
+                    SecureLogger.debug("🔄 Peer \(peerID.id.prefix(8))… changed nickname: \(existingPeer?.nickname ?? "Unknown") -> \(announcement.nickname)", category: .session)
                 }
             }
         }
@@ -3929,7 +3582,7 @@ extension BLEService {
     // Handle REQUEST_SYNC: decode payload and respond with missing packets via sync manager
     private func handleRequestSync(_ packet: BitchatPacket, from peerID: PeerID) {
         guard let req = RequestSyncPacket.decode(from: packet.payload) else {
-            SecureLogger.warning("⚠️ Malformed REQUEST_SYNC from \(peerID)", category: .session)
+            SecureLogger.warning("⚠️ Malformed REQUEST_SYNC from \(peerID.id.prefix(8))…", category: .session)
             return
         }
         gossipSyncManager?.handleRequestSync(from: peerID, request: req)
@@ -4025,7 +3678,7 @@ extension BLEService {
         let hasDirectLink = directLink.hasPeripheral || directLink.hasCentral
 
         let pathTag = hasDirectLink ? "direct" : "mesh"
-        SecureLogger.debug("💬 [\(senderNickname)] TTL:\(packet.ttl) (\(pathTag)): \(String(content.prefix(50)))\(content.count > 50 ? "..." : "")", category: .session)
+        SecureLogger.debug("💬 [\(senderNickname)] TTL:\(packet.ttl) (\(pathTag)) chars=\(content.count) bytes=\(packet.payload.count)", category: .session)
 
         let ts = Date(timeIntervalSince1970: Double(packet.timestamp) / 1000)
         var resolvedSelfMessageID: String? = nil
@@ -4086,7 +3739,7 @@ extension BLEService {
         }
         
         if recipientID != myPeerID {
-            SecureLogger.debug("🔐 Encrypted message not for me (for \(recipientID), I am \(myPeerID))", category: .session)
+            SecureLogger.debug("🔐 Encrypted message not for me (for \(recipientID.id.prefix(8))…, I am \(myPeerID.id.prefix(8))…)", category: .session)
             return
         }
         
@@ -4106,7 +3759,7 @@ extension BLEService {
                 return
             }
 
-            SecureLogger.debug("🔐 Decrypted noise payload type \(noisePayloadType.description) from \(peerID)", category: .session)
+            SecureLogger.debug("🔐 Decrypted noise payload type \(noisePayloadType.description) from \(peerID.id.prefix(8))…", category: .session)
 
             switch noisePayloadType {
             case .privateMessage:
@@ -4138,14 +3791,14 @@ extension BLEService {
         } catch NoiseEncryptionError.sessionNotEstablished {
             // We received an encrypted message before establishing a session with this peer.
             // Trigger a handshake so future messages can be decrypted.
-            SecureLogger.debug("🔑 Encrypted message from \(peerID) without session; initiating handshake")
+            SecureLogger.debug("🔑 Encrypted message from \(peerID.id.prefix(8))… without session; initiating handshake")
             if !noiseService.hasSession(with: peerID) {
                 initiateNoiseHandshake(with: peerID)
             }
         } catch {
             // Decryption failed - clear the corrupted session and re-initiate handshake
             // This handles cases where session state got out of sync (nonce mismatch, etc.)
-            SecureLogger.error("❌ Failed to decrypt message from \(peerID): \(error) - clearing session and re-initiating handshake")
+            SecureLogger.error("❌ Failed to decrypt message from \(peerID.id.prefix(8))…: \(error) - clearing session and re-initiating handshake")
             noiseService.clearSession(for: peerID)
             initiateNoiseHandshake(with: peerID)
         }
@@ -4155,27 +3808,15 @@ extension BLEService {
     
     private func sendPendingNoisePayloadsAfterHandshake(for peerID: PeerID) {
         let payloads = collectionsQueue.sync(flags: .barrier) { () -> [Data] in
-            let list = pendingNoisePayloadsAfterHandshake[peerID] ?? []
-            pendingNoisePayloadsAfterHandshake.removeValue(forKey: peerID)
-            return list
+            pendingNoiseSessionQueues.takeTypedPayloads(for: peerID)
         }
         guard !payloads.isEmpty else { return }
-        SecureLogger.debug("📤 Sending \(payloads.count) pending noise payloads to \(peerID) after handshake", category: .session)
+        SecureLogger.debug("📤 Sending \(payloads.count) pending noise payloads to \(peerID.id.prefix(8))… after handshake", category: .session)
         for payload in payloads {
             do {
-                let encrypted = try noiseService.encrypt(payload, for: peerID)
-                let packet = BitchatPacket(
-                    type: MessageType.noiseEncrypted.rawValue,
-                    senderID: myPeerIDData,
-                    recipientID: Data(hexString: peerID.id),
-                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                    payload: encrypted,
-                    signature: nil,
-                    ttl: messageTTL
-                )
-                broadcastPacket(packet)
+                broadcastPacket(try makeEncryptedNoisePacket(payload, to: peerID))
             } catch {
-                SecureLogger.error("❌ Failed to send pending noise payload to \(peerID): \(error)")
+                SecureLogger.error("❌ Failed to send pending noise payload to \(peerID.id.prefix(8))…: \(error)")
             }
         }
     }
@@ -4334,7 +3975,7 @@ extension BLEService {
                 // Cleanup: remove peers that are not connected and past reachability retention
                 if !peer.isConnected {
                     if age > retention {
-                        SecureLogger.debug("🗑️ Removing stale peer after reachability window: \(peerID) (\(peer.nickname))", category: .session)
+                        SecureLogger.debug("🗑️ Removing stale peer after reachability window: \(peerID.id.prefix(8))… (\(peer.nickname))", category: .session)
                         // Also remove any stored announcement from sync candidates
                         gossipSyncManager?.removeAnnouncementForPeer(peerID)
                         peers.removeValue(forKey: peerID)
