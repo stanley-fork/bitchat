@@ -106,6 +106,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
     // MARK: - Transport Protocol Conformance
 
     weak var delegate: BitchatDelegate?
+    weak var eventDelegate: TransportEventDelegate?
     weak var peerEventsDelegate: TransportPeerEventsDelegate?
 
     var peerSnapshotPublisher: AnyPublisher<[TransportPeerSnapshot], Never> {
@@ -173,9 +174,9 @@ final class NostrTransport: Transport, @unchecked Sendable {
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
         // Enqueue and process with throttling to avoid relay rate limits
         // Use barrier to synchronize access to readQueue
-        queue.async(flags: .barrier) { [weak self] in
-            self?.readQueue.append(QueuedRead(receipt: receipt, peerID: peerID))
-            self?.processReadQueueIfNeeded()
+        queue.async(flags: .barrier) {
+            self.readQueue.append(QueuedRead(receipt: receipt, peerID: peerID))
+            self.processReadQueueIfNeeded()
         }
     }
 
