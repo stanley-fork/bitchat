@@ -63,6 +63,7 @@ final class PrivateInboxModel: ObservableObject {
             nextMessagesByPeerID[peerID] = []
         }
 
+        guard messagesByPeerID != nextMessagesByPeerID else { return }
         messagesByPeerID = nextMessagesByPeerID
     }
 }

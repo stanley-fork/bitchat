@@ -152,11 +152,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     private lazy var peerListCoordinator = ChatPeerListCoordinator(viewModel: self)
     private lazy var messageFormatter = ChatMessageFormatter(viewModel: self)
     lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(viewModel: self)
-    lazy var deliveryCoordinator = ChatDeliveryCoordinator(viewModel: self)
+    lazy var deliveryCoordinator = ChatDeliveryCoordinator(context: self)
     lazy var composerCoordinator = ChatComposerCoordinator(viewModel: self)
-    lazy var publicConversationCoordinator = ChatPublicConversationCoordinator(viewModel: self)
-    lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(viewModel: self)
-    lazy var nostrCoordinator = ChatNostrCoordinator(viewModel: self)
+    lazy var publicConversationCoordinator = ChatPublicConversationCoordinator(context: self)
+    lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(context: self)
+    lazy var nostrCoordinator = ChatNostrCoordinator(context: self)
     lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(viewModel: self)
     lazy var verificationCoordinator = ChatVerificationCoordinator(viewModel: self)
 
@@ -168,7 +168,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         get { privateChatManager.privateChats }
         set {
             privateChatManager.privateChats = newValue
-            synchronizePrivateConversationStore()
+            schedulePrivateConversationStoreSynchronization()
         }
     }
     var selectedPrivateChatPeer: PeerID? {
@@ -187,7 +187,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         get { privateChatManager.unreadMessages }
         set {
             privateChatManager.unreadMessages = newValue
-            synchronizePrivateConversationStore()
+            schedulePrivateConversationStoreSynchronization()
         }
     }
 
@@ -372,6 +372,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // MARK: - Message Delivery Tracking
 
     var cancellables = Set<AnyCancellable>()
+    private var pendingPrivateConversationStoreSyncTask: Task<Void, Never>?
 
     var transferIdToMessageIDs: [String: [String]] {
         mediaTransferCoordinator.transferIdToMessageIDs
@@ -965,6 +966,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func synchronizeAllPublicConversationStores() {
         publicConversationCoordinator.synchronizeAllPublicConversationStores()
+    }
+
+    @MainActor
+    func schedulePrivateConversationStoreSynchronization() {
+        guard pendingPrivateConversationStoreSyncTask == nil else { return }
+        pendingPrivateConversationStoreSyncTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            self.pendingPrivateConversationStoreSyncTask = nil
+            self.synchronizePrivateConversationStore()
+        }
     }
 
     @MainActor

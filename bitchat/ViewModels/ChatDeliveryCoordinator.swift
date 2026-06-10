@@ -2,29 +2,65 @@ import BitFoundation
 import BitLogger
 import Foundation
 
-final class ChatDeliveryCoordinator {
-    private unowned let viewModel: ChatViewModel
+/// The narrow surface `ChatDeliveryCoordinator` needs from its owner.
+///
+/// Coordinators should depend on the minimal context they actually use rather
+/// than holding an `unowned` back-reference to the whole `ChatViewModel`. This
+/// keeps the coordinator independently testable (see
+/// `ChatDeliveryCoordinatorContextTests`) and makes its true dependencies
+/// explicit. This protocol is the exemplar for migrating the other
+/// coordinators off their `unowned let viewModel: ChatViewModel` back-refs.
+@MainActor
+protocol ChatDeliveryContext: AnyObject {
+    var messages: [BitchatMessage] { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var sentReadReceipts: Set<String> { get set }
+    var isStartupPhase: Bool { get }
+    /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
+    func notifyUIChanged()
+    /// Confirms receipt so the message router stops retaining the message for resend.
+    func markMessageDelivered(_ messageID: String)
+}
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+extension ChatViewModel: ChatDeliveryContext {
+    func notifyUIChanged() {
+        objectWillChange.send()
+    }
+
+    func markMessageDelivered(_ messageID: String) {
+        messageRouter.markDelivered(messageID)
+    }
+}
+
+final class ChatDeliveryCoordinator {
+    private unowned let context: any ChatDeliveryContext
+    private var messageLocationIndex: [String: Set<MessageLocation>] = [:]
+    private var indexedPublicMessageCount = 0
+    private var indexedPublicTailMessageID: String?
+    private var indexedPrivateMessageCounts: [PeerID: Int] = [:]
+    private var indexedPrivateTailMessageIDs: [PeerID: String] = [:]
+    private var hasBuiltMessageLocationIndex = false
+
+    init(context: any ChatDeliveryContext) {
+        self.context = context
     }
 
     @MainActor
     func cleanupOldReadReceipts() {
-        guard !viewModel.isStartupPhase, !viewModel.privateChats.isEmpty else {
+        guard !context.isStartupPhase, !context.privateChats.isEmpty else {
             return
         }
 
         let validMessageIDs = Set(
-            viewModel.privateChats.values.flatMap { messages in
+            context.privateChats.values.flatMap { messages in
                 messages.map(\.id)
             }
         )
 
-        let oldCount = viewModel.sentReadReceipts.count
-        viewModel.sentReadReceipts = viewModel.sentReadReceipts.intersection(validMessageIDs)
+        let oldCount = context.sentReadReceipts.count
+        context.sentReadReceipts = context.sentReadReceipts.intersection(validMessageIDs)
 
-        let removedCount = oldCount - viewModel.sentReadReceipts.count
+        let removedCount = oldCount - context.sentReadReceipts.count
         if removedCount > 0 {
             SecureLogger.debug("🧹 Cleaned up \(removedCount) old read receipts", category: .session)
         }
@@ -45,48 +81,65 @@ final class ChatDeliveryCoordinator {
 
     @MainActor
     func deliveryStatus(for messageID: String) -> DeliveryStatus? {
-        if let message = viewModel.messages.first(where: { $0.id == messageID }) {
-            return message.deliveryStatus
+        withValidLocations(for: messageID) { locations in
+            locations.lazy.compactMap { self.deliveryStatus(at: $0) }.first
         }
-
-        for messages in viewModel.privateChats.values {
-            if let message = messages.first(where: { $0.id == messageID }) {
-                return message.deliveryStatus
-            }
-        }
-
-        return nil
     }
 
     @MainActor
     @discardableResult
     func updateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) -> Bool {
-        var didUpdateStatus = false
+        switch status {
+        case .delivered, .read:
+            // Confirmed receipt — stop retaining the message for resend.
+            context.markMessageDelivered(messageID)
+        default:
+            break
+        }
 
-        if let index = viewModel.messages.firstIndex(where: { $0.id == messageID }) {
-            let currentStatus = viewModel.messages[index].deliveryStatus
+        var didUpdateStatus = false
+        var didUpdatePrivateStatus = false
+        let locations = withValidLocations(for: messageID) { $0 }
+        guard !locations.isEmpty else { return false }
+
+        for location in locations {
+            guard case .publicTimeline(let index) = location,
+                  index < context.messages.count,
+                  context.messages[index].id == messageID else {
+                continue
+            }
+
+            let currentStatus = context.messages[index].deliveryStatus
             if !shouldSkipUpdate(currentStatus: currentStatus, newStatus: status) {
-                viewModel.messages[index].deliveryStatus = status
+                context.messages[index].deliveryStatus = status
                 didUpdateStatus = true
             }
         }
 
-        var privateChats = viewModel.privateChats
-        for (peerID, chatMessages) in privateChats {
-            guard let index = chatMessages.firstIndex(where: { $0.id == messageID }) else { continue }
+        var privateChats = context.privateChats
+        for location in locations {
+            guard case .privateChat(let peerID, let index) = location,
+                  let chatMessages = privateChats[peerID],
+                  index < chatMessages.count,
+                  chatMessages[index].id == messageID else {
+                continue
+            }
 
             let currentStatus = chatMessages[index].deliveryStatus
             guard !shouldSkipUpdate(currentStatus: currentStatus, newStatus: status) else { continue }
 
-            let updatedMessages = chatMessages
-            updatedMessages[index].deliveryStatus = status
-            privateChats[peerID] = updatedMessages
+            chatMessages[index].deliveryStatus = status
+            privateChats[peerID] = chatMessages
             didUpdateStatus = true
+            didUpdatePrivateStatus = true
+        }
+
+        if didUpdatePrivateStatus {
+            context.privateChats = privateChats
         }
 
         if didUpdateStatus {
-            viewModel.privateChats = privateChats
-            viewModel.objectWillChange.send()
+            context.notifyUIChanged()
         }
 
         return didUpdateStatus
@@ -94,8 +147,14 @@ final class ChatDeliveryCoordinator {
 }
 
 private extension ChatDeliveryCoordinator {
+    enum MessageLocation: Hashable {
+        case publicTimeline(index: Int)
+        case privateChat(peerID: PeerID, index: Int)
+    }
+
     func shouldSkipUpdate(currentStatus: DeliveryStatus?, newStatus: DeliveryStatus) -> Bool {
         guard let currentStatus else { return false }
+        if currentStatus == newStatus { return true }
 
         switch (currentStatus, newStatus) {
         case (.read, .delivered), (.read, .sent):
@@ -103,5 +162,149 @@ private extension ChatDeliveryCoordinator {
         default:
             return false
         }
+    }
+
+    @MainActor
+    func withValidLocations<T>(
+        for messageID: String,
+        _ body: (Set<MessageLocation>) -> T
+    ) -> T {
+        let didRebuildIndex = refreshMessageLocationIndexForGrowth()
+
+        if let locations = messageLocationIndex[messageID],
+           locations.allSatisfy({ isLocation($0, validFor: messageID) }) {
+            return body(locations)
+        }
+
+        guard !didRebuildIndex else {
+            return body(messageLocationIndex[messageID] ?? [])
+        }
+
+        if messageLocationIndex[messageID] == nil {
+            return body([])
+        }
+
+        rebuildMessageLocationIndex()
+        return body(messageLocationIndex[messageID] ?? [])
+    }
+
+    @MainActor
+    func deliveryStatus(at location: MessageLocation) -> DeliveryStatus? {
+        switch location {
+        case .publicTimeline(let index):
+            guard index < context.messages.count else { return nil }
+            return context.messages[index].deliveryStatus
+        case .privateChat(let peerID, let index):
+            guard let messages = context.privateChats[peerID],
+                  index < messages.count else {
+                return nil
+            }
+            return messages[index].deliveryStatus
+        }
+    }
+
+    @MainActor
+    func isLocation(_ location: MessageLocation, validFor messageID: String) -> Bool {
+        switch location {
+        case .publicTimeline(let index):
+            return index < context.messages.count
+                && context.messages[index].id == messageID
+        case .privateChat(let peerID, let index):
+            guard let messages = context.privateChats[peerID],
+                  index < messages.count else {
+                return false
+            }
+            return messages[index].id == messageID
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    func refreshMessageLocationIndexForGrowth() -> Bool {
+        guard hasBuiltMessageLocationIndex else {
+            rebuildMessageLocationIndex()
+            return true
+        }
+
+        if context.messages.count < indexedPublicMessageCount {
+            rebuildMessageLocationIndex()
+            return true
+        }
+
+        if context.messages.count == indexedPublicMessageCount,
+           context.messages.last?.id != indexedPublicTailMessageID {
+            rebuildMessageLocationIndex()
+            return true
+        }
+
+        if context.messages.count > indexedPublicMessageCount {
+            for index in indexedPublicMessageCount..<context.messages.count {
+                add(.publicTimeline(index: index), for: context.messages[index].id)
+            }
+            indexedPublicMessageCount = context.messages.count
+            indexedPublicTailMessageID = context.messages.last?.id
+        }
+
+        let currentPeerIDs = Set(context.privateChats.keys)
+        if !Set(indexedPrivateMessageCounts.keys).isSubset(of: currentPeerIDs) {
+            rebuildMessageLocationIndex()
+            return true
+        }
+
+        for (peerID, messages) in context.privateChats {
+            let indexedCount = indexedPrivateMessageCounts[peerID] ?? 0
+            if messages.count < indexedCount {
+                rebuildMessageLocationIndex()
+                return true
+            }
+
+            if messages.count == indexedCount,
+               messages.last?.id != indexedPrivateTailMessageIDs[peerID] {
+                rebuildMessageLocationIndex()
+                return true
+            }
+
+            guard messages.count > indexedCount else { continue }
+            for index in indexedCount..<messages.count {
+                add(.privateChat(peerID: peerID, index: index), for: messages[index].id)
+            }
+            indexedPrivateMessageCounts[peerID] = messages.count
+            if let tailID = messages.last?.id {
+                indexedPrivateTailMessageIDs[peerID] = tailID
+            } else {
+                indexedPrivateTailMessageIDs.removeValue(forKey: peerID)
+            }
+        }
+
+        return false
+    }
+
+    @MainActor
+    func rebuildMessageLocationIndex() {
+        messageLocationIndex.removeAll(keepingCapacity: true)
+
+        for (index, message) in context.messages.enumerated() {
+            add(.publicTimeline(index: index), for: message.id)
+        }
+        indexedPublicMessageCount = context.messages.count
+        indexedPublicTailMessageID = context.messages.last?.id
+
+        indexedPrivateMessageCounts.removeAll(keepingCapacity: true)
+        indexedPrivateTailMessageIDs.removeAll(keepingCapacity: true)
+        for (peerID, messages) in context.privateChats {
+            for (index, message) in messages.enumerated() {
+                add(.privateChat(peerID: peerID, index: index), for: message.id)
+            }
+            indexedPrivateMessageCounts[peerID] = messages.count
+            if let tailID = messages.last?.id {
+                indexedPrivateTailMessageIDs[peerID] = tailID
+            }
+        }
+
+        hasBuiltMessageLocationIndex = true
+    }
+
+    func add(_ location: MessageLocation, for messageID: String) {
+        messageLocationIndex[messageID, default: []].insert(location)
     }
 }

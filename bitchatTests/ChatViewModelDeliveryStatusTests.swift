@@ -99,6 +99,30 @@ struct ChatViewModelDeliveryStatusTests {
     }
 
     @Test @MainActor
+    func deliveryStatus_identicalUpdateIsNoop() async {
+        let (viewModel, transport) = makeTestableViewModel()
+        let peerID = PeerID(str: "0102030405060708")
+        let messageID = "test-msg-identical"
+        let message = BitchatMessage(
+            id: messageID,
+            sender: viewModel.nickname,
+            content: "Test message",
+            timestamp: Date(),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Peer",
+            senderPeerID: transport.myPeerID,
+            deliveryStatus: .sent
+        )
+        viewModel.privateChats[peerID] = [message]
+
+        let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(messageID, status: .sent)
+
+        #expect(!didUpdate)
+        #expect(isSent(viewModel.privateChats[peerID]?.first?.deliveryStatus))
+    }
+
+    @Test @MainActor
     func deliveryStatus_upgrade_deliveredToRead() async {
         let (viewModel, transport) = makeTestableViewModel()
         let peerID = PeerID(str: "0102030405060708")
@@ -222,6 +246,104 @@ struct ChatViewModelDeliveryStatusTests {
         }())
     }
 
+    @Test @MainActor
+    func deliveryStatus_updatesPublicAndMirroredPrivateMessages() async {
+        let (viewModel, transport) = makeTestableViewModel()
+        let messageID = "mirrored-msg-1"
+        let firstPeerID = PeerID(str: "0102030405060708")
+        let secondPeerID = PeerID(str: "1112131415161718")
+
+        viewModel.messages = [
+            BitchatMessage(
+                id: messageID,
+                sender: viewModel.nickname,
+                content: "Public copy",
+                timestamp: Date(),
+                isRelay: false,
+                isPrivate: false,
+                senderPeerID: transport.myPeerID,
+                deliveryStatus: .sent
+            )
+        ]
+        viewModel.privateChats[firstPeerID] = [
+            BitchatMessage(
+                id: messageID,
+                sender: viewModel.nickname,
+                content: "Private copy A",
+                timestamp: Date(),
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Peer A",
+                senderPeerID: transport.myPeerID,
+                deliveryStatus: .sent
+            )
+        ]
+        viewModel.privateChats[secondPeerID] = [
+            BitchatMessage(
+                id: messageID,
+                sender: viewModel.nickname,
+                content: "Private copy B",
+                timestamp: Date(),
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Peer B",
+                senderPeerID: transport.myPeerID,
+                deliveryStatus: .sent
+            )
+        ]
+
+        let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(
+            messageID,
+            status: .delivered(to: "Peer", at: Date())
+        )
+
+        #expect(didUpdate)
+        #expect(isDelivered(viewModel.messages.first?.deliveryStatus))
+        #expect(isDelivered(viewModel.privateChats[firstPeerID]?.first?.deliveryStatus))
+        #expect(isDelivered(viewModel.privateChats[secondPeerID]?.first?.deliveryStatus))
+    }
+
+    @Test @MainActor
+    func deliveryStatus_indexRefreshesAfterPrivateChatReorder() async {
+        let (viewModel, transport) = makeTestableViewModel()
+        let peerID = PeerID(str: "0102030405060708")
+        let messageID = "reordered-msg-1"
+        let olderMessage = BitchatMessage(
+            id: "older-msg",
+            sender: viewModel.nickname,
+            content: "Older message",
+            timestamp: Date(timeIntervalSince1970: 1),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Peer",
+            senderPeerID: transport.myPeerID,
+            deliveryStatus: .sent
+        )
+        let targetMessage = BitchatMessage(
+            id: messageID,
+            sender: viewModel.nickname,
+            content: "Target message",
+            timestamp: Date(timeIntervalSince1970: 2),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Peer",
+            senderPeerID: transport.myPeerID,
+            deliveryStatus: .sent
+        )
+
+        viewModel.privateChats[peerID] = [targetMessage, olderMessage]
+        #expect(isSent(viewModel.deliveryCoordinator.deliveryStatus(for: messageID)))
+
+        viewModel.privateChats[peerID] = [olderMessage, targetMessage]
+        let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(
+            messageID,
+            status: .read(by: "Peer", at: Date())
+        )
+
+        #expect(didUpdate)
+        #expect(isRead(viewModel.privateChats[peerID]?.last?.deliveryStatus))
+    }
+
     // MARK: - Status Rank Tests (for deduplication)
 
     @Test @MainActor
@@ -251,4 +373,146 @@ struct ChatViewModelDeliveryStatusTests {
             }
         }
     }
+}
+
+// MARK: - Mock Delivery Context
+
+/// Lightweight stand-in for `ChatDeliveryContext` proving that
+/// `ChatDeliveryCoordinator` is testable without constructing a `ChatViewModel`.
+@MainActor
+private final class MockChatDeliveryContext: ChatDeliveryContext {
+    var messages: [BitchatMessage] = []
+    var privateChats: [PeerID: [BitchatMessage]] = [:]
+    var sentReadReceipts: Set<String> = []
+    var isStartupPhase = false
+    private(set) var notifyUIChangedCount = 0
+    private(set) var markedDeliveredMessageIDs: [String] = []
+
+    func notifyUIChanged() {
+        notifyUIChangedCount += 1
+    }
+
+    func markMessageDelivered(_ messageID: String) {
+        markedDeliveredMessageIDs.append(messageID)
+    }
+}
+
+@MainActor
+private func makePrivateMessage(id: String, status: DeliveryStatus) -> BitchatMessage {
+    BitchatMessage(
+        id: id,
+        sender: "me",
+        content: "Test message",
+        timestamp: Date(),
+        isRelay: false,
+        isPrivate: true,
+        recipientNickname: "Peer",
+        senderPeerID: PeerID(str: "aabbccddeeff0011"),
+        deliveryStatus: status
+    )
+}
+
+// MARK: - Coordinator Tests Against Mock Context
+
+/// Exercises `ChatDeliveryCoordinator` against `MockChatDeliveryContext` —
+/// the exemplar for the narrow-dependency coordinator pattern.
+struct ChatDeliveryCoordinatorContextTests {
+
+    @Test @MainActor
+    func updateDeliveryStatus_updatesPrivateChatNotifiesAndMarksDelivered() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let peerID = PeerID(str: "0102030405060708")
+        let messageID = "mock-msg-1"
+        context.privateChats[peerID] = [makePrivateMessage(id: messageID, status: .sent)]
+
+        let didUpdate = coordinator.updateMessageDeliveryStatus(
+            messageID,
+            status: .delivered(to: "Peer", at: Date())
+        )
+
+        #expect(didUpdate)
+        #expect(isDelivered(context.privateChats[peerID]?.first?.deliveryStatus))
+        #expect(context.notifyUIChangedCount == 1)
+        #expect(context.markedDeliveredMessageIDs == [messageID])
+    }
+
+    @Test @MainActor
+    func readReceipt_marksDeliveredAndUpgradesStatus() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let peerID = PeerID(str: "0102030405060708")
+        let messageID = "mock-msg-2"
+        context.privateChats[peerID] = [makePrivateMessage(id: messageID, status: .delivered(to: "Peer", at: Date()))]
+
+        coordinator.didReceiveReadReceipt(
+            ReadReceipt(originalMessageID: messageID, readerID: peerID, readerNickname: "Peer")
+        )
+
+        #expect(isRead(context.privateChats[peerID]?.first?.deliveryStatus))
+        #expect(context.notifyUIChangedCount == 1)
+        #expect(context.markedDeliveredMessageIDs == [messageID])
+    }
+
+    @Test @MainActor
+    func sentStatus_doesNotMarkDeliveredAndUnknownMessageDoesNotNotify() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        context.messages = [
+            BitchatMessage(
+                id: "public-mock-1",
+                sender: "me",
+                content: "Public message",
+                timestamp: Date(),
+                isRelay: false,
+                isPrivate: false,
+                deliveryStatus: .sending
+            )
+        ]
+
+        // .sent is not a confirmed receipt — must not reach markMessageDelivered.
+        let didUpdate = coordinator.updateMessageDeliveryStatus("public-mock-1", status: .sent)
+        #expect(didUpdate)
+        #expect(isSent(context.messages.first?.deliveryStatus))
+        #expect(context.markedDeliveredMessageIDs.isEmpty)
+        #expect(context.notifyUIChangedCount == 1)
+
+        // Unknown message: no state change, no extra UI notification.
+        let didUpdateUnknown = coordinator.updateMessageDeliveryStatus("missing-msg", status: .sent)
+        #expect(!didUpdateUnknown)
+        #expect(context.notifyUIChangedCount == 1)
+    }
+
+    @Test @MainActor
+    func cleanupOldReadReceipts_prunesReceiptsAgainstMockContext() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let peerID = PeerID(str: "0102030405060708")
+        context.privateChats[peerID] = [makePrivateMessage(id: "keep-receipt", status: .sent)]
+        context.sentReadReceipts = ["keep-receipt", "drop-receipt"]
+
+        // Startup phase: cleanup must be a no-op.
+        context.isStartupPhase = true
+        coordinator.cleanupOldReadReceipts()
+        #expect(context.sentReadReceipts == ["keep-receipt", "drop-receipt"])
+
+        context.isStartupPhase = false
+        coordinator.cleanupOldReadReceipts()
+        #expect(context.sentReadReceipts == ["keep-receipt"])
+    }
+}
+
+private func isSent(_ status: DeliveryStatus?) -> Bool {
+    if case .sent = status { return true }
+    return false
+}
+
+private func isDelivered(_ status: DeliveryStatus?) -> Bool {
+    if case .delivered = status { return true }
+    return false
+}
+
+private func isRead(_ status: DeliveryStatus?) -> Bool {
+    if case .read = status { return true }
+    return false
 }

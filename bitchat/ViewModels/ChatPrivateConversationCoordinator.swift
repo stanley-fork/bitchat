@@ -2,20 +2,174 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+/// The narrow surface `ChatPrivateConversationCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatPrivateConversationCoordinatorContextTests`) and makes
+/// its true dependencies explicit. The surface is intentionally large — it
+/// documents the coordinator's real coupling to private-chat state, peer
+/// identity, and the routing/ack transports.
+@MainActor
+protocol ChatPrivateConversationContext: AnyObject {
+    // MARK: Conversation state
+    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var sentReadReceipts: Set<String> { get set }
+    var sentGeoDeliveryAcks: Set<String> { get set }
+    var unreadPrivateMessages: Set<PeerID> { get set }
+    var selectedPrivateChatPeer: PeerID? { get set }
+    var nickname: String { get }
+    var activeChannel: ChannelID { get }
+    var nostrKeyMapping: [PeerID: String] { get }
+    /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
+    func notifyUIChanged()
+
+    // MARK: Peers & identity
+    var myPeerID: PeerID { get }
+    func peerNickname(for peerID: PeerID) -> String?
+    func isPeerConnected(_ peerID: PeerID) -> Bool
+    func isPeerReachable(_ peerID: PeerID) -> Bool
+    func isPeerBlocked(_ peerID: PeerID) -> Bool
+    func noisePublicKey(for peerID: PeerID) -> Data?
+    /// Resolves the ephemeral (short) peer ID for a known Noise public key, if connected.
+    func ephemeralPeerID(forNoiseKey noiseKey: Data) -> PeerID?
+    func getPeerIDForNickname(_ nickname: String) -> PeerID?
+    func getFingerprint(for peerID: PeerID) -> String?
+    func storedFingerprint(for peerID: PeerID) -> String?
+    func clearStoredFingerprint(for peerID: PeerID)
+
+    // MARK: Nostr identity
+    func isNostrBlocked(pubkeyHexLowercased: String) -> Bool
+    func displayNameForNostrPubkey(_ pubkeyHex: String) -> String
+    func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity
+    func currentNostrIdentity() -> NostrIdentity?
+
+    // MARK: Routing & acknowledgements
+    func routePrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String)
+    func routeReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID)
+    func routeFavoriteNotification(to peerID: PeerID, isFavorite: Bool)
+    func sendMeshReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID)
+    func sendGeohashPrivateMessage(_ content: String, toRecipientHex recipientHex: String, from identity: NostrIdentity, messageID: String)
+    func sendGeohashDeliveryAck(for messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity)
+    func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity)
+    func sendDeliveryAckViaNostrEmbedded(_ message: BitchatMessage, wasReadBefore: Bool, senderPubkey: String, key: Data?)
+
+    // MARK: System messages & chat hygiene
+    func addSystemMessage(_ content: String)
+    func addMeshOnlySystemMessage(_ content: String)
+    func sanitizeChat(for peerID: PeerID)
+}
+
+extension ChatViewModel: ChatPrivateConversationContext {
+    // `privateChats`, `sentReadReceipts`, and `notifyUIChanged()` are shared
+    // requirements with `ChatDeliveryContext`; the remaining state members are
+    // satisfied by existing `ChatViewModel` properties and methods.
+
+    var myPeerID: PeerID { meshService.myPeerID }
+
+    func peerNickname(for peerID: PeerID) -> String? {
+        meshService.peerNickname(peerID: peerID)
+    }
+
+    func isPeerConnected(_ peerID: PeerID) -> Bool {
+        meshService.isPeerConnected(peerID)
+    }
+
+    func isPeerReachable(_ peerID: PeerID) -> Bool {
+        meshService.isPeerReachable(peerID)
+    }
+
+    func noisePublicKey(for peerID: PeerID) -> Data? {
+        unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+    }
+
+    func ephemeralPeerID(forNoiseKey noiseKey: Data) -> PeerID? {
+        unifiedPeerService.peers.first(where: { $0.noisePublicKey == noiseKey })?.peerID
+    }
+
+    func storedFingerprint(for peerID: PeerID) -> String? {
+        peerIDToPublicKeyFingerprint[peerID]
+    }
+
+    func clearStoredFingerprint(for peerID: PeerID) {
+        peerIdentityStore.setFingerprint(nil, for: peerID)
+    }
+
+    func isNostrBlocked(pubkeyHexLowercased: String) -> Bool {
+        identityManager.isNostrBlocked(pubkeyHexLowercased: pubkeyHexLowercased)
+    }
+
+    func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity {
+        try idBridge.deriveIdentity(forGeohash: geohash)
+    }
+
+    func currentNostrIdentity() -> NostrIdentity? {
+        try? idBridge.getCurrentNostrIdentity()
+    }
+
+    func routePrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String) {
+        messageRouter.sendPrivate(content, to: peerID, recipientNickname: recipientNickname, messageID: messageID)
+    }
+
+    func routeReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
+        messageRouter.sendReadReceipt(receipt, to: peerID)
+    }
+
+    func routeFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {
+        messageRouter.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
+    }
+
+    func sendMeshReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
+        meshService.sendReadReceipt(receipt, to: peerID)
+    }
+
+    func sendGeohashPrivateMessage(_ content: String, toRecipientHex recipientHex: String, from identity: NostrIdentity, messageID: String) {
+        makeGeohashNostrTransport().sendPrivateMessageGeohash(
+            content: content,
+            toRecipientHex: recipientHex,
+            from: identity,
+            messageID: messageID
+        )
+    }
+
+    func sendGeohashDeliveryAck(for messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {
+        makeGeohashNostrTransport().sendDeliveryAckGeohash(for: messageID, toRecipientHex: recipientHex, from: identity)
+    }
+
+    func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {
+        makeGeohashNostrTransport().sendReadReceiptGeohash(messageID, toRecipientHex: recipientHex, from: identity)
+    }
+
+    func addSystemMessage(_ content: String) {
+        addSystemMessage(content, timestamp: Date())
+    }
+
+    func sanitizeChat(for peerID: PeerID) {
+        privateChatManager.sanitizeChat(for: peerID)
+    }
+
+    private func makeGeohashNostrTransport() -> NostrTransport {
+        let transport = NostrTransport(keychain: keychain, idBridge: idBridge)
+        transport.senderPeerID = meshService.myPeerID
+        return transport
+    }
+}
+
 @MainActor
 final class ChatPrivateConversationCoordinator {
-    private unowned let viewModel: ChatViewModel
+    private unowned let context: any ChatPrivateConversationContext
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    init(context: any ChatPrivateConversationContext) {
+        self.context = context
     }
 
     func sendPrivateMessage(_ content: String, to peerID: PeerID) {
         guard !content.isEmpty else { return }
 
-        if viewModel.unifiedPeerService.isBlocked(peerID) {
-            let nickname = viewModel.meshService.peerNickname(peerID: peerID) ?? "user"
-            viewModel.addSystemMessage(
+        if context.isPeerBlocked(peerID) {
+            let nickname = context.peerNickname(for: peerID) ?? "user"
+            context.addSystemMessage(
                 String(
                     format: String(localized: "system.dm.blocked_recipient", comment: "System message when attempting to message a blocked user"),
                     locale: .current,
@@ -31,13 +185,13 @@ final class ChatPrivateConversationCoordinator {
         }
 
         guard let noiseKey = Data(hexString: peerID.id) else { return }
-        let isConnected = viewModel.meshService.isPeerConnected(peerID)
-        let isReachable = viewModel.meshService.isPeerReachable(peerID)
+        let isConnected = context.isPeerConnected(peerID)
+        let isReachable = context.isPeerReachable(peerID)
         let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
         let isMutualFavorite = favoriteStatus?.isMutual ?? false
         let hasNostrKey = favoriteStatus?.peerNostrPublicKey != nil
 
-        var recipientNickname = viewModel.meshService.peerNickname(peerID: peerID)
+        var recipientNickname = context.peerNickname(for: peerID)
         if recipientNickname == nil && favoriteStatus != nil {
             recipientNickname = favoriteStatus?.peerNickname
         }
@@ -46,42 +200,42 @@ final class ChatPrivateConversationCoordinator {
         let messageID = UUID().uuidString
         let message = BitchatMessage(
             id: messageID,
-            sender: viewModel.nickname,
+            sender: context.nickname,
             content: content,
             timestamp: Date(),
             isRelay: false,
             originalSender: nil,
             isPrivate: true,
             recipientNickname: recipientNickname,
-            senderPeerID: viewModel.meshService.myPeerID,
+            senderPeerID: context.myPeerID,
             mentions: nil,
             deliveryStatus: .sending
         )
 
-        if viewModel.privateChats[peerID] == nil {
-            viewModel.privateChats[peerID] = []
+        if context.privateChats[peerID] == nil {
+            context.privateChats[peerID] = []
         }
-        viewModel.privateChats[peerID]?.append(message)
-        viewModel.objectWillChange.send()
+        context.privateChats[peerID]?.append(message)
+        context.notifyUIChanged()
 
         if isConnected || isReachable || (isMutualFavorite && hasNostrKey) {
-            viewModel.messageRouter.sendPrivate(
+            context.routePrivateMessage(
                 content,
                 to: peerID,
                 recipientNickname: recipientNickname ?? "user",
                 messageID: messageID
             )
-            if let idx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[idx].deliveryStatus = .sent
+            if let idx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[idx].deliveryStatus = .sent
             }
         } else {
-            if let index = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[index].deliveryStatus = .failed(
+            if let index = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[index].deliveryStatus = .failed(
                     reason: String(localized: "content.delivery.reason.unreachable", comment: "Failure reason when a peer is unreachable")
                 )
             }
             let name = recipientNickname ?? "user"
-            viewModel.addSystemMessage(
+            context.addSystemMessage(
                 String(
                     format: String(localized: "system.dm.unreachable", comment: "System message when a recipient is unreachable"),
                     locale: .current,
@@ -92,8 +246,8 @@ final class ChatPrivateConversationCoordinator {
     }
 
     func sendGeohashDM(_ content: String, to peerID: PeerID) {
-        guard case .location(let channel) = viewModel.activeChannel else {
-            viewModel.addSystemMessage(
+        guard case .location(let channel) = context.activeChannel else {
+            context.addSystemMessage(
                 String(localized: "system.location.not_in_channel", comment: "System message when attempting to send without being in a location channel")
             )
             return
@@ -102,49 +256,49 @@ final class ChatPrivateConversationCoordinator {
         let messageID = UUID().uuidString
         let message = BitchatMessage(
             id: messageID,
-            sender: viewModel.nickname,
+            sender: context.nickname,
             content: content,
             timestamp: Date(),
             isRelay: false,
             isPrivate: true,
-            recipientNickname: viewModel.nickname,
-            senderPeerID: viewModel.meshService.myPeerID,
+            recipientNickname: context.nickname,
+            senderPeerID: context.myPeerID,
             deliveryStatus: .sending
         )
 
-        if viewModel.privateChats[peerID] == nil {
-            viewModel.privateChats[peerID] = []
+        if context.privateChats[peerID] == nil {
+            context.privateChats[peerID] = []
         }
 
-        viewModel.privateChats[peerID]?.append(message)
-        viewModel.objectWillChange.send()
+        context.privateChats[peerID]?.append(message)
+        context.notifyUIChanged()
 
-        guard let recipientHex = viewModel.nostrKeyMapping[peerID] else {
-            if let msgIdx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
+        guard let recipientHex = context.nostrKeyMapping[peerID] else {
+            if let msgIdx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
                     reason: String(localized: "content.delivery.reason.unknown_recipient", comment: "Failure reason when the recipient is unknown")
                 )
             }
             return
         }
 
-        if viewModel.identityManager.isNostrBlocked(pubkeyHexLowercased: recipientHex) {
-            if let msgIdx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
+        if context.isNostrBlocked(pubkeyHexLowercased: recipientHex) {
+            if let msgIdx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[msgIdx].deliveryStatus = .failed(
                     reason: String(localized: "content.delivery.reason.blocked", comment: "Failure reason when the user is blocked")
                 )
             }
-            viewModel.addSystemMessage(
+            context.addSystemMessage(
                 String(localized: "system.dm.blocked_generic", comment: "System message when sending fails because user is blocked")
             )
             return
         }
 
         do {
-            let identity = try viewModel.idBridge.deriveIdentity(forGeohash: channel.geohash)
+            let identity = try context.deriveNostrIdentity(forGeohash: channel.geohash)
             if recipientHex.lowercased() == identity.publicKeyHex.lowercased() {
-                if let idx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                    viewModel.privateChats[peerID]?[idx].deliveryStatus = .failed(
+                if let idx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                    context.privateChats[peerID]?[idx].deliveryStatus = .failed(
                         reason: String(localized: "content.delivery.reason.self", comment: "Failure reason when attempting to message yourself")
                     )
                 }
@@ -155,20 +309,18 @@ final class ChatPrivateConversationCoordinator {
                 "GeoDM: local send mid=\(messageID.prefix(8))… to=\(recipientHex.prefix(8))… conv=\(peerID)",
                 category: .session
             )
-            let transport = NostrTransport(keychain: viewModel.keychain, idBridge: viewModel.idBridge)
-            transport.senderPeerID = viewModel.meshService.myPeerID
-            transport.sendPrivateMessageGeohash(
-                content: content,
+            context.sendGeohashPrivateMessage(
+                content,
                 toRecipientHex: recipientHex,
                 from: identity,
                 messageID: messageID
             )
-            if let msgIdx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[msgIdx].deliveryStatus = .sent
+            if let msgIdx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[msgIdx].deliveryStatus = .sent
             }
         } catch {
-            if let idx = viewModel.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
-                viewModel.privateChats[peerID]?[idx].deliveryStatus = .failed(
+            if let idx = context.privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                context.privateChats[peerID]?[idx].deliveryStatus = .failed(
                     reason: String(localized: "content.delivery.reason.send_error", comment: "Failure reason for a generic send error")
                 )
             }
@@ -189,16 +341,16 @@ final class ChatPrivateConversationCoordinator {
 
         sendDeliveryAckIfNeeded(to: messageId, senderPubKey: senderPubkey, from: id)
 
-        if viewModel.identityManager.isNostrBlocked(pubkeyHexLowercased: senderPubkey) {
+        if context.isNostrBlocked(pubkeyHexLowercased: senderPubkey) {
             return
         }
 
-        if viewModel.privateChats[convKey]?.contains(where: { $0.id == messageId }) == true { return }
-        for (_, arr) in viewModel.privateChats where arr.contains(where: { $0.id == messageId }) {
+        if context.privateChats[convKey]?.contains(where: { $0.id == messageId }) == true { return }
+        for (_, arr) in context.privateChats where arr.contains(where: { $0.id == messageId }) {
             return
         }
 
-        let senderName = viewModel.displayNameForNostrPubkey(senderPubkey)
+        let senderName = context.displayNameForNostrPubkey(senderPubkey)
         let message = BitchatMessage(
             id: messageId,
             sender: senderName,
@@ -206,22 +358,22 @@ final class ChatPrivateConversationCoordinator {
             timestamp: messageTimestamp,
             isRelay: false,
             isPrivate: true,
-            recipientNickname: viewModel.nickname,
+            recipientNickname: context.nickname,
             senderPeerID: convKey,
-            deliveryStatus: .delivered(to: viewModel.nickname, at: Date())
+            deliveryStatus: .delivered(to: context.nickname, at: Date())
         )
 
-        if viewModel.privateChats[convKey] == nil {
-            viewModel.privateChats[convKey] = []
+        if context.privateChats[convKey] == nil {
+            context.privateChats[convKey] = []
         }
-        viewModel.privateChats[convKey]?.append(message)
+        context.privateChats[convKey]?.append(message)
 
-        let isViewing = viewModel.selectedPrivateChatPeer == convKey
-        let wasReadBefore = viewModel.sentReadReceipts.contains(messageId)
+        let isViewing = context.selectedPrivateChatPeer == convKey
+        let wasReadBefore = context.sentReadReceipts.contains(messageId)
         let isRecentMessage = Date().timeIntervalSince(messageTimestamp) < 30
         let shouldMarkUnread = !wasReadBefore && !isViewing && isRecentMessage
         if shouldMarkUnread {
-            viewModel.unreadPrivateMessages.insert(convKey)
+            context.unreadPrivateMessages.insert(convKey)
         }
 
         if isViewing {
@@ -236,18 +388,18 @@ final class ChatPrivateConversationCoordinator {
             )
         }
 
-        viewModel.objectWillChange.send()
+        context.notifyUIChanged()
     }
 
     func handleDelivered(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {
         guard let messageID = String(data: payload.data, encoding: .utf8) else { return }
 
-        if let idx = viewModel.privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
-            viewModel.privateChats[convKey]?[idx].deliveryStatus = .delivered(
-                to: viewModel.displayNameForNostrPubkey(senderPubkey),
+        if let idx = context.privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
+            context.privateChats[convKey]?[idx].deliveryStatus = .delivered(
+                to: context.displayNameForNostrPubkey(senderPubkey),
                 at: Date()
             )
-            viewModel.objectWillChange.send()
+            context.notifyUIChanged()
             SecureLogger.info(
                 "GeoDM: recv DELIVERED for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…",
                 category: .session
@@ -260,12 +412,12 @@ final class ChatPrivateConversationCoordinator {
     func handleReadReceipt(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {
         guard let messageID = String(data: payload.data, encoding: .utf8) else { return }
 
-        if let idx = viewModel.privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
-            viewModel.privateChats[convKey]?[idx].deliveryStatus = .read(
-                by: viewModel.displayNameForNostrPubkey(senderPubkey),
+        if let idx = context.privateChats[convKey]?.firstIndex(where: { $0.id == messageID }) {
+            context.privateChats[convKey]?[idx].deliveryStatus = .read(
+                by: context.displayNameForNostrPubkey(senderPubkey),
                 at: Date()
             )
-            viewModel.objectWillChange.send()
+            context.notifyUIChanged()
             SecureLogger.info("GeoDM: recv READ for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…", category: .session)
         } else {
             SecureLogger.warning("GeoDM: read ack for unknown mid=\(messageID.prefix(8))… conv=\(convKey)", category: .session)
@@ -273,19 +425,15 @@ final class ChatPrivateConversationCoordinator {
     }
 
     func sendDeliveryAckIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !viewModel.sentGeoDeliveryAcks.contains(messageId) else { return }
-        let transport = NostrTransport(keychain: viewModel.keychain, idBridge: viewModel.idBridge)
-        transport.senderPeerID = viewModel.meshService.myPeerID
-        transport.sendDeliveryAckGeohash(for: messageId, toRecipientHex: senderPubKey, from: id)
-        viewModel.sentGeoDeliveryAcks.insert(messageId)
+        guard !context.sentGeoDeliveryAcks.contains(messageId) else { return }
+        context.sendGeohashDeliveryAck(for: messageId, toRecipientHex: senderPubKey, from: id)
+        context.sentGeoDeliveryAcks.insert(messageId)
     }
 
     func sendReadReceiptIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !viewModel.sentReadReceipts.contains(messageId) else { return }
-        let transport = NostrTransport(keychain: viewModel.keychain, idBridge: viewModel.idBridge)
-        transport.senderPeerID = viewModel.meshService.myPeerID
-        transport.sendReadReceiptGeohash(messageId, toRecipientHex: senderPubKey, from: id)
-        viewModel.sentReadReceipts.insert(messageId)
+        guard !context.sentReadReceipts.contains(messageId) else { return }
+        context.sendGeohashReadReceipt(messageId, toRecipientHex: senderPubKey, from: id)
+        context.sentReadReceipts.insert(messageId)
     }
 
     func handlePrivateMessage(
@@ -315,15 +463,15 @@ final class ChatPrivateConversationCoordinator {
             return
         }
 
-        let wasReadBefore = viewModel.sentReadReceipts.contains(messageId)
+        let wasReadBefore = context.sentReadReceipts.contains(messageId)
 
         var isViewingThisChat = false
-        if viewModel.selectedPrivateChatPeer == targetPeerID {
+        if context.selectedPrivateChatPeer == targetPeerID {
             isViewingThisChat = true
-        } else if let selectedPeer = viewModel.selectedPrivateChatPeer,
-                  let selectedPeerData = viewModel.unifiedPeerService.getPeer(by: selectedPeer),
+        } else if let selectedPeer = context.selectedPrivateChatPeer,
+                  let selectedPeerNoiseKey = context.noisePublicKey(for: selectedPeer),
                   let key = actualSenderNoiseKey,
-                  selectedPeerData.noisePublicKey == key {
+                  selectedPeerNoiseKey == key {
             isViewingThisChat = true
         }
 
@@ -337,15 +485,15 @@ final class ChatPrivateConversationCoordinator {
             timestamp: messageTimestamp,
             isRelay: false,
             isPrivate: true,
-            recipientNickname: viewModel.nickname,
+            recipientNickname: context.nickname,
             senderPeerID: targetPeerID,
-            deliveryStatus: .delivered(to: viewModel.nickname, at: Date())
+            deliveryStatus: .delivered(to: context.nickname, at: Date())
         )
 
         addMessageToPrivateChatsIfNeeded(message, targetPeerID: targetPeerID)
         mirrorToEphemeralIfNeeded(message, targetPeerID: targetPeerID, key: actualSenderNoiseKey)
 
-        viewModel.sendDeliveryAckViaNostrEmbedded(
+        context.sendDeliveryAckViaNostrEmbedded(
             message,
             wasReadBefore: wasReadBefore,
             senderPubkey: senderPubkey,
@@ -372,12 +520,12 @@ final class ChatPrivateConversationCoordinator {
             )
         }
 
-        viewModel.objectWillChange.send()
+        context.notifyUIChanged()
     }
 
     func handlePrivateMessage(_ message: BitchatMessage) {
         SecureLogger.debug("📥 handlePrivateMessage called for message from \(message.sender)", category: .session)
-        let senderPeerID = message.senderPeerID ?? viewModel.getPeerIDForNickname(message.sender)
+        let senderPeerID = message.senderPeerID ?? context.getPeerIDForNickname(message.sender)
 
         guard let peerID = senderPeerID else {
             SecureLogger.warning("⚠️ Could not get peer ID for sender \(message.sender)", category: .session)
@@ -391,22 +539,22 @@ final class ChatPrivateConversationCoordinator {
 
         migratePrivateChatsIfNeeded(for: peerID, senderNickname: message.sender)
 
-        if peerID.id.count == 16, let peer = viewModel.unifiedPeerService.getPeer(by: peerID) {
-            let stableKeyHex = PeerID(hexData: peer.noisePublicKey)
+        if peerID.id.count == 16, let peerNoiseKey = context.noisePublicKey(for: peerID) {
+            let stableKeyHex = PeerID(hexData: peerNoiseKey)
             if stableKeyHex != peerID,
-               let nostrMessages = viewModel.privateChats[stableKeyHex],
+               let nostrMessages = context.privateChats[stableKeyHex],
                !nostrMessages.isEmpty {
-                if viewModel.privateChats[peerID] == nil {
-                    viewModel.privateChats[peerID] = []
+                if context.privateChats[peerID] == nil {
+                    context.privateChats[peerID] = []
                 }
 
-                let existingMessageIds = Set(viewModel.privateChats[peerID]?.map { $0.id } ?? [])
+                let existingMessageIds = Set(context.privateChats[peerID]?.map { $0.id } ?? [])
                 for nostrMessage in nostrMessages where !existingMessageIds.contains(nostrMessage.id) {
-                    viewModel.privateChats[peerID]?.append(nostrMessage)
+                    context.privateChats[peerID]?.append(nostrMessage)
                 }
 
-                viewModel.privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                viewModel.privateChats.removeValue(forKey: stableKeyHex)
+                context.privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
+                context.privateChats.removeValue(forKey: stableKeyHex)
 
                 SecureLogger.info(
                     "📥 Consolidated \(nostrMessages.count) Nostr messages from stable key to ephemeral peer \(peerID)",
@@ -420,20 +568,20 @@ final class ChatPrivateConversationCoordinator {
         }
 
         addMessageToPrivateChatsIfNeeded(message, targetPeerID: peerID)
-        let noiseKey = peerID.noiseKey ?? viewModel.unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+        let noiseKey = peerID.noiseKey ?? context.noisePublicKey(for: peerID)
         mirrorToEphemeralIfNeeded(message, targetPeerID: peerID, key: noiseKey)
 
-        let isViewing = viewModel.selectedPrivateChatPeer == peerID
+        let isViewing = context.selectedPrivateChatPeer == peerID
         if isViewing {
             let receipt = ReadReceipt(
                 originalMessageID: message.id,
-                readerID: viewModel.meshService.myPeerID,
-                readerNickname: viewModel.nickname
+                readerID: context.myPeerID,
+                readerNickname: context.nickname
             )
-            viewModel.meshService.sendReadReceipt(receipt, to: peerID)
-            viewModel.sentReadReceipts.insert(message.id)
+            context.sendMeshReadReceipt(receipt, to: peerID)
+            context.sentReadReceipts.insert(message.id)
         } else {
-            viewModel.unreadPrivateMessages.insert(peerID)
+            context.unreadPrivateMessages.insert(peerID)
             NotificationService.shared.sendPrivateMessageNotification(
                 from: message.sender,
                 message: message.content,
@@ -441,48 +589,48 @@ final class ChatPrivateConversationCoordinator {
             )
         }
 
-        viewModel.objectWillChange.send()
+        context.notifyUIChanged()
     }
 
     func isDuplicateMessage(_ messageId: String, targetPeerID: PeerID) -> Bool {
-        if viewModel.privateChats[targetPeerID]?.contains(where: { $0.id == messageId }) == true {
+        if context.privateChats[targetPeerID]?.contains(where: { $0.id == messageId }) == true {
             return true
         }
-        for (_, messages) in viewModel.privateChats where messages.contains(where: { $0.id == messageId }) {
+        for (_, messages) in context.privateChats where messages.contains(where: { $0.id == messageId }) {
             return true
         }
         return false
     }
 
     func addMessageToPrivateChatsIfNeeded(_ message: BitchatMessage, targetPeerID: PeerID) {
-        if viewModel.privateChats[targetPeerID] == nil {
-            viewModel.privateChats[targetPeerID] = []
+        if context.privateChats[targetPeerID] == nil {
+            context.privateChats[targetPeerID] = []
         }
-        if let idx = viewModel.privateChats[targetPeerID]?.firstIndex(where: { $0.id == message.id }) {
-            viewModel.privateChats[targetPeerID]?[idx] = message
+        if let idx = context.privateChats[targetPeerID]?.firstIndex(where: { $0.id == message.id }) {
+            context.privateChats[targetPeerID]?[idx] = message
         } else {
-            viewModel.privateChats[targetPeerID]?.append(message)
+            context.privateChats[targetPeerID]?.append(message)
         }
-        viewModel.privateChatManager.sanitizeChat(for: targetPeerID)
+        context.sanitizeChat(for: targetPeerID)
     }
 
     func mirrorToEphemeralIfNeeded(_ message: BitchatMessage, targetPeerID: PeerID, key: Data?) {
         guard let key,
-              let ephemeralPeerID = viewModel.unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID,
+              let ephemeralPeerID = context.ephemeralPeerID(forNoiseKey: key),
               ephemeralPeerID != targetPeerID
         else {
             return
         }
 
-        if viewModel.privateChats[ephemeralPeerID] == nil {
-            viewModel.privateChats[ephemeralPeerID] = []
+        if context.privateChats[ephemeralPeerID] == nil {
+            context.privateChats[ephemeralPeerID] = []
         }
-        if let idx = viewModel.privateChats[ephemeralPeerID]?.firstIndex(where: { $0.id == message.id }) {
-            viewModel.privateChats[ephemeralPeerID]?[idx] = message
+        if let idx = context.privateChats[ephemeralPeerID]?.firstIndex(where: { $0.id == message.id }) {
+            context.privateChats[ephemeralPeerID]?[idx] = message
         } else {
-            viewModel.privateChats[ephemeralPeerID]?.append(message)
+            context.privateChats[ephemeralPeerID]?.append(message)
         }
-        viewModel.privateChatManager.sanitizeChat(for: ephemeralPeerID)
+        context.sanitizeChat(for: ephemeralPeerID)
     }
 
     func handleViewingThisChat(
@@ -491,27 +639,25 @@ final class ChatPrivateConversationCoordinator {
         key: Data?,
         senderPubkey: String
     ) {
-        viewModel.unreadPrivateMessages.remove(targetPeerID)
+        context.unreadPrivateMessages.remove(targetPeerID)
         if let key,
-           let ephemeralPeerID = viewModel.unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID {
-            viewModel.unreadPrivateMessages.remove(ephemeralPeerID)
+           let ephemeralPeerID = context.ephemeralPeerID(forNoiseKey: key) {
+            context.unreadPrivateMessages.remove(ephemeralPeerID)
         }
-        guard !viewModel.sentReadReceipts.contains(message.id) else { return }
+        guard !context.sentReadReceipts.contains(message.id) else { return }
 
         if let key {
             let receipt = ReadReceipt(
                 originalMessageID: message.id,
-                readerID: viewModel.meshService.myPeerID,
-                readerNickname: viewModel.nickname
+                readerID: context.myPeerID,
+                readerNickname: context.nickname
             )
             SecureLogger.debug("Viewing chat; sending READ ack for \(message.id.prefix(8))… via router", category: .session)
-            viewModel.messageRouter.sendReadReceipt(receipt, to: PeerID(hexData: key))
-            viewModel.sentReadReceipts.insert(message.id)
-        } else if let identity = try? viewModel.idBridge.getCurrentNostrIdentity() {
-            let transport = NostrTransport(keychain: viewModel.keychain, idBridge: viewModel.idBridge)
-            transport.senderPeerID = viewModel.meshService.myPeerID
-            transport.sendReadReceiptGeohash(message.id, toRecipientHex: senderPubkey, from: identity)
-            viewModel.sentReadReceipts.insert(message.id)
+            context.routeReadReceipt(receipt, to: PeerID(hexData: key))
+            context.sentReadReceipts.insert(message.id)
+        } else if let identity = context.currentNostrIdentity() {
+            context.sendGeohashReadReceipt(message.id, toRecipientHex: senderPubkey, from: identity)
+            context.sentReadReceipts.insert(message.id)
             SecureLogger.debug(
                 "Viewing chat; sent READ ack directly to Nostr pub=\(senderPubkey.prefix(8))… for mid=\(message.id.prefix(8))…",
                 category: .session
@@ -529,11 +675,11 @@ final class ChatPrivateConversationCoordinator {
     ) {
         guard shouldMarkAsUnread else { return }
 
-        viewModel.unreadPrivateMessages.insert(targetPeerID)
+        context.unreadPrivateMessages.insert(targetPeerID)
         if let key,
-           let ephemeralPeerID = viewModel.unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID,
+           let ephemeralPeerID = context.ephemeralPeerID(forNoiseKey: key),
            ephemeralPeerID != targetPeerID {
-            viewModel.unreadPrivateMessages.insert(ephemeralPeerID)
+            context.unreadPrivateMessages.insert(ephemeralPeerID)
         }
         if isRecentMessage {
             NotificationService.shared.sendPrivateMessageNotification(
@@ -554,7 +700,7 @@ final class ChatPrivateConversationCoordinator {
             SecureLogger.info("📝 Received Nostr npub in favorite notification: \(nostrPubkey ?? "none")", category: .session)
         }
 
-        let noiseKey = peerID.noiseKey ?? viewModel.unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+        let noiseKey = peerID.noiseKey ?? context.noisePublicKey(for: peerID)
         guard let finalNoiseKey = noiseKey else {
             SecureLogger.warning("⚠️ Cannot get Noise key for peer \(peerID)", category: .session)
             return
@@ -577,7 +723,7 @@ final class ChatPrivateConversationCoordinator {
 
         if prior != isFavorite {
             let action = isFavorite ? "favorited" : "unfavorited"
-            viewModel.addMeshOnlySystemMessage("\(senderNickname) \(action) you")
+            context.addMeshOnlySystemMessage("\(senderNickname) \(action) you")
         }
     }
 
@@ -606,15 +752,15 @@ final class ChatPrivateConversationCoordinator {
     }
 
     func migratePrivateChatsIfNeeded(for peerID: PeerID, senderNickname: String) {
-        let currentFingerprint = viewModel.getFingerprint(for: peerID)
+        let currentFingerprint = context.getFingerprint(for: peerID)
 
-        if viewModel.privateChats[peerID] == nil || viewModel.privateChats[peerID]?.isEmpty == true {
+        if context.privateChats[peerID] == nil || context.privateChats[peerID]?.isEmpty == true {
             var migratedMessages: [BitchatMessage] = []
             var oldPeerIDsToRemove: [PeerID] = []
             let cutoffTime = Date().addingTimeInterval(-TransportConfig.uiMigrationCutoffSeconds)
 
-            for (oldPeerID, messages) in viewModel.privateChats where oldPeerID != peerID {
-                let oldFingerprint = viewModel.peerIDToPublicKeyFingerprint[oldPeerID]
+            for (oldPeerID, messages) in context.privateChats where oldPeerID != peerID {
+                let oldFingerprint = context.storedFingerprint(for: oldPeerID)
                 let recentMessages = messages.filter { $0.timestamp > cutoffTime }
                 guard !recentMessages.isEmpty else { continue }
 
@@ -637,8 +783,8 @@ final class ChatPrivateConversationCoordinator {
                     )
                 } else if currentFingerprint == nil || oldFingerprint == nil {
                     let isRelevantChat = recentMessages.contains { msg in
-                        (msg.sender == senderNickname && msg.sender != viewModel.nickname)
-                            || (msg.sender == viewModel.nickname && msg.recipientNickname == senderNickname)
+                        (msg.sender == senderNickname && msg.sender != context.nickname)
+                            || (msg.sender == context.nickname && msg.recipientNickname == senderNickname)
                     }
 
                     if isRelevantChat {
@@ -656,27 +802,27 @@ final class ChatPrivateConversationCoordinator {
             }
 
             if !oldPeerIDsToRemove.isEmpty {
-                let needsSelectedUpdate = oldPeerIDsToRemove.contains { viewModel.selectedPrivateChatPeer == $0 }
+                let needsSelectedUpdate = oldPeerIDsToRemove.contains { context.selectedPrivateChatPeer == $0 }
 
                 for oldID in oldPeerIDsToRemove {
-                    viewModel.privateChats.removeValue(forKey: oldID)
-                    viewModel.unreadPrivateMessages.remove(oldID)
-                    viewModel.peerIdentityStore.setFingerprint(nil, for: oldID)
+                    context.privateChats.removeValue(forKey: oldID)
+                    context.unreadPrivateMessages.remove(oldID)
+                    context.clearStoredFingerprint(for: oldID)
                 }
 
                 if needsSelectedUpdate {
-                    viewModel.selectedPrivateChatPeer = peerID
+                    context.selectedPrivateChatPeer = peerID
                 }
             }
 
             if !migratedMessages.isEmpty {
-                if viewModel.privateChats[peerID] == nil {
-                    viewModel.privateChats[peerID] = []
+                if context.privateChats[peerID] == nil {
+                    context.privateChats[peerID] = []
                 }
-                viewModel.privateChats[peerID]?.append(contentsOf: migratedMessages)
-                viewModel.privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
-                viewModel.privateChatManager.sanitizeChat(for: peerID)
-                viewModel.objectWillChange.send()
+                context.privateChats[peerID]?.append(contentsOf: migratedMessages)
+                context.privateChats[peerID]?.sort { $0.timestamp < $1.timestamp }
+                context.sanitizeChat(for: peerID)
+                context.notifyUIChanged()
             }
         }
     }
@@ -686,26 +832,26 @@ final class ChatPrivateConversationCoordinator {
 
         if let hexKey = Data(hexString: peerID.id) {
             noiseKey = hexKey
-        } else if let peer = viewModel.unifiedPeerService.getPeer(by: peerID) {
-            noiseKey = peer.noisePublicKey
+        } else if let peerNoiseKey = context.noisePublicKey(for: peerID) {
+            noiseKey = peerNoiseKey
         }
 
-        if viewModel.meshService.isPeerConnected(peerID) {
-            viewModel.messageRouter.sendFavoriteNotification(to: peerID, isFavorite: isFavorite)
+        if context.isPeerConnected(peerID) {
+            context.routeFavoriteNotification(to: peerID, isFavorite: isFavorite)
             SecureLogger.debug("📤 Sent favorite notification via BLE to \(peerID)", category: .session)
         } else if let key = noiseKey {
-            viewModel.messageRouter.sendFavoriteNotification(to: PeerID(hexData: key), isFavorite: isFavorite)
+            context.routeFavoriteNotification(to: PeerID(hexData: key), isFavorite: isFavorite)
         } else {
             SecureLogger.warning("⚠️ Cannot send favorite notification - peer not connected and no Nostr pubkey", category: .session)
         }
     }
 
     func isMessageBlocked(_ message: BitchatMessage) -> Bool {
-        if let peerID = message.senderPeerID ?? viewModel.getPeerIDForNickname(message.sender) {
-            if viewModel.isPeerBlocked(peerID) { return true }
+        if let peerID = message.senderPeerID ?? context.getPeerIDForNickname(message.sender) {
+            if context.isPeerBlocked(peerID) { return true }
             if peerID.isGeoChat || peerID.isGeoDM,
-               let full = viewModel.nostrKeyMapping[peerID]?.lowercased(),
-               viewModel.identityManager.isNostrBlocked(pubkeyHexLowercased: full) {
+               let full = context.nostrKeyMapping[peerID]?.lowercased(),
+               context.isNostrBlocked(pubkeyHexLowercased: full) {
                 return true
             }
         }
