@@ -26,36 +26,69 @@ struct BLESubscribedCentralSnapshot {
     }
 }
 
+/// Owns all BLE link state (peripheral connections we hold as central, and
+/// central subscriptions we serve as peripheral). The store has no internal
+/// locking: every access must happen on the single owning queue (the BLE
+/// queue). Other queues must go through BLEService's `readLinkState`, which
+/// hops to that queue. Call `assumeOwnership(of:)` to have debug builds trap
+/// any access from the wrong queue.
 final class BLELinkStateStore {
     private(set) var peripherals: [String: BLEPeripheralLinkState] = [:]
     private(set) var peerToPeripheralUUID: [PeerID: String] = [:]
     private(set) var subscribedCentrals: [CBCentral] = []
     private(set) var centralToPeerID: [String: PeerID] = [:]
 
+    #if DEBUG
+    private var ownerQueue: DispatchQueue?
+    #endif
+
+    /// Pin the store to its owning queue. Debug-only enforcement; release
+    /// builds are unchanged.
+    func assumeOwnership(of queue: DispatchQueue) {
+        #if DEBUG
+        ownerQueue = queue
+        #endif
+    }
+
+    @inline(__always)
+    private func assertOwned() {
+        #if DEBUG
+        if let queue = ownerQueue {
+            dispatchPrecondition(condition: .onQueue(queue))
+        }
+        #endif
+    }
+
     var peripheralStates: [BLEPeripheralLinkState] {
-        Array(peripherals.values)
+        assertOwned()
+        return Array(peripherals.values)
     }
 
     var subscribedCentralSnapshot: BLESubscribedCentralSnapshot {
-        BLESubscribedCentralSnapshot(
+        assertOwned()
+        return BLESubscribedCentralSnapshot(
             centrals: subscribedCentrals,
             peerIDsByCentralUUID: centralToPeerID
         )
     }
 
     var subscribedCentralCount: Int {
-        subscribedCentrals.count
+        assertOwned()
+        return subscribedCentrals.count
     }
 
     var connectedOrConnectingPeripheralCount: Int {
-        peripherals.values.filter { $0.isConnected || $0.isConnecting }.count
+        assertOwned()
+        return peripherals.values.filter { $0.isConnected || $0.isConnecting }.count
     }
 
     func state(forPeripheralID peripheralID: String) -> BLEPeripheralLinkState? {
-        peripherals[peripheralID]
+        assertOwned()
+        return peripherals[peripheralID]
     }
 
     func setPeripheralState(_ state: BLEPeripheralLinkState, for peripheralID: String) {
+        assertOwned()
         peripherals[peripheralID] = state
     }
 
@@ -64,6 +97,7 @@ final class BLELinkStateStore {
         _ peripheralID: String,
         _ update: (inout BLEPeripheralLinkState) -> Void
     ) -> BLEPeripheralLinkState? {
+        assertOwned()
         guard var state = peripherals[peripheralID] else { return nil }
         update(&state)
         peripherals[peripheralID] = state
@@ -113,10 +147,12 @@ final class BLELinkStateStore {
     }
 
     func directPeripheralState(for peerID: PeerID) -> BLEPeripheralLinkState? {
-        peerToPeripheralUUID[peerID].flatMap { peripherals[$0] }
+        assertOwned()
+        return peerToPeripheralUUID[peerID].flatMap { peripherals[$0] }
     }
 
     func directLinkState(for peerID: PeerID) -> BLEDirectLinkState {
+        assertOwned()
         let peripheralUUID = peerToPeripheralUUID[peerID]
         let hasPeripheral = peripheralUUID.flatMap { peripherals[$0]?.isConnected } ?? false
         let hasCentral = centralToPeerID.values.contains(peerID)
@@ -124,6 +160,7 @@ final class BLELinkStateStore {
     }
 
     func links(to peerID: PeerID?) -> Set<BLEIngressLinkID> {
+        assertOwned()
         guard let peerID else { return [] }
 
         var links: Set<BLEIngressLinkID> = []
@@ -137,35 +174,42 @@ final class BLELinkStateStore {
     }
 
     func peerID(forPeripheralID peripheralID: String) -> PeerID? {
-        peripherals[peripheralID]?.peerID
+        assertOwned()
+        return peripherals[peripheralID]?.peerID
     }
 
     func peerID(forCentralUUID centralUUID: String) -> PeerID? {
-        centralToPeerID[centralUUID]
+        assertOwned()
+        return centralToPeerID[centralUUID]
     }
 
     func addSubscribedCentral(_ central: CBCentral) {
+        assertOwned()
         guard !subscribedCentrals.contains(central) else { return }
         subscribedCentrals.append(central)
     }
 
     func removeSubscribedCentral(_ central: CBCentral) -> PeerID? {
+        assertOwned()
         let centralUUID = central.identifier.uuidString
         subscribedCentrals.removeAll { $0.identifier == central.identifier }
         return centralToPeerID.removeValue(forKey: centralUUID)
     }
 
     func bindCentral(_ centralUUID: String, to peerID: PeerID) {
+        assertOwned()
         centralToPeerID[centralUUID] = peerID
     }
 
     func bindPeripheral(_ peripheralUUID: String, to peerID: PeerID) {
+        assertOwned()
         if updatePeripheral(peripheralUUID, { $0.peerID = peerID }) != nil {
             peerToPeripheralUUID[peerID] = peripheralUUID
         }
     }
 
     func removePeripheral(_ peripheralID: String) -> PeerID? {
+        assertOwned()
         let peerID = peripherals.removeValue(forKey: peripheralID)?.peerID
         if let peerID {
             peerToPeripheralUUID.removeValue(forKey: peerID)
@@ -174,6 +218,7 @@ final class BLELinkStateStore {
     }
 
     func clearPeripherals() -> [PeerID] {
+        assertOwned()
         let peerIDs = peripherals.compactMap { $0.value.peerID }
         peripherals.removeAll()
         peerToPeripheralUUID.removeAll()
@@ -181,6 +226,7 @@ final class BLELinkStateStore {
     }
 
     func clearCentrals() -> [PeerID] {
+        assertOwned()
         let peerIDs = Array(centralToPeerID.values)
         subscribedCentrals.removeAll()
         centralToPeerID.removeAll()
@@ -188,6 +234,7 @@ final class BLELinkStateStore {
     }
 
     func clearAll() {
+        assertOwned()
         peripherals.removeAll()
         peerToPeripheralUUID.removeAll()
         subscribedCentrals.removeAll()

@@ -305,10 +305,10 @@ private extension MessageListView {
 
     var targetPeerID: String? {
         if let peer = privatePeer,
-           let last = privateInboxModel.messages(for: peer).suffix(300).last?.id {
+           let last = privateInboxModel.messages(for: peer).last?.id {
             return "dm:\(peer)|\(last)"
         }
-        if let last = publicChatModel.messages.suffix(300).last?.id {
+        if let last = publicChatModel.messages.last?.id {
             return "\(locationChannelsModel.selectedChannel.contextKey)|\(last)"
         }
         return nil
@@ -329,7 +329,7 @@ private extension MessageListView {
         func scrollIfNeeded(date: Date) {
             lastScrollTime = date
             let contextKey = locationChannelsModel.selectedChannel.contextKey
-            if let target = messages.suffix(windowCountPublic).last.map({ "\(contextKey)|\($0.id)" }) {
+            if let target = messages.last.map({ "\(contextKey)|\($0.id)" }) {
                 proxy.scrollTo(target, anchor: .bottom)
             }
         }
@@ -368,8 +368,7 @@ private extension MessageListView {
         func scrollIfNeeded(date: Date) {
             lastScrollTime = date
             let contextKey = "dm:\(peerID)"
-            let count = windowCountPrivate[peerID] ?? 300
-            if let target = messages.suffix(count).last.map({ "\(contextKey)|\($0.id)" }){
+            if let target = messages.last.map({ "\(contextKey)|\($0.id)" }) {
                 proxy.scrollTo(target, anchor: .bottom)
             }
         }
@@ -399,7 +398,7 @@ private extension MessageListView {
             isAtBottom = true
             windowCountPublic = TransportConfig.uiWindowInitialCountPublic
             let contextKey = "geo:\(ch.geohash)"
-            if let target = publicChatModel.messages.suffix(windowCountPublic).last?.id.map({ "\(contextKey)|\($0)" }) {
+            if let target = publicChatModel.messages.last?.id.map({ "\(contextKey)|\($0)" }) {
                 proxy.scrollTo(target, anchor: .bottom)
             }
         }

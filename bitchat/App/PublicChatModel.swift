@@ -36,6 +36,8 @@ final class PublicChatModel: ObservableObject {
     }
 
     private func refreshMessages() {
-        messages = conversationStore.messages(for: ConversationID(channelID: activeChannel))
+        let nextMessages = conversationStore.messages(for: ConversationID(channelID: activeChannel))
+        guard messages != nextMessages else { return }
+        messages = nextMessages
     }
 }

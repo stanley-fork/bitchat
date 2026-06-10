@@ -40,3 +40,25 @@ jobs:
 
       - name: Run Tests
         run: swift test --parallel --quiet --package-path ${{ matrix.path }}
+
+  # SPM tests above only compile the macOS slice; this job covers the
+  # iOS-conditional code paths (UIKit, CoreBluetooth restoration, etc.).
+  ios-build:
+    name: Build iOS app (simulator)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build iOS (simulator, no signing)
+        # arm64 only: the vendored arti.xcframework has no x86_64 simulator slice.
+        run: |
+          set -o pipefail
+          xcodebuild -project bitchat.xcodeproj \
+            -scheme "bitchat (iOS)" \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            build

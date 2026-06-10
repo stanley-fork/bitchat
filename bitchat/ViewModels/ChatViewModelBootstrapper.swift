@@ -93,7 +93,7 @@ private extension ChatViewModelBootstrapper {
             .receive(on: DispatchQueue.main)
             .sink { [weak viewModel] _ in
                 Task { @MainActor [weak viewModel] in
-                    viewModel?.synchronizePrivateConversationStore()
+                    viewModel?.schedulePrivateConversationStoreSynchronization()
                 }
             }
             .store(in: &viewModel.cancellables)
@@ -102,7 +102,7 @@ private extension ChatViewModelBootstrapper {
             .receive(on: DispatchQueue.main)
             .sink { [weak viewModel] _ in
                 Task { @MainActor [weak viewModel] in
-                    viewModel?.synchronizePrivateConversationStore()
+                    viewModel?.schedulePrivateConversationStoreSynchronization()
                 }
             }
             .store(in: &viewModel.cancellables)

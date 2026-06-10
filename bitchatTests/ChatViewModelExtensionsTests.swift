@@ -399,6 +399,26 @@ struct ChatViewModelNostrExtensionTests {
     }
 
     @Test @MainActor
+    func handleNostrMessage_invalidSignatureDoesNotPoisonDedup() async throws {
+        let (viewModel, _) = makeTestableViewModel()
+        let sender = try NostrIdentity.generate()
+        let recipient = try #require(try viewModel.idBridge.getCurrentNostrIdentity())
+        let giftWrap = try NostrProtocol.createPrivateMessage(
+            content: "verify:noop",
+            recipientPubkey: recipient.publicKeyHex,
+            senderIdentity: sender
+        )
+        var invalidGiftWrap = giftWrap
+        invalidGiftWrap.sig = String(repeating: "0", count: 128)
+
+        viewModel.handleNostrMessage(invalidGiftWrap)
+        #expect(!viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
+
+        viewModel.handleNostrMessage(giftWrap)
+        #expect(viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
+    }
+
+    @Test @MainActor
     func switchLocationChannel_clearsNostrDedupCache() async {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"

@@ -110,7 +110,9 @@ public final class TorManager: ObservableObject {
     public func isForeground() -> Bool { isAppForeground }
 
     nonisolated
-    public func awaitReady(timeout: TimeInterval = 25.0) async -> Bool {
+    // Default matches the bootstrap monitor deadline (75s); a shorter wait here
+    // reports "not ready" while Arti is still legitimately bootstrapping.
+    public func awaitReady(timeout: TimeInterval = 75.0) async -> Bool {
         await MainActor.run {
             if self.isAppForeground { self.startIfNeeded() }
         }

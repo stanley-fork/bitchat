@@ -133,6 +133,11 @@ create_xcframework() {
             log_info "Stripping $target library..."
             strip -x "$lib_path" 2>/dev/null || true
 
+            # Normalize archive metadata so repeated rebuilds are byte-stable.
+            local normalized_path="$lib_path.normalized"
+            xcrun libtool -static -D -no_warning_for_no_symbols "$lib_path" -o "$normalized_path"
+            mv "$normalized_path" "$lib_path"
+
             cmd="$cmd -library $lib_path"
 
             # Add headers if they exist
@@ -151,6 +156,71 @@ create_xcframework() {
     eval "$cmd"
 
     if [[ -d "$xcframework_path" ]]; then
+        cat > "$xcframework_path/Info.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AvailableLibraries</key>
+	<array>
+		<dict>
+			<key>BinaryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>HeadersPath</key>
+			<string>Headers</string>
+			<key>LibraryIdentifier</key>
+			<string>ios-arm64</string>
+			<key>LibraryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>SupportedArchitectures</key>
+			<array>
+				<string>arm64</string>
+			</array>
+			<key>SupportedPlatform</key>
+			<string>ios</string>
+		</dict>
+		<dict>
+			<key>BinaryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>HeadersPath</key>
+			<string>Headers</string>
+			<key>LibraryIdentifier</key>
+			<string>ios-arm64-simulator</string>
+			<key>LibraryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>SupportedArchitectures</key>
+			<array>
+				<string>arm64</string>
+			</array>
+			<key>SupportedPlatform</key>
+			<string>ios</string>
+			<key>SupportedPlatformVariant</key>
+			<string>simulator</string>
+		</dict>
+		<dict>
+			<key>BinaryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>HeadersPath</key>
+			<string>Headers</string>
+			<key>LibraryIdentifier</key>
+			<string>macos-arm64</string>
+			<key>LibraryPath</key>
+			<string>libarti_bitchat.a</string>
+			<key>SupportedArchitectures</key>
+			<array>
+				<string>arm64</string>
+			</array>
+			<key>SupportedPlatform</key>
+			<string>macos</string>
+		</dict>
+	</array>
+	<key>CFBundlePackageType</key>
+	<string>XFWK</string>
+	<key>XCFrameworkFormatVersion</key>
+	<string>1.0</string>
+</dict>
+</plist>
+EOF
         local size=$(du -sh "$xcframework_path" | cut -f1)
         log_info "Created $xcframework_path ($size)"
     else

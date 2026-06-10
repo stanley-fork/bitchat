@@ -24397,7 +24397,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "chat with people near you using geohash channels. only a coarse geohash is shared, never exact GPS. your IP address is hidden by routing all traffic over tor."
+            "value" : "chat with people near you using geohash channels. the selected geohash is public and may reveal an approximate area; exact GPS is never shared. your IP address is hidden by routing all traffic over tor."
           }
         },
         "es" : {
