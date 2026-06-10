@@ -459,6 +459,12 @@ private final class PerfNostrContext: ChatNostrContext {
     func routeFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {}
     func sendGeohashDeliveryAck(for messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {}
     func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {}
+
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? { nil }
+    func allFavoriteRelationships() -> [FavoritesPersistenceService.FavoriteRelationship] { [] }
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String) {}
+    func postLocalNotification(title: String, body: String, identifier: String) {}
+    func notifyGeohashActivity(geohash: String, bodyPreview: String) {}
 }
 
 // MARK: - Mock ChatDeliveryContext

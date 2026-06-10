@@ -20,12 +20,23 @@ protocol ChatNostrContext: GeohashSubscriptionContext, NostrInboundPipelineConte
     func routeFavoriteNotification(to peerID: PeerID, isFavorite: Bool)
     func sendGeohashDeliveryAck(for messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity)
     func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity)
+
+    // MARK: Favorites & notifications (shared with the other contexts)
+    /// The persisted favorite relationship for the peer's Noise static key, if any.
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship?
+    /// Adds (or updates) a favorite in the favorites store.
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String)
+    /// Posts a generic local user notification.
+    func postLocalNotification(title: String, body: String, identifier: String)
 }
 
 extension ChatViewModel: ChatNostrContext {
     // All requirements — including the component-context witnesses declared
     // in `GeohashSubscriptionManager.swift`, `NostrInboundPipeline.swift`,
-    // and `GeoPresenceTracker.swift` — already exist on `ChatViewModel`.
+    // `GeoPresenceTracker.swift`, and the favorites/notification witnesses in
+    // `ChatPrivateConversationCoordinator.swift`,
+    // `ChatPeerIdentityCoordinator.swift`, and
+    // `ChatVerificationCoordinator.swift` — already exist on `ChatViewModel`.
 }
 
 /// Thin facade over the Nostr stack: owns and wires the three components and
@@ -89,16 +100,17 @@ final class ChatNostrCoordinator {
 
     @MainActor
     func handleFavoriteNotification(content: String, from nostrPubkey: String) {
+        guard let context else { return }
         guard let senderNoiseKey = inbound.findNoiseKey(for: nostrPubkey) else { return }
 
         let isFavorite = content.contains("FAVORITE:TRUE")
         let senderNickname = content.components(separatedBy: "|").last ?? "Unknown"
 
         if isFavorite {
-            FavoritesPersistenceService.shared.addFavorite(
-                peerNoisePublicKey: senderNoiseKey,
-                peerNostrPublicKey: nostrPubkey,
-                peerNickname: senderNickname
+            context.addFavorite(
+                noiseKey: senderNoiseKey,
+                nostrPublicKey: nostrPubkey,
+                nickname: senderNickname
             )
         }
 
@@ -123,14 +135,14 @@ final class ChatNostrCoordinator {
                 "💾 Storing Nostr key association for \(senderNickname): \(extractedNostrPubkey!.prefix(16))...",
                 category: .session
             )
-            FavoritesPersistenceService.shared.addFavorite(
-                peerNoisePublicKey: senderNoiseKey,
-                peerNostrPublicKey: extractedNostrPubkey,
-                peerNickname: senderNickname
+            context.addFavorite(
+                noiseKey: senderNoiseKey,
+                nostrPublicKey: extractedNostrPubkey,
+                nickname: senderNickname
             )
         }
 
-        NotificationService.shared.sendLocalNotification(
+        context.postLocalNotification(
             title: isFavorite ? "New Favorite" : "Favorite Removed",
             body: "\(senderNickname) \(isFavorite ? "favorited" : "unfavorited") you",
             identifier: "fav-\(UUID().uuidString)"
@@ -140,7 +152,7 @@ final class ChatNostrCoordinator {
     @MainActor
     func sendFavoriteNotificationViaNostr(noisePublicKey: Data, isFavorite: Bool) {
         guard let context else { return }
-        guard let relationship = FavoritesPersistenceService.shared.getFavoriteStatus(for: noisePublicKey),
+        guard let relationship = context.favoriteRelationship(forNoiseKey: noisePublicKey),
               relationship.peerNostrPublicKey != nil else {
             SecureLogger.warning("⚠️ Cannot send favorite notification - no Nostr key for peer", category: .session)
             return

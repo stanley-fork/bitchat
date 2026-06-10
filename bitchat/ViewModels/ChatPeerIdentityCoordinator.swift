@@ -76,6 +76,16 @@ protocol ChatPeerIdentityContext: AnyObject {
     func invalidateStoredEncryptionCache(for peerID: PeerID?)
     func socialIdentity(forFingerprint fingerprint: String) -> SocialIdentity?
 
+    // MARK: Favorites
+    /// The persisted favorite relationship for the peer's Noise static key, if any.
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship?
+    /// The persisted favorite relationship for a short (ephemeral) peer ID, if any.
+    func favoriteRelationship(forPeerID peerID: PeerID) -> FavoritesPersistenceService.FavoriteRelationship?
+    /// Adds (or updates) a favorite in the favorites store.
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String)
+    /// Removes a favorite from the favorites store.
+    func removeFavorite(noiseKey: Data)
+
     // MARK: Geohash & Nostr
     var geoNicknames: [String: String] { get }
     func visibleGeohashPeople() -> [GeoPerson]
@@ -183,6 +193,26 @@ extension ChatViewModel: ChatPeerIdentityContext {
     func bridgedNostrPublicKey(for noiseKey: Data) -> String? {
         idBridge.getNostrPublicKey(for: noiseKey)
     }
+
+    // `favoriteRelationship(forNoiseKey:)` is shared with
+    // `ChatPrivateConversationContext`; its witness lives in
+    // `ChatPrivateConversationCoordinator.swift`.
+
+    func favoriteRelationship(forPeerID peerID: PeerID) -> FavoritesPersistenceService.FavoriteRelationship? {
+        FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID)
+    }
+
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String) {
+        FavoritesPersistenceService.shared.addFavorite(
+            peerNoisePublicKey: noiseKey,
+            peerNostrPublicKey: nostrPublicKey,
+            peerNickname: nickname
+        )
+    }
+
+    func removeFavorite(noiseKey: Data) {
+        FavoritesPersistenceService.shared.removeFavorite(peerNoisePublicKey: noiseKey)
+    }
 }
 
 final class ChatPeerIdentityCoordinator {
@@ -255,7 +285,7 @@ final class ChatPeerIdentityCoordinator {
     @MainActor
     func isFavorite(peerID: PeerID) -> Bool {
         if let noisePublicKey = peerID.noiseKey {
-            return FavoritesPersistenceService.shared.getFavoriteStatus(for: noisePublicKey)?.isFavorite ?? false
+            return context.favoriteRelationship(forNoiseKey: noisePublicKey)?.isFavorite ?? false
         }
 
         return context.unifiedPeer(for: peerID)?.isFavorite ?? false
@@ -499,12 +529,12 @@ final class ChatPeerIdentityCoordinator {
         if let name = context.peerNickname(for: peerID) {
             return name
         }
-        if let favorite = FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID),
+        if let favorite = context.favoriteRelationship(forPeerID: peerID),
            !favorite.peerNickname.isEmpty {
             return favorite.peerNickname
         }
         if let noiseKey = Data(hexString: peerID.id),
-           let favorite = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey),
+           let favorite = context.favoriteRelationship(forNoiseKey: noiseKey),
            !favorite.peerNickname.isEmpty {
             return favorite.peerNickname
         }
@@ -579,7 +609,7 @@ private extension ChatPeerIdentityCoordinator {
         if let nickname = context.peerNickname(for: peerID) {
             return nickname
         }
-        if let favorite = FavoritesPersistenceService.shared.getFavoriteStatus(for: peerPublicKey) {
+        if let favorite = context.favoriteRelationship(forNoiseKey: peerPublicKey) {
             return favorite.peerNickname
         }
         return "Unknown"
@@ -602,7 +632,7 @@ private extension ChatPeerIdentityCoordinator {
             return
         }
 
-        let currentStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noisePublicKey)
+        let currentStatus = context.favoriteRelationship(forNoiseKey: noisePublicKey)
         let fallbackNickname = context.privateChats[peerID]?.first { $0.senderPeerID == peerID }?.sender
         let plan = ChatFavoriteTogglePolicy.plan(
             currentStatus: currentStatus.map(ChatFavoriteStatusSnapshot.init),
@@ -612,14 +642,14 @@ private extension ChatPeerIdentityCoordinator {
 
         switch plan.persistenceAction {
         case .add(let nickname, let nostrKey):
-            FavoritesPersistenceService.shared.addFavorite(
-                peerNoisePublicKey: noisePublicKey,
-                peerNostrPublicKey: nostrKey,
-                peerNickname: nickname
+            context.addFavorite(
+                noiseKey: noisePublicKey,
+                nostrPublicKey: nostrKey,
+                nickname: nickname
             )
 
         case .remove:
-            FavoritesPersistenceService.shared.removeFavorite(peerNoisePublicKey: noisePublicKey)
+            context.removeFavorite(noiseKey: noisePublicKey)
         }
 
         context.notifyUIChanged()

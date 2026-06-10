@@ -53,6 +53,10 @@ protocol ChatLifecycleContext: AnyObject {
     func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity
     func recordGeoParticipant(pubkeyHex: String)
 
+    // MARK: Favorites (shared with `ChatPrivateConversationContext`)
+    /// The persisted favorite relationship for the peer's Noise static key, if any.
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship?
+
     // MARK: Identity persistence
     /// Forces the identity manager to persist its state now.
     func forceSaveIdentity()
@@ -69,7 +73,8 @@ extension ChatViewModel: ChatLifecycleContext {
     // `synchronizePrivateConversationStore()`, `addSystemMessage(_:)`,
     // `peerNickname(for:)`, `unifiedPeer(for:)`, `noiseSessionState(for:)`,
     // the routing/ack members, `isTeleported`,
-    // `deriveNostrIdentity(forGeohash:)`, and `recordGeoParticipant(pubkeyHex:)`
+    // `deriveNostrIdentity(forGeohash:)`, `recordGeoParticipant(pubkeyHex:)`,
+    // and `favoriteRelationship(forNoiseKey:)`
     // are shared requirements with the other contexts or satisfied by
     // existing `ChatViewModel` members. The members below flatten nested
     // service accesses into intent-named calls.
@@ -192,12 +197,12 @@ final class ChatLifecycleCoordinator {
         var peerNostrPubkey: String?
 
         if let noiseKey = Data(hexString: peerID.id),
-           let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey) {
+           let favoriteStatus = context.favoriteRelationship(forNoiseKey: noiseKey) {
             noiseKeyHex = peerID
             peerNostrPubkey = favoriteStatus.peerNostrPublicKey
         } else if let peer = context.unifiedPeer(for: peerID) {
             noiseKeyHex = PeerID(hexData: peer.noisePublicKey)
-            let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: peer.noisePublicKey)
+            let favoriteStatus = context.favoriteRelationship(forNoiseKey: peer.noisePublicKey)
             peerNostrPubkey = favoriteStatus?.peerNostrPublicKey
 
             if let noiseKeyHex, context.unreadPrivateMessages.contains(noiseKeyHex) {

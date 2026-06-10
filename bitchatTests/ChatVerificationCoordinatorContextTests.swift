@@ -7,11 +7,12 @@
 // `ChatViewModel`, following the `ChatDeliveryCoordinatorContextTests` /
 // `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
-// Scope note: `handleVerifyResponsePayload` requires a real Ed25519 signature
-// and posts via `NotificationService.shared`; it remains covered by the full
-// view-model/integration tests. Challenge handling, QR kickoff, fingerprint
-// verification, and verified-set loading are covered here
-// (`VerificationService.shared` is only used for pure payload build/parse).
+// Scope note: `handleVerifyResponsePayload` requires a real Ed25519
+// signature; it remains covered by the full view-model/integration tests.
+// Challenge handling, QR kickoff, fingerprint verification, verified-set
+// loading, and the mutual-verification notification (posted through the
+// injected context) are covered here (`VerificationService.shared` is only
+// used for pure payload build/parse).
 //
 
 import Testing
@@ -116,6 +117,13 @@ private final class MockChatVerificationContext: ChatVerificationContext {
 
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {
         sentResponses.append((peerID, noiseKeyHex, nonceA))
+    }
+
+    // Notifications
+    private(set) var postedLocalNotifications: [(title: String, body: String, identifier: String)] = []
+
+    func postLocalNotification(title: String, body: String, identifier: String) {
+        postedLocalNotifications.append((title, body, identifier))
     }
 }
 
@@ -271,6 +279,35 @@ struct ChatVerificationCoordinatorContextTests {
         callbacks?.onHandshakeRequired(peerID)
         await waitForMainQueue()
         #expect(context.encryptionStatuses[peerID] == .noiseHandshaking)
+    }
+
+    @Test @MainActor
+    func handleVerifyChallengePayload_postsMutualVerificationToastOncePerMinute() async {
+        let context = MockChatVerificationContext()
+        let coordinator = ChatVerificationCoordinator(context: context)
+        let peerID = PeerID(str: "1122334455667788")
+        let myHex = context.myNoiseStaticKey.hexEncodedString()
+        context.fingerprintsByPeerID[peerID] = "fp-mutual"
+        context.verifiedFingerprints = ["fp-mutual"]
+
+        coordinator.handleVerifyChallengePayload(
+            from: peerID,
+            payload: makeVerifyChallengeTLV(noiseKeyHex: myHex, nonceA: Data(repeating: 0x07, count: 16))
+        )
+
+        // Already-verified peer challenging us: mutual-verification toast.
+        #expect(context.postedLocalNotifications.count == 1)
+        #expect(context.postedLocalNotifications.first?.title == "Mutual verification")
+        #expect(context.postedLocalNotifications.first?.body.hasSuffix("verified each other") == true)
+        #expect(context.postedLocalNotifications.first?.identifier.hasPrefix("verify-mutual-") == true)
+
+        // A fresh nonce inside the per-fingerprint toast cooldown stays silent.
+        coordinator.handleVerifyChallengePayload(
+            from: peerID,
+            payload: makeVerifyChallengeTLV(noiseKeyHex: myHex, nonceA: Data(repeating: 0x08, count: 16))
+        )
+        #expect(context.postedLocalNotifications.count == 1)
+        #expect(context.sentResponses.count == 2)
     }
 }
 

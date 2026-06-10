@@ -7,11 +7,10 @@
 // `ChatViewModel`, following the `ChatDeliveryCoordinatorContextTests` /
 // `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
-// Scope note: flows that hit the `FavoritesPersistenceService.shared`
-// singleton (`isFavorite` / `toggleFavoriteForNoiseKey` / favorite
-// notifications / `nicknameForPeer` fallbacks) remain covered by the full
-// view-model tests; the session, migration, encryption-status, and nickname
-// resolution flows are covered here.
+// Scope note: favorites are injected through the context
+// (`favoriteRelationship(forNoiseKey:)` / `addFavorite` / `removeFavorite`),
+// so the favorite toggle and lookup flows are covered here alongside the
+// session, migration, encryption-status, and nickname resolution flows.
 //
 
 import Testing
@@ -171,9 +170,49 @@ private final class MockChatPeerIdentityContext: ChatPeerIdentityContext {
     func sendFavoriteNotificationViaNostr(noisePublicKey: Data, isFavorite: Bool) {
         nostrFavoriteNotifications.append((noisePublicKey, isFavorite))
     }
+
+    // Favorites
+    var favoriteRelationshipsByNoiseKey: [Data: FavoritesPersistenceService.FavoriteRelationship] = [:]
+    var favoriteRelationshipsByPeerID: [PeerID: FavoritesPersistenceService.FavoriteRelationship] = [:]
+    private(set) var addedFavorites: [(noiseKey: Data, nostrPublicKey: String?, nickname: String)] = []
+    private(set) var removedFavorites: [Data] = []
+
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? {
+        favoriteRelationshipsByNoiseKey[noiseKey]
+    }
+
+    func favoriteRelationship(forPeerID peerID: PeerID) -> FavoritesPersistenceService.FavoriteRelationship? {
+        favoriteRelationshipsByPeerID[peerID]
+    }
+
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String) {
+        addedFavorites.append((noiseKey, nostrPublicKey, nickname))
+    }
+
+    func removeFavorite(noiseKey: Data) {
+        removedFavorites.append(noiseKey)
+    }
 }
 
 // MARK: - Helpers
+
+private func makeFavoriteRelationship(
+    noiseKey: Data,
+    nostrPublicKey: String? = nil,
+    nickname: String = "alice",
+    isFavorite: Bool = false,
+    theyFavoritedUs: Bool = false
+) -> FavoritesPersistenceService.FavoriteRelationship {
+    FavoritesPersistenceService.FavoriteRelationship(
+        peerNoisePublicKey: noiseKey,
+        peerNostrPublicKey: nostrPublicKey,
+        peerNickname: nickname,
+        isFavorite: isFavorite,
+        theyFavoritedUs: theyFavoritedUs,
+        favoritedAt: Date(timeIntervalSince1970: 0),
+        lastUpdated: Date(timeIntervalSince1970: 0)
+    )
+}
 
 @MainActor
 private func makePrivateMessage(
@@ -355,4 +394,40 @@ struct ChatPeerIdentityCoordinatorContextTests {
         context.peerIDsByNickname["carol"] = meshPeer
         #expect(coordinator.getPeerIDForNickname("carol") == meshPeer)
     }
+    @Test @MainActor
+    func toggleFavorite_forNoiseKeyPeer_usesInjectedFavoritesStore() async {
+        let context = MockChatPeerIdentityContext()
+        let coordinator = ChatPeerIdentityCoordinator(context: context)
+        let noiseKey = Data(repeating: 0xAB, count: 32)
+        let peerID = PeerID(hexData: noiseKey)
+
+        // No prior relationship: adds a favorite, no Nostr notification yet.
+        coordinator.toggleFavorite(peerID: peerID)
+        #expect(context.addedFavorites.count == 1)
+        #expect(context.addedFavorites.first?.noiseKey == noiseKey)
+        #expect(context.addedFavorites.first?.nickname == "Unknown")
+        #expect(context.nostrFavoriteNotifications.isEmpty)
+        #expect(coordinator.isFavorite(peerID: peerID) == false)
+
+        // They already favorite us: adding sends the mutual notification.
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            theyFavoritedUs: true
+        )
+        coordinator.toggleFavorite(peerID: peerID)
+        #expect(context.addedFavorites.count == 2)
+        #expect(context.addedFavorites.last?.nickname == "alice")
+        #expect(context.nostrFavoriteNotifications.map(\.isFavorite) == [true])
+
+        // Existing favorite: toggling removes it and notifies the unfavorite.
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            isFavorite: true
+        )
+        #expect(coordinator.isFavorite(peerID: peerID) == true)
+        coordinator.toggleFavorite(peerID: peerID)
+        #expect(context.removedFavorites == [noiseKey])
+        #expect(context.nostrFavoriteNotifications.map(\.isFavorite) == [true, false])
+    }
+
 }

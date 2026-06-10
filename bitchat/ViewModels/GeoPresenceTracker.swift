@@ -25,6 +25,9 @@ protocol GeoPresenceContext: AnyObject {
 
     func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool
     func synchronizePublicConversationStore(forGeohash geohash: String)
+
+    /// Posts the sampled-geohash-activity local notification.
+    func notifyGeohashActivity(geohash: String, bodyPreview: String)
 }
 
 extension ChatViewModel: GeoPresenceContext {
@@ -51,6 +54,10 @@ extension ChatViewModel: GeoPresenceContext {
 
     func markGeoTeleported(_ pubkeyHexLowercased: String) {
         locationPresenceStore.markTeleported(pubkeyHexLowercased)
+    }
+
+    func notifyGeohashActivity(geohash: String, bodyPreview: String) {
+        NotificationService.shared.sendGeohashActivityNotification(geohash: geohash, bodyPreview: bodyPreview)
     }
 }
 
@@ -160,7 +167,7 @@ final class GeoPresenceTracker {
             )
             if context.appendGeohashMessageIfAbsent(message, toGeohash: gh) {
                 context.synchronizePublicConversationStore(forGeohash: gh)
-                NotificationService.shared.sendGeohashActivityNotification(geohash: gh, bodyPreview: preview)
+                context.notifyGeohashActivity(geohash: gh, bodyPreview: preview)
             }
         }
     }

@@ -56,6 +56,10 @@ protocol ChatVerificationContext: AnyObject {
     func triggerHandshake(with peerID: PeerID)
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
+
+    // MARK: Notifications (shared with `ChatNostrContext`)
+    /// Posts a generic local user notification.
+    func postLocalNotification(title: String, body: String, identifier: String)
 }
 
 extension ChatViewModel: ChatVerificationContext {
@@ -109,6 +113,10 @@ extension ChatViewModel: ChatVerificationContext {
 
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {
         meshService.sendVerifyResponse(to: peerID, noiseKeyHex: noiseKeyHex, nonceA: nonceA)
+    }
+
+    func postLocalNotification(title: String, body: String, identifier: String) {
+        NotificationService.shared.sendLocalNotification(title: title, body: body, identifier: identifier)
     }
 }
 
@@ -313,7 +321,7 @@ final class ChatVerificationCoordinator {
 
         let peerName = context.unifiedPeer(for: peerID)?.nickname
             ?? context.resolveNickname(for: peerID)
-        NotificationService.shared.sendLocalNotification(
+        context.postLocalNotification(
             title: "Verified",
             body: "You verified \(peerName)",
             identifier: "verify-success-\(peerID)-\(UUID().uuidString)"
@@ -347,7 +355,7 @@ private extension ChatVerificationCoordinator {
         guard now.timeIntervalSince(lastToast) > 60 else { return }
 
         lastMutualToastAt[fingerprint] = now
-        NotificationService.shared.sendLocalNotification(
+        context.postLocalNotification(
             title: title,
             body: "You and \(bodyName) verified each other",
             identifier: "\(notificationPrefix)-\(peerID)-\(UUID().uuidString)"

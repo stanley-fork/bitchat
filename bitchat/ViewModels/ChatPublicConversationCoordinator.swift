@@ -88,6 +88,10 @@ protocol ChatPublicConversationContext: AnyObject {
     func recordContentKey(_ key: String, timestamp: Date)
     /// Pre-renders the message so the formatting cache is warm before display.
     func prewarmMessageFormatting(_ message: BitchatMessage)
+
+    // MARK: Notifications
+    /// Posts the you-were-mentioned local notification.
+    func notifyMention(from sender: String, message: String)
 }
 
 extension ChatViewModel: ChatPublicConversationContext {
@@ -183,6 +187,10 @@ extension ChatViewModel: ChatPublicConversationContext {
 
     func prewarmMessageFormatting(_ message: BitchatMessage) {
         _ = formatMessageAsText(message, colorScheme: currentColorScheme)
+    }
+
+    func notifyMention(from sender: String, message: String) {
+        NotificationService.shared.sendMentionNotification(from: sender, message: message)
     }
 }
 
@@ -548,7 +556,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
 
         if isMentioned && message.sender != context.nickname {
             SecureLogger.info("🔔 Mention from \(message.sender)", category: .session)
-            NotificationService.shared.sendMentionNotification(from: message.sender, message: message.content)
+            context.notifyMention(from: message.sender, message: message.content)
         }
     }
 

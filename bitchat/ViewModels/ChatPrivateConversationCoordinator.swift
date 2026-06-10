@@ -69,6 +69,14 @@ protocol ChatPrivateConversationContext: AnyObject {
     func addSystemMessage(_ content: String)
     func addMeshOnlySystemMessage(_ content: String)
     func sanitizeChat(for peerID: PeerID)
+
+    // MARK: Favorites & notifications
+    /// The persisted favorite relationship for the peer's Noise static key, if any.
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship?
+    /// Persists that the peer favorited/unfavorited us (favorites store write).
+    func updatePeerFavoritedUs(noiseKey: Data, favorited: Bool, nickname: String, nostrPublicKey: String?)
+    /// Posts the incoming-private-message local notification.
+    func notifyPrivateMessage(from senderName: String, message: String, peerID: PeerID)
 }
 
 extension ChatViewModel: ChatPrivateConversationContext {
@@ -161,6 +169,23 @@ extension ChatViewModel: ChatPrivateConversationContext {
         privateChatManager.sanitizeChat(for: peerID)
     }
 
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? {
+        FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
+    }
+
+    func updatePeerFavoritedUs(noiseKey: Data, favorited: Bool, nickname: String, nostrPublicKey: String?) {
+        FavoritesPersistenceService.shared.updatePeerFavoritedUs(
+            peerNoisePublicKey: noiseKey,
+            favorited: favorited,
+            peerNickname: nickname,
+            peerNostrPublicKey: nostrPublicKey
+        )
+    }
+
+    func notifyPrivateMessage(from senderName: String, message: String, peerID: PeerID) {
+        NotificationService.shared.sendPrivateMessageNotification(from: senderName, message: message, peerID: peerID)
+    }
+
     private func makeGeohashNostrTransport() -> NostrTransport {
         let transport = NostrTransport(keychain: keychain, idBridge: idBridge)
         transport.senderPeerID = meshService.myPeerID
@@ -199,7 +224,7 @@ final class ChatPrivateConversationCoordinator {
         guard let noiseKey = Data(hexString: peerID.id) else { return }
         let isConnected = context.isPeerConnected(peerID)
         let isReachable = context.isPeerReachable(peerID)
-        let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
+        let favoriteStatus = context.favoriteRelationship(forNoiseKey: noiseKey)
         let isMutualFavorite = favoriteStatus?.isMutual ?? false
         let hasNostrKey = favoriteStatus?.peerNostrPublicKey != nil
 
@@ -393,11 +418,7 @@ final class ChatPrivateConversationCoordinator {
         }
 
         if !isViewing && shouldMarkUnread {
-            NotificationService.shared.sendPrivateMessageNotification(
-                from: senderName,
-                message: pm.content,
-                peerID: convKey
-            )
+            context.notifyPrivateMessage(from: senderName, message: pm.content, peerID: convKey)
         }
 
         context.notifyUIChanged()
@@ -592,11 +613,7 @@ final class ChatPrivateConversationCoordinator {
             context.markReadReceiptSent(message.id)
         } else {
             context.unreadPrivateMessages.insert(peerID)
-            NotificationService.shared.sendPrivateMessageNotification(
-                from: message.sender,
-                message: message.content,
-                peerID: peerID
-            )
+            context.notifyPrivateMessage(from: message.sender, message: message.content, peerID: peerID)
         }
 
         context.notifyUIChanged()
@@ -692,11 +709,7 @@ final class ChatPrivateConversationCoordinator {
             context.unreadPrivateMessages.insert(ephemeralPeerID)
         }
         if isRecentMessage {
-            NotificationService.shared.sendPrivateMessageNotification(
-                from: senderNickname,
-                message: messageContent,
-                peerID: targetPeerID
-            )
+            context.notifyPrivateMessage(from: senderNickname, message: messageContent, peerID: targetPeerID)
         }
     }
 
@@ -716,12 +729,12 @@ final class ChatPrivateConversationCoordinator {
             return
         }
 
-        let prior = FavoritesPersistenceService.shared.getFavoriteStatus(for: finalNoiseKey)?.theyFavoritedUs ?? false
-        FavoritesPersistenceService.shared.updatePeerFavoritedUs(
-            peerNoisePublicKey: finalNoiseKey,
+        let prior = context.favoriteRelationship(forNoiseKey: finalNoiseKey)?.theyFavoritedUs ?? false
+        context.updatePeerFavoritedUs(
+            noiseKey: finalNoiseKey,
             favorited: isFavorite,
-            peerNickname: senderNickname,
-            peerNostrPublicKey: nostrPubkey
+            nickname: senderNickname,
+            nostrPublicKey: nostrPubkey
         )
 
         if isFavorite && nostrPubkey != nil {

@@ -399,40 +399,6 @@ struct ChatViewModelNostrExtensionTests {
     }
 
     @Test @MainActor
-    func handleNostrMessage_invalidSignatureDoesNotPoisonDedup() async throws {
-        let (viewModel, _) = makeTestableViewModel()
-        let sender = try NostrIdentity.generate()
-        let recipient = try #require(try viewModel.idBridge.getCurrentNostrIdentity())
-        let giftWrap = try NostrProtocol.createPrivateMessage(
-            content: "verify:noop",
-            recipientPubkey: recipient.publicKeyHex,
-            senderIdentity: sender
-        )
-        var invalidGiftWrap = giftWrap
-        invalidGiftWrap.sig = String(repeating: "0", count: 128)
-
-        // Verification and recording now happen on a detached task; give the
-        // invalid copy time to be verified-and-rejected, then assert it never
-        // entered the dedup set.
-        viewModel.handleNostrMessage(invalidGiftWrap)
-        try await Task.sleep(nanoseconds: 150_000_000)
-        #expect(!viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
-
-        // Generous deadline: the detached verification task can be starved
-        // under parallel test load.
-        viewModel.handleNostrMessage(giftWrap)
-        var recorded = false
-        for _ in 0..<600 {
-            if viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id) {
-                recorded = true
-                break
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        #expect(recorded)
-    }
-
-    @Test @MainActor
     func switchLocationChannel_clearsNostrDedupCache() async {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"

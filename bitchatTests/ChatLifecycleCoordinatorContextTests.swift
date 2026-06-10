@@ -7,12 +7,12 @@
 // `ChatDeliveryCoordinatorContextTests` /
 // `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
-// Scope note: the mesh/Nostr read-receipt branch of
-// `markPrivateMessagesAsRead` consults `FavoritesPersistenceService.shared`
-// and the geohash-screenshot branch publishes via `NostrRelayManager.shared` /
-// `GeoRelayDirectory.shared`; those stay covered by the full view-model tests.
-// The GeoDM read pass, message merging, screenshot notices, and lifecycle
-// persistence flows are covered here.
+// Scope note: the geohash-screenshot branch publishes via
+// `NostrRelayManager.shared` / `GeoRelayDirectory.shared`; that stays covered
+// by the full view-model tests. The GeoDM read pass, the favorites-backed
+// mesh/Nostr read-receipt branch (favorites are injected through the
+// context), message merging, screenshot notices, and lifecycle persistence
+// flows are covered here.
 //
 
 import Testing
@@ -101,6 +101,13 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
     func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity { Self.dummyIdentity }
     func recordGeoParticipant(pubkeyHex: String) { recordedGeoParticipants.append(pubkeyHex) }
 
+    // Favorites
+    var favoriteRelationshipsByNoiseKey: [Data: FavoritesPersistenceService.FavoriteRelationship] = [:]
+
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? {
+        favoriteRelationshipsByNoiseKey[noiseKey]
+    }
+
     // Identity persistence
     private(set) var forceSaveIdentityCount = 0
     private(set) var verifyIdentityKeyExistsCount = 0
@@ -122,6 +129,24 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
 }
 
 // MARK: - Helpers
+
+private func makeFavoriteRelationship(
+    noiseKey: Data,
+    nostrPublicKey: String? = nil,
+    nickname: String = "alice",
+    isFavorite: Bool = false,
+    theyFavoritedUs: Bool = false
+) -> FavoritesPersistenceService.FavoriteRelationship {
+    FavoritesPersistenceService.FavoriteRelationship(
+        peerNoisePublicKey: noiseKey,
+        peerNostrPublicKey: nostrPublicKey,
+        peerNickname: nickname,
+        isFavorite: isFavorite,
+        theyFavoritedUs: theyFavoritedUs,
+        favoritedAt: Date(timeIntervalSince1970: 0),
+        lastUpdated: Date(timeIntervalSince1970: 0)
+    )
+}
 
 @MainActor
 private func makePrivateMessage(
@@ -280,4 +305,36 @@ struct ChatLifecycleCoordinatorContextTests {
         }
         #expect(context.ownerLevelReadPasses == [peerID])
     }
+    @Test @MainActor
+    func markPrivateMessagesAsRead_routesReceiptsOnlyForNostrReachableFavorites() {
+        let context = MockChatLifecycleContext()
+        let coordinator = ChatLifecycleCoordinator(context: context)
+        let noiseKey = Data(repeating: 0xAB, count: 32)
+        let peerID = PeerID(hexData: noiseKey)
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            nostrPublicKey: "npub1alice"
+        )
+        context.privateChats[peerID] = [
+            makePrivateMessage(id: "in-1", senderPeerID: peerID),
+            makePrivateMessage(id: "in-relay", senderPeerID: peerID, isRelay: true),
+        ]
+
+        coordinator.markPrivateMessagesAsRead(from: peerID)
+
+        // Favorite with a Nostr key: READ receipts routed for non-relay
+        // inbound messages and recorded as sent.
+        #expect(context.managerReadMarks == [peerID])
+        #expect(context.routedReadReceipts.map(\.messageID) == ["in-1"])
+        #expect(context.routedReadReceipts.map(\.peerID) == [peerID])
+        #expect(context.sentReadReceipts.contains("in-1"))
+
+        // No favorite relationship (no Nostr key): the receipt pass is skipped.
+        let otherKey = Data(repeating: 0xCD, count: 32)
+        let otherPeer = PeerID(hexData: otherKey)
+        context.privateChats[otherPeer] = [makePrivateMessage(id: "in-2", senderPeerID: otherPeer)]
+        coordinator.markPrivateMessagesAsRead(from: otherPeer)
+        #expect(context.routedReadReceipts.map(\.messageID) == ["in-1"])
+    }
+
 }

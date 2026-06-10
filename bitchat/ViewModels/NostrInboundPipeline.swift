@@ -20,6 +20,11 @@ protocol NostrInboundPipelineContext: AnyObject {
     func isNostrBlocked(pubkeyHexLowercased: String) -> Bool
     func displayNameForNostrPubkey(_ pubkeyHex: String) -> String
 
+    // MARK: Favorites bridge
+    /// All favorite relationships, used to bridge a Nostr pubkey back to a
+    /// Noise key on the inbound DM path.
+    func allFavoriteRelationships() -> [FavoritesPersistenceService.FavoriteRelationship]
+
     // MARK: Presence & key mapping
     func setGeoNickname(_ nickname: String, forPubkey pubkeyHex: String)
     /// Records the Nostr pubkey behind a (possibly virtual) peer ID.
@@ -51,6 +56,10 @@ extension ChatViewModel: NostrInboundPipelineContext {
 
     func hasProcessedNostrEvent(_ eventID: String) -> Bool {
         deduplicationService.hasProcessedNostrEvent(eventID)
+    }
+
+    func allFavoriteRelationships() -> [FavoritesPersistenceService.FavoriteRelationship] {
+        Array(FavoritesPersistenceService.shared.favorites.values)
     }
 
     func recordProcessedNostrEvent(_ eventID: String) {
@@ -437,7 +446,8 @@ final class NostrInboundPipeline {
     /// the favorites glue in `ChatNostrCoordinator` delegates to it.
     @MainActor
     func findNoiseKey(for nostrPubkey: String) -> Data? {
-        let favorites = FavoritesPersistenceService.shared.favorites.values
+        guard let context else { return nil }
+        let favorites = context.allFavoriteRelationships()
         var npubToMatch = nostrPubkey
 
         if !nostrPubkey.hasPrefix("npub") {

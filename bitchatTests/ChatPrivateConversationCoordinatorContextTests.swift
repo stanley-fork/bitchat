@@ -132,6 +132,23 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
         embeddedDeliveryAckMessageIDs.append(message.id)
     }
 
+    // Favorites & notifications
+    var favoriteRelationshipsByNoiseKey: [Data: FavoritesPersistenceService.FavoriteRelationship] = [:]
+    private(set) var peerFavoritedUsUpdates: [(noiseKey: Data, favorited: Bool, nickname: String, nostrPublicKey: String?)] = []
+    private(set) var privateMessageNotifications: [(senderName: String, message: String, peerID: PeerID)] = []
+
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? {
+        favoriteRelationshipsByNoiseKey[noiseKey]
+    }
+
+    func updatePeerFavoritedUs(noiseKey: Data, favorited: Bool, nickname: String, nostrPublicKey: String?) {
+        peerFavoritedUsUpdates.append((noiseKey, favorited, nickname, nostrPublicKey))
+    }
+
+    func notifyPrivateMessage(from senderName: String, message: String, peerID: PeerID) {
+        privateMessageNotifications.append((senderName, message, peerID))
+    }
+
     // System messages & chat hygiene
     private(set) var systemMessages: [String] = []
     private(set) var meshOnlySystemMessages: [String] = []
@@ -191,13 +208,33 @@ private func isRead(_ status: DeliveryStatus?, by expected: String) -> Bool {
     return false
 }
 
+private func makeFavoriteRelationship(
+    noiseKey: Data,
+    nostrPublicKey: String? = nil,
+    nickname: String = "alice",
+    isFavorite: Bool = false,
+    theyFavoritedUs: Bool = false
+) -> FavoritesPersistenceService.FavoriteRelationship {
+    FavoritesPersistenceService.FavoriteRelationship(
+        peerNoisePublicKey: noiseKey,
+        peerNostrPublicKey: nostrPublicKey,
+        peerNickname: nickname,
+        isFavorite: isFavorite,
+        theyFavoritedUs: theyFavoritedUs,
+        favoritedAt: Date(timeIntervalSince1970: 0),
+        lastUpdated: Date(timeIntervalSince1970: 0)
+    )
+}
+
 // MARK: - Coordinator Tests Against Mock Context
 
 /// Exercises `ChatPrivateConversationCoordinator` against
 /// `MockChatPrivateConversationContext` with no `ChatViewModel`. Scoped to the
-/// pure-state and ack flows; flows that hit `NotificationService` /
-/// `FavoritesPersistenceService` singletons remain covered by the full
-/// view-model tests.
+/// pure-state and ack flows plus — now that notifications and favorites are
+/// injected through the context (`notifyPrivateMessage`,
+/// `favoriteRelationship(forNoiseKey:)`, `updatePeerFavoritedUs`) — the
+/// notification and favorite-transition flows that previously required the
+/// live singletons.
 struct ChatPrivateConversationCoordinatorContextTests {
 
     @Test @MainActor
@@ -401,5 +438,100 @@ struct ChatPrivateConversationCoordinatorContextTests {
         #expect(context.selectedPrivateChatPeer == newPeerID)
         #expect(context.sanitizedPeerIDs == [newPeerID])
         #expect(context.notifyUIChangedCount == 1)
+    }
+
+    @Test @MainActor
+    func handlePrivateMessage_postsNotificationOnlyWhenNotViewingChat() async {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let peerID = PeerID(str: "0102030405060708")
+
+        // Not viewing: marked unread and a local notification is posted.
+        coordinator.handlePrivateMessage(
+            makeIncomingMessage(id: "pm-1", content: "hi there", senderPeerID: peerID)
+        )
+        #expect(context.unreadPrivateMessages == [peerID])
+        #expect(context.privateMessageNotifications.count == 1)
+        #expect(context.privateMessageNotifications.first?.senderName == "alice")
+        #expect(context.privateMessageNotifications.first?.message == "hi there")
+        #expect(context.privateMessageNotifications.first?.peerID == peerID)
+        #expect(context.meshReadReceipts.isEmpty)
+
+        // Viewing the chat: a READ ack is sent instead and no notification fires.
+        context.selectedPrivateChatPeer = peerID
+        coordinator.handlePrivateMessage(makeIncomingMessage(id: "pm-2", senderPeerID: peerID))
+        #expect(context.meshReadReceipts.map(\.messageID) == ["pm-2"])
+        #expect(context.sentReadReceipts.contains("pm-2"))
+        #expect(context.privateMessageNotifications.count == 1)
+    }
+
+    @Test @MainActor
+    func handleFavoriteNotificationFromMesh_persistsAndAnnouncesTransitionsOnly() async {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let noiseKey = Data(repeating: 0xAB, count: 32)
+        let peerID = PeerID(hexData: noiseKey)
+
+        // First [FAVORITED] flips theyFavoritedUs: store write + announcement.
+        coordinator.handleFavoriteNotificationFromMesh("[FAVORITED]:npub1alice", from: peerID, senderNickname: "alice")
+        #expect(context.peerFavoritedUsUpdates.count == 1)
+        #expect(context.peerFavoritedUsUpdates.first?.noiseKey == noiseKey)
+        #expect(context.peerFavoritedUsUpdates.first?.favorited == true)
+        #expect(context.peerFavoritedUsUpdates.first?.nostrPublicKey == "npub1alice")
+        #expect(context.meshOnlySystemMessages == ["alice favorited you"])
+
+        // Same state again: store write still happens, but no repeat announcement.
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            theyFavoritedUs: true
+        )
+        coordinator.handleFavoriteNotificationFromMesh("[FAVORITED]:npub1alice", from: peerID, senderNickname: "alice")
+        #expect(context.peerFavoritedUsUpdates.count == 2)
+        #expect(context.meshOnlySystemMessages == ["alice favorited you"])
+
+        // [UNFAVORITED] transition announces again.
+        coordinator.handleFavoriteNotificationFromMesh("[UNFAVORITED]", from: peerID, senderNickname: "alice")
+        #expect(context.peerFavoritedUsUpdates.last?.favorited == false)
+        #expect(context.meshOnlySystemMessages == ["alice favorited you", "alice unfavorited you"])
+    }
+
+    @Test @MainActor
+    func sendPrivateMessage_routesViaMutualFavoriteNostrWhenPeerOffline() async {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let noiseKey = Data(repeating: 0xCD, count: 32)
+        let peerID = PeerID(hexData: noiseKey)
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            nostrPublicKey: "npub1bob",
+            nickname: "bob",
+            isFavorite: true,
+            theyFavoritedUs: true
+        )
+
+        coordinator.sendPrivateMessage("hello bob", to: peerID)
+
+        // Offline but mutual favorite with a Nostr key: routed, marked sent,
+        // and the nickname falls back to the favorite relationship.
+        #expect(context.routedPrivateMessages.map(\.content) == ["hello bob"])
+        #expect(context.privateChats[peerID]?.first?.deliveryStatus == .sent)
+        #expect(context.privateChats[peerID]?.first?.recipientNickname == "bob")
+        #expect(context.systemMessages.isEmpty)
+    }
+
+    @Test @MainActor
+    func sendPrivateMessage_failsWhenOfflineWithoutMutualFavorite() async {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let peerID = PeerID(hexData: Data(repeating: 0xCD, count: 32))
+
+        coordinator.sendPrivateMessage("hello?", to: peerID)
+
+        #expect(context.routedPrivateMessages.isEmpty)
+        #expect(context.systemMessages.count == 1)
+        guard case .failed = context.privateChats[peerID]?.first?.deliveryStatus else {
+            Issue.record("expected .failed delivery status")
+            return
+        }
     }
 }

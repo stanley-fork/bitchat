@@ -7,10 +7,9 @@
 // `ChatDeliveryCoordinatorContextTests` /
 // `ChatTransportEventCoordinatorContextTests` exemplars.
 //
-// Scope note: the network-availability notification path posts through
-// `NotificationService.shared` (a singleton) and arms wall-clock timers. These
-// tests keep every peer mesh-inactive (`isPeerConnected`/`isPeerReachable`
-// both false) so that path is never reached; the timer-driven reset flows are
+// Scope note: the network-availability notification now posts through the
+// injected `ChatPeerListContext` (`notifyNetworkAvailable(peerCount:)`), so
+// its gating is covered here; the wall-clock timer-driven reset flows are
 // covered by integration-level tests.
 //
 
@@ -54,6 +53,13 @@ private final class MockChatPeerListContext: ChatPeerListContext {
     func activeMeshPeerCount() -> Int { activeMeshPeerCountValue }
     func registerEphemeralSession(peerID: PeerID) { registeredEphemeralSessions.append(peerID) }
     func updateEncryptionStatusForPeers() { updateEncryptionStatusForPeersCount += 1 }
+
+    // Notifications
+    private(set) var networkAvailableNotifications: [Int] = []
+
+    func notifyNetworkAvailable(peerCount: Int) {
+        networkAvailableNotifications.append(peerCount)
+    }
 }
 
 // MARK: - Helpers
@@ -161,5 +167,41 @@ struct ChatPeerListCoordinatorContextTests {
         // Noise-key IDs with stored messages survive, as does the live peer.
         #expect(context.unreadPrivateMessages == [currentPeer, geoDMWithMessages, noiseKeyWithMessages])
         #expect(context.cleanupOldReadReceiptsCount == 1)
+    }
+
+    @Test @MainActor
+    func didUpdatePeerList_notifiesNetworkAvailableOncePerCooldownForNewMeshPeers() async {
+        let context = MockChatPeerListContext()
+        let coordinator = ChatPeerListCoordinator(context: context)
+        let peerA = PeerID(str: "0011223344556677")
+        let peerB = PeerID(str: "8899aabbccddeeff")
+        context.connectedMeshPeers = [peerA, peerB]
+
+        // First sighting of a mesh-active peer notifies with the mesh peer count.
+        coordinator.didUpdatePeerList([peerA])
+        await drainMainActorTasks()
+        #expect(context.networkAvailableNotifications == [1])
+
+        // The same peer again is not new — no repeat notification.
+        coordinator.didUpdatePeerList([peerA])
+        await drainMainActorTasks()
+        #expect(context.networkAvailableNotifications == [1])
+
+        // A genuinely new peer inside the cooldown window stays silent too.
+        coordinator.didUpdatePeerList([peerA, peerB])
+        await drainMainActorTasks()
+        #expect(context.networkAvailableNotifications == [1])
+    }
+
+    @Test @MainActor
+    func didUpdatePeerList_meshInactivePeersNeverNotify() async {
+        let context = MockChatPeerListContext()
+        let coordinator = ChatPeerListCoordinator(context: context)
+        let peerA = PeerID(str: "0011223344556677")
+
+        // Peer present but neither connected nor reachable: no notification.
+        coordinator.didUpdatePeerList([peerA])
+        await drainMainActorTasks()
+        #expect(context.networkAvailableNotifications.isEmpty)
     }
 }

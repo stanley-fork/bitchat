@@ -28,6 +28,10 @@ protocol ChatPeerListContext: AnyObject {
     func activeMeshPeerCount() -> Int
     func registerEphemeralSession(peerID: PeerID)
     func updateEncryptionStatusForPeers()
+
+    // MARK: Notifications
+    /// Posts the "bitchatters nearby" local notification.
+    func notifyNetworkAvailable(peerCount: Int)
 }
 
 extension ChatViewModel: ChatPeerListContext {
@@ -47,6 +51,10 @@ extension ChatViewModel: ChatPeerListContext {
                 snapshot.isConnected || meshService.isPeerReachable(snapshot.peerID)
             }
             .count
+    }
+
+    func notifyNetworkAvailable(peerCount: Int) {
+        NotificationService.shared.sendNetworkAvailableNotification(peerCount: peerCount)
     }
 }
 
@@ -115,7 +123,7 @@ private extension ChatPeerListCoordinator {
         if Date().timeIntervalSince(lastNetworkNotificationTime) >= cooldown {
             recentlySeenPeers.formUnion(newPeers)
             lastNetworkNotificationTime = Date()
-            NotificationService.shared.sendNetworkAvailableNotification(peerCount: meshPeers.count)
+            context.notifyNetworkAvailable(peerCount: meshPeers.count)
             SecureLogger.info(
                 "👥 Sent bitchatters nearby notification for \(meshPeers.count) mesh peers (new: \(newPeers.count))",
                 category: .session
