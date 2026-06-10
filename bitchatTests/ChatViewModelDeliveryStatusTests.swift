@@ -388,6 +388,12 @@ private final class MockChatDeliveryContext: ChatDeliveryContext {
     private(set) var notifyUIChangedCount = 0
     private(set) var markedDeliveredMessageIDs: [String] = []
 
+    func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
+        let oldCount = sentReadReceipts.count
+        sentReadReceipts = sentReadReceipts.intersection(validMessageIDs)
+        return oldCount - sentReadReceipts.count
+    }
+
     func notifyUIChanged() {
         notifyUIChangedCount += 1
     }

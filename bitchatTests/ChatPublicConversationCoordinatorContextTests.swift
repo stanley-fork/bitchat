@@ -31,9 +31,13 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     var currentGeohash: String?
     var nickname = "me"
     var myPeerID = PeerID(str: "0011223344556677")
-    var isBatchingPublic = false
+    private(set) var isBatchingPublic = false
     private(set) var notifyUIChangedCount = 0
     private(set) var trimMessagesCount = 0
+
+    func setPublicBatching(_ isBatching: Bool) {
+        isBatchingPublic = isBatching
+    }
 
     func notifyUIChanged() {
         notifyUIChangedCount += 1
@@ -146,6 +150,12 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     var geoPeople: [GeoPerson] = []
     var geoParticipantCounts: [String: Int] = [:]
     private(set) var removedGeoParticipants: [String] = []
+
+    func removeNostrKeyMappings(matchingPubkeyHexLowercased hex: String) {
+        for (key, value) in nostrKeyMapping where value.lowercased() == hex {
+            nostrKeyMapping.removeValue(forKey: key)
+        }
+    }
 
     func visibleGeoPeople() -> [GeoPerson] {
         geoPeople

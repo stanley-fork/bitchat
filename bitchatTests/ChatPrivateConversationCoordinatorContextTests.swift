@@ -29,6 +29,21 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
     var nostrKeyMapping: [PeerID: String] = [:]
     private(set) var notifyUIChangedCount = 0
 
+    @discardableResult
+    func markReadReceiptSent(_ messageID: String) -> Bool {
+        sentReadReceipts.insert(messageID).inserted
+    }
+
+    @discardableResult
+    func markGeoDeliveryAckSent(_ messageID: String) -> Bool {
+        sentGeoDeliveryAcks.insert(messageID).inserted
+    }
+
+    func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID) {
+        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 }) else { return }
+        selectedPrivateChatPeer = newPeerID
+    }
+
     func notifyUIChanged() {
         notifyUIChangedCount += 1
     }

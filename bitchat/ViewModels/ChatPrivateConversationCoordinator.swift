@@ -15,13 +15,23 @@ import Foundation
 protocol ChatPrivateConversationContext: AnyObject {
     // MARK: Conversation state
     var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var sentReadReceipts: Set<String> { get set }
-    var sentGeoDeliveryAcks: Set<String> { get set }
+    var sentReadReceipts: Set<String> { get }
     var unreadPrivateMessages: Set<PeerID> { get set }
-    var selectedPrivateChatPeer: PeerID? { get set }
+    var selectedPrivateChatPeer: PeerID? { get }
     var nickname: String { get }
     var activeChannel: ChannelID { get }
     var nostrKeyMapping: [PeerID: String] { get }
+    /// Records that a read receipt is being sent for `messageID`.
+    /// Returns `false` when one was already recorded — the caller must skip sending.
+    @discardableResult
+    func markReadReceiptSent(_ messageID: String) -> Bool
+    /// Records that a GeoDM delivery ACK is being sent for `messageID`.
+    /// Returns `false` when one was already recorded — the caller must skip sending.
+    @discardableResult
+    func markGeoDeliveryAckSent(_ messageID: String) -> Bool
+    /// Moves the open private chat to `newPeerID` when the current selection is
+    /// one of the peer IDs being migrated away.
+    func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
     func notifyUIChanged()
 
@@ -62,8 +72,10 @@ protocol ChatPrivateConversationContext: AnyObject {
 }
 
 extension ChatViewModel: ChatPrivateConversationContext {
-    // `privateChats`, `sentReadReceipts`, and `notifyUIChanged()` are shared
-    // requirements with `ChatDeliveryContext`; the remaining state members are
+    // `privateChats` and `notifyUIChanged()` are shared requirements with
+    // `ChatDeliveryContext`; the single-writer intent ops (`markReadReceiptSent`,
+    // `markGeoDeliveryAckSent`, `handOffSelectedPrivateChat`) live next to their
+    // backing state in `ChatViewModel`. The remaining state members are
     // satisfied by existing `ChatViewModel` properties and methods.
 
     var myPeerID: PeerID { meshService.myPeerID }
@@ -425,15 +437,13 @@ final class ChatPrivateConversationCoordinator {
     }
 
     func sendDeliveryAckIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !context.sentGeoDeliveryAcks.contains(messageId) else { return }
+        guard context.markGeoDeliveryAckSent(messageId) else { return }
         context.sendGeohashDeliveryAck(for: messageId, toRecipientHex: senderPubKey, from: id)
-        context.sentGeoDeliveryAcks.insert(messageId)
     }
 
     func sendReadReceiptIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
-        guard !context.sentReadReceipts.contains(messageId) else { return }
+        guard context.markReadReceiptSent(messageId) else { return }
         context.sendGeohashReadReceipt(messageId, toRecipientHex: senderPubKey, from: id)
-        context.sentReadReceipts.insert(messageId)
     }
 
     func handlePrivateMessage(
@@ -579,7 +589,7 @@ final class ChatPrivateConversationCoordinator {
                 readerNickname: context.nickname
             )
             context.sendMeshReadReceipt(receipt, to: peerID)
-            context.sentReadReceipts.insert(message.id)
+            context.markReadReceiptSent(message.id)
         } else {
             context.unreadPrivateMessages.insert(peerID)
             NotificationService.shared.sendPrivateMessageNotification(
@@ -654,10 +664,10 @@ final class ChatPrivateConversationCoordinator {
             )
             SecureLogger.debug("Viewing chat; sending READ ack for \(message.id.prefix(8))… via router", category: .session)
             context.routeReadReceipt(receipt, to: PeerID(hexData: key))
-            context.sentReadReceipts.insert(message.id)
+            context.markReadReceiptSent(message.id)
         } else if let identity = context.currentNostrIdentity() {
             context.sendGeohashReadReceipt(message.id, toRecipientHex: senderPubkey, from: identity)
-            context.sentReadReceipts.insert(message.id)
+            context.markReadReceiptSent(message.id)
             SecureLogger.debug(
                 "Viewing chat; sent READ ack directly to Nostr pub=\(senderPubkey.prefix(8))… for mid=\(message.id.prefix(8))…",
                 category: .session
@@ -802,17 +812,13 @@ final class ChatPrivateConversationCoordinator {
             }
 
             if !oldPeerIDsToRemove.isEmpty {
-                let needsSelectedUpdate = oldPeerIDsToRemove.contains { context.selectedPrivateChatPeer == $0 }
-
                 for oldID in oldPeerIDsToRemove {
                     context.privateChats.removeValue(forKey: oldID)
                     context.unreadPrivateMessages.remove(oldID)
                     context.clearStoredFingerprint(for: oldID)
                 }
 
-                if needsSelectedUpdate {
-                    context.selectedPrivateChatPeer = peerID
-                }
+                context.handOffSelectedPrivateChat(from: oldPeerIDsToRemove, to: peerID)
             }
 
             if !migratedMessages.isEmpty {

@@ -301,7 +301,7 @@ final class ChatPeerIdentityCoordinator {
                 .visibleGeohashPeople()
                 .first(where: { $0.displayName == nickname }) {
                 let conversationKey = PeerID(nostr_: person.id)
-                viewModel.nostrKeyMapping[conversationKey] = person.id
+                viewModel.registerNostrKeyMapping(person.id, for: conversationKey)
                 return conversationKey
             }
 
@@ -312,7 +312,7 @@ final class ChatPeerIdentityCoordinator {
                 .lowercased() ?? nickname.lowercased()
             if let pubkey = viewModel.geoNicknames.first(where: { $0.value.lowercased() == base })?.key {
                 let conversationKey = PeerID(nostr_: pubkey)
-                viewModel.nostrKeyMapping[conversationKey] = pubkey
+                viewModel.registerNostrKeyMapping(pubkey, for: conversationKey)
                 return conversationKey
             }
 

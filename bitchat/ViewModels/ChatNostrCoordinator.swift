@@ -18,10 +18,17 @@ protocol ChatNostrContext: AnyObject {
     // MARK: Channel & subscription state
     var activeChannel: ChannelID { get set }
     var currentGeohash: String? { get set }
-    var geoSubscriptionID: String? { get set }
-    var geoDmSubscriptionID: String? { get set }
+    var geoSubscriptionID: String? { get }
+    var geoDmSubscriptionID: String? { get }
+    func setGeoChatSubscriptionID(_ id: String?)
+    func setGeoDmSubscriptionID(_ id: String?)
     /// Geohash sampling subscriptions: subscription ID -> geohash.
-    var geoSamplingSubs: [String: String] { get set }
+    var geoSamplingSubs: [String: String] { get }
+    func addGeoSamplingSub(_ subID: String, forGeohash geohash: String)
+    func removeGeoSamplingSub(_ subID: String)
+    /// Clears all sampling subscriptions and returns the removed subscription IDs
+    /// so the caller can unsubscribe them from the relay manager.
+    func clearGeoSamplingSubs() -> [String]
     /// Per-geohash notification cooldown: geohash -> last notify time.
     var lastGeoNotificationAt: [String: Date] { get set }
     var nostrRelayManager: NostrRelayManager? { get }
@@ -44,7 +51,9 @@ protocol ChatNostrContext: AnyObject {
 
     // MARK: Inbound private (geohash DM) payloads
     var selectedPrivateChatPeer: PeerID? { get }
-    var nostrKeyMapping: [PeerID: String] { get set }
+    var nostrKeyMapping: [PeerID: String] { get }
+    /// Records the Nostr pubkey behind a (possibly virtual) peer ID.
+    func registerNostrKeyMapping(_ pubkey: String, for peerID: PeerID)
     func handlePrivateMessage(
         _ payload: NoisePayload,
         senderPubkey: String,
@@ -225,12 +234,12 @@ final class ChatNostrCoordinator {
 
         if let dmSub = context.geoDmSubscriptionID {
             NostrRelayManager.shared.unsubscribe(id: dmSub)
-            context.geoDmSubscriptionID = nil
+            context.setGeoDmSubscriptionID(nil)
         }
 
         if let identity = try? context.deriveNostrIdentity(forGeohash: channel.geohash) {
             let dmSub = "geo-dm-\(channel.geohash)"
-            context.geoDmSubscriptionID = dmSub
+            context.setGeoDmSubscriptionID(dmSub)
             let dmFilter = NostrFilter.giftWrapsFor(
                 pubkey: identity.publicKeyHex,
                 since: Date().addingTimeInterval(-TransportConfig.nostrDMSubscribeLookbackSeconds)
@@ -274,8 +283,8 @@ final class ChatNostrCoordinator {
             context.setGeoNickname(nick, forPubkey: event.pubkey)
         }
 
-        context.nostrKeyMapping[PeerID(nostr_: event.pubkey)] = event.pubkey
-        context.nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
+        context.registerNostrKeyMapping(event.pubkey, for: PeerID(nostr_: event.pubkey))
+        context.registerNostrKeyMapping(event.pubkey, for: PeerID(nostr: event.pubkey))
         context.recordGeoParticipant(pubkeyHex: event.pubkey)
 
         if event.kind == NostrProtocol.EventKind.geohashPresence.rawValue {
@@ -349,7 +358,7 @@ final class ChatNostrCoordinator {
 
         let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTs))
         let convKey = PeerID(nostr_: senderPubkey)
-        context.nostrKeyMapping[convKey] = senderPubkey
+        context.registerNostrKeyMapping(senderPubkey, for: convKey)
 
         switch noisePayload.type {
         case .privateMessage:
@@ -400,11 +409,11 @@ final class ChatNostrCoordinator {
 
         if let sub = context.geoSubscriptionID {
             NostrRelayManager.shared.unsubscribe(id: sub)
-            context.geoSubscriptionID = nil
+            context.setGeoChatSubscriptionID(nil)
         }
         if let dmSub = context.geoDmSubscriptionID {
             NostrRelayManager.shared.unsubscribe(id: dmSub)
-            context.geoDmSubscriptionID = nil
+            context.setGeoDmSubscriptionID(nil)
         }
         context.currentGeohash = nil
         context.setActiveParticipantGeohash(nil)
@@ -429,7 +438,7 @@ final class ChatNostrCoordinator {
         }
 
         let subID = "geo-\(channel.geohash)"
-        context.geoSubscriptionID = subID
+        context.setGeoChatSubscriptionID(subID)
         context.startGeoParticipantRefreshTimer()
         let ts = Date().addingTimeInterval(-TransportConfig.nostrGeohashInitialLookbackSeconds)
         let filter = NostrFilter.geohashEphemeral(channel.geohash, since: ts, limit: TransportConfig.nostrGeohashInitialLimit)
@@ -504,8 +513,8 @@ final class ChatNostrCoordinator {
             context.setGeoNickname(nickTag[1].trimmed, forPubkey: event.pubkey)
         }
 
-        context.nostrKeyMapping[PeerID(nostr_: event.pubkey)] = event.pubkey
-        context.nostrKeyMapping[PeerID(nostr: event.pubkey)] = event.pubkey
+        context.registerNostrKeyMapping(event.pubkey, for: PeerID(nostr_: event.pubkey))
+        context.registerNostrKeyMapping(event.pubkey, for: PeerID(nostr: event.pubkey))
 
         if event.kind == NostrProtocol.EventKind.geohashPresence.rawValue {
             return
@@ -547,7 +556,7 @@ final class ChatNostrCoordinator {
         guard let identity = try? context.deriveNostrIdentity(forGeohash: channel.geohash) else { return }
 
         let dmSub = "geo-dm-\(channel.geohash)"
-        context.geoDmSubscriptionID = dmSub
+        context.setGeoDmSubscriptionID(dmSub)
         if TorManager.shared.isReady {
             SecureLogger.debug("GeoDM: subscribing DMs pub=\(identity.publicKeyHex.prefix(8))… sub=\(dmSub)", category: .session)
         }
@@ -593,7 +602,7 @@ final class ChatNostrCoordinator {
         }
 
         let convKey = PeerID(nostr_: senderPubkey)
-        context.nostrKeyMapping[convKey] = senderPubkey
+        context.registerNostrKeyMapping(senderPubkey, for: convKey)
 
         switch payload.type {
         case .privateMessage:
@@ -633,7 +642,7 @@ final class ChatNostrCoordinator {
         }
 
         context.recordGeoParticipant(pubkeyHex: identity.publicKeyHex)
-        context.nostrKeyMapping[PeerID(nostr: identity.publicKeyHex)] = identity.publicKeyHex
+        context.registerNostrKeyMapping(identity.publicKeyHex, for: PeerID(nostr: identity.publicKeyHex))
         SecureLogger.debug(
             "GeoTeleport: sent geo message pub=\(identity.publicKeyHex.prefix(8))… teleported=\(geoContext.teleported)",
             category: .session
@@ -666,7 +675,7 @@ final class ChatNostrCoordinator {
 
         for (subID, gh) in context.geoSamplingSubs where toRemove.contains(gh) {
             NostrRelayManager.shared.unsubscribe(id: subID)
-            context.geoSamplingSubs.removeValue(forKey: subID)
+            context.removeGeoSamplingSub(subID)
         }
 
         for gh in toAdd {
@@ -678,7 +687,7 @@ final class ChatNostrCoordinator {
     func subscribe(_ gh: String) {
         guard let context else { return }
         let subID = "geo-sample-\(gh)"
-        context.geoSamplingSubs[subID] = gh
+        context.addGeoSamplingSub(subID, forGeohash: gh)
         let filter = NostrFilter.geohashEphemeral(
             gh,
             since: Date().addingTimeInterval(-TransportConfig.nostrGeohashSampleLookbackSeconds),
@@ -771,10 +780,9 @@ final class ChatNostrCoordinator {
     @MainActor
     func endGeohashSampling() {
         guard let context else { return }
-        for subID in context.geoSamplingSubs.keys {
+        for subID in context.clearGeoSamplingSubs() {
             NostrRelayManager.shared.unsubscribe(id: subID)
         }
-        context.geoSamplingSubs.removeAll()
         clearGeoSamplingEventDedup()
     }
 
@@ -885,7 +893,7 @@ final class ChatNostrCoordinator {
                    let payload = NoisePayload.decode(packet.payload) {
                     let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTimestamp))
                     await MainActor.run {
-                        context.nostrKeyMapping[targetPeerID] = senderPubkey
+                        context.registerNostrKeyMapping(senderPubkey, for: targetPeerID)
 
                         switch payload.type {
                         case .privateMessage:
@@ -1063,7 +1071,7 @@ final class ChatNostrCoordinator {
     func startGeohashDM(withPubkeyHex hex: String) {
         guard let context else { return }
         let convKey = PeerID(nostr_: hex)
-        context.nostrKeyMapping[convKey] = hex
+        context.registerNostrKeyMapping(hex, for: convKey)
         context.startPrivateChat(with: convKey)
     }
 

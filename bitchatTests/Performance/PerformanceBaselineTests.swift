@@ -384,6 +384,16 @@ private final class PerfNostrContext: ChatNostrContext {
     var lastGeoNotificationAt: [String: Date] = [:]
     var nostrRelayManager: NostrRelayManager? { nil }
 
+    func setGeoChatSubscriptionID(_ id: String?) { geoSubscriptionID = id }
+    func setGeoDmSubscriptionID(_ id: String?) { geoDmSubscriptionID = id }
+    func addGeoSamplingSub(_ subID: String, forGeohash geohash: String) { geoSamplingSubs[subID] = geohash }
+    func removeGeoSamplingSub(_ subID: String) { geoSamplingSubs.removeValue(forKey: subID) }
+
+    func clearGeoSamplingSubs() -> [String] {
+        defer { geoSamplingSubs.removeAll() }
+        return Array(geoSamplingSubs.keys)
+    }
+
     var messages: [BitchatMessage] = []
     func resetPublicMessagePipeline() {}
     func updatePublicMessagePipelineChannel(_ channel: ChannelID) {}
@@ -403,6 +413,7 @@ private final class PerfNostrContext: ChatNostrContext {
 
     var selectedPrivateChatPeer: PeerID?
     var nostrKeyMapping: [PeerID: String] = [:]
+    func registerNostrKeyMapping(_ pubkey: String, for peerID: PeerID) { nostrKeyMapping[peerID] = pubkey }
     func handlePrivateMessage(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID, id: NostrIdentity, messageTimestamp: Date) {}
     func handleDelivered(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {}
     func handleReadReceipt(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {}
@@ -459,6 +470,12 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
     var isStartupPhase: Bool { false }
     func notifyUIChanged() {}
     func markMessageDelivered(_ messageID: String) {}
+
+    func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
+        let oldCount = sentReadReceipts.count
+        sentReadReceipts = sentReadReceipts.intersection(validMessageIDs)
+        return oldCount - sentReadReceipts.count
+    }
 
     /// 2000 public + `peerCount` x `messagesPerPeer` private messages with
     /// deterministic IDs and timestamps.

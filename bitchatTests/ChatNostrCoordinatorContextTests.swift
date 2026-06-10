@@ -28,6 +28,16 @@ private final class MockChatNostrContext: ChatNostrContext {
     var lastGeoNotificationAt: [String: Date] = [:]
     var nostrRelayManager: NostrRelayManager? { nil }
 
+    func setGeoChatSubscriptionID(_ id: String?) { geoSubscriptionID = id }
+    func setGeoDmSubscriptionID(_ id: String?) { geoDmSubscriptionID = id }
+    func addGeoSamplingSub(_ subID: String, forGeohash geohash: String) { geoSamplingSubs[subID] = geohash }
+    func removeGeoSamplingSub(_ subID: String) { geoSamplingSubs.removeValue(forKey: subID) }
+
+    func clearGeoSamplingSubs() -> [String] {
+        defer { geoSamplingSubs.removeAll() }
+        return Array(geoSamplingSubs.keys)
+    }
+
     // Public timeline & pipeline
     var messages: [BitchatMessage] = []
     private(set) var pipelineResetCount = 0
@@ -71,6 +81,7 @@ private final class MockChatNostrContext: ChatNostrContext {
     // Inbound private (geohash DM) payloads
     var selectedPrivateChatPeer: PeerID?
     var nostrKeyMapping: [PeerID: String] = [:]
+    func registerNostrKeyMapping(_ pubkey: String, for peerID: PeerID) { nostrKeyMapping[peerID] = pubkey }
     private(set) var handledPrivateMessages: [(payload: NoisePayload, senderPubkey: String, convKey: PeerID, timestamp: Date)] = []
     private(set) var handledDelivered: [(senderPubkey: String, convKey: PeerID)] = []
     private(set) var handledReadReceipts: [(senderPubkey: String, convKey: PeerID)] = []
