@@ -146,14 +146,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let unifiedPeerService: UnifiedPeerService
     let autocompleteService: AutocompleteService
     let deduplicationService: MessageDeduplicationService  // internal for test access
-    private lazy var outgoingCoordinator = ChatOutgoingCoordinator(viewModel: self)
+    private lazy var outgoingCoordinator = ChatOutgoingCoordinator(context: self)
     private lazy var lifecycleCoordinator = ChatLifecycleCoordinator(context: self)
     private lazy var transportEventCoordinator = ChatTransportEventCoordinator(context: self)
-    private lazy var peerListCoordinator = ChatPeerListCoordinator(viewModel: self)
+    private lazy var peerListCoordinator = ChatPeerListCoordinator(context: self)
     private lazy var messageFormatter = ChatMessageFormatter(viewModel: self)
     lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(context: self)
     lazy var deliveryCoordinator = ChatDeliveryCoordinator(context: self)
-    lazy var composerCoordinator = ChatComposerCoordinator(viewModel: self)
+    lazy var composerCoordinator = ChatComposerCoordinator(context: self)
     lazy var publicConversationCoordinator = ChatPublicConversationCoordinator(context: self)
     lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(context: self)
     lazy var nostrCoordinator = ChatNostrCoordinator(context: self)

@@ -217,15 +217,7 @@ private extension ChatViewModelBootstrapper {
     func configureGeoChannels() {
         viewModel.geoChannelCoordinator = GeoChannelCoordinator(
             locationManager: viewModel.locationManager,
-            onChannelSwitch: { [weak viewModel] channel in
-                viewModel?.switchLocationChannel(to: channel)
-            },
-            beginSampling: { [weak viewModel] geohashes in
-                viewModel?.beginGeohashSampling(for: geohashes)
-            },
-            endSampling: { [weak viewModel] in
-                viewModel?.endGeohashSampling()
-            }
+            context: viewModel
         )
     }
 

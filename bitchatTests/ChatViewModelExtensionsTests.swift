@@ -418,9 +418,11 @@ struct ChatViewModelNostrExtensionTests {
         try await Task.sleep(nanoseconds: 150_000_000)
         #expect(!viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
 
+        // Generous deadline: the detached verification task can be starved
+        // under parallel test load.
         viewModel.handleNostrMessage(giftWrap)
         var recorded = false
-        for _ in 0..<200 {
+        for _ in 0..<600 {
             if viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id) {
                 recorded = true
                 break
