@@ -10,7 +10,9 @@ import Foundation
 
 struct PublicTimelineStore {
     private var meshTimeline: [BitchatMessage] = []
+    private var meshMessageIDs: Set<String> = []
     private var geohashTimelines: [String: [BitchatMessage]] = [:]
+    private var geohashMessageIDs: [String: Set<String>] = [:]
     private var pendingGeohashSystemMessages: [String] = []
 
     private let meshCap: Int
@@ -24,8 +26,9 @@ struct PublicTimelineStore {
     mutating func append(_ message: BitchatMessage, to channel: ChannelID) {
         switch channel {
         case .mesh:
-            guard !meshTimeline.contains(where: { $0.id == message.id }) else { return }
+            guard !meshMessageIDs.contains(message.id) else { return }
             meshTimeline.append(message)
+            meshMessageIDs.insert(message.id)
             trimMeshTimelineIfNeeded()
         case .location(let channel):
             append(message, toGeohash: channel.geohash)
@@ -33,21 +36,12 @@ struct PublicTimelineStore {
     }
 
     mutating func append(_ message: BitchatMessage, toGeohash geohash: String) {
-        var timeline = geohashTimelines[geohash] ?? []
-        guard !timeline.contains(where: { $0.id == message.id }) else { return }
-        timeline.append(message)
-        trimGeohashTimelineIfNeeded(&timeline)
-        geohashTimelines[geohash] = timeline
+        _ = appendGeohashMessageIfAbsent(message, geohash: geohash)
     }
 
     /// Append message if absent, returning true when stored.
     mutating func appendIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool {
-        var timeline = geohashTimelines[geohash] ?? []
-        guard !timeline.contains(where: { $0.id == message.id }) else { return false }
-        timeline.append(message)
-        trimGeohashTimelineIfNeeded(&timeline)
-        geohashTimelines[geohash] = timeline
-        return true
+        appendGeohashMessageIfAbsent(message, geohash: geohash)
     }
 
     mutating func messages(for channel: ChannelID) -> [BitchatMessage] {
@@ -56,7 +50,7 @@ struct PublicTimelineStore {
             return meshTimeline
         case .location(let channel):
             let cleaned = geohashTimelines[channel.geohash]?.cleanedAndDeduped() ?? []
-            geohashTimelines[channel.geohash] = cleaned
+            replaceGeohashTimeline(cleaned, for: channel.geohash, keepEmpty: true)
             return cleaned
         }
     }
@@ -65,22 +59,26 @@ struct PublicTimelineStore {
         switch channel {
         case .mesh:
             meshTimeline.removeAll()
+            meshMessageIDs.removeAll()
         case .location(let channel):
             geohashTimelines[channel.geohash] = []
+            geohashMessageIDs[channel.geohash] = []
         }
     }
 
     @discardableResult
     mutating func removeMessage(withID id: String) -> BitchatMessage? {
         if let index = meshTimeline.firstIndex(where: { $0.id == id }) {
-            return meshTimeline.remove(at: index)
+            let removed = meshTimeline.remove(at: index)
+            meshMessageIDs.remove(id)
+            return removed
         }
 
         for key in Array(geohashTimelines.keys) {
             var timeline = geohashTimelines[key] ?? []
             if let index = timeline.firstIndex(where: { $0.id == id }) {
                 let removed = timeline.remove(at: index)
-                geohashTimelines[key] = timeline.isEmpty ? nil : timeline
+                replaceGeohashTimeline(timeline, for: key, keepEmpty: false)
                 return removed
             }
         }
@@ -91,13 +89,13 @@ struct PublicTimelineStore {
     mutating func removeMessages(in geohash: String, where predicate: (BitchatMessage) -> Bool) {
         var timeline = geohashTimelines[geohash] ?? []
         timeline.removeAll(where: predicate)
-        geohashTimelines[geohash] = timeline.isEmpty ? nil : timeline
+        replaceGeohashTimeline(timeline, for: geohash, keepEmpty: false)
     }
 
     mutating func mutateGeohash(_ geohash: String, _ transform: (inout [BitchatMessage]) -> Void) {
         var timeline = geohashTimelines[geohash] ?? []
         transform(&timeline)
-        geohashTimelines[geohash] = timeline.isEmpty ? nil : timeline
+        replaceGeohashTimeline(timeline, for: geohash, keepEmpty: false)
     }
 
     mutating func queueGeohashSystemMessage(_ content: String) {
@@ -116,10 +114,35 @@ struct PublicTimelineStore {
     private mutating func trimMeshTimelineIfNeeded() {
         guard meshTimeline.count > meshCap else { return }
         meshTimeline = Array(meshTimeline.suffix(meshCap))
+        meshMessageIDs = Set(meshTimeline.map(\.id))
     }
 
-    private func trimGeohashTimelineIfNeeded(_ timeline: inout [BitchatMessage]) {
+    private mutating func appendGeohashMessageIfAbsent(_ message: BitchatMessage, geohash: String) -> Bool {
+        var timeline = geohashTimelines[geohash] ?? []
+        var messageIDs = geohashMessageIDs[geohash] ?? Set(timeline.map(\.id))
+        guard messageIDs.insert(message.id).inserted else { return false }
+
+        timeline.append(message)
+        trimGeohashTimelineIfNeeded(&timeline, messageIDs: &messageIDs)
+        geohashTimelines[geohash] = timeline
+        geohashMessageIDs[geohash] = messageIDs
+        return true
+    }
+
+    private func trimGeohashTimelineIfNeeded(_ timeline: inout [BitchatMessage], messageIDs: inout Set<String>) {
         guard timeline.count > geohashCap else { return }
         timeline = Array(timeline.suffix(geohashCap))
+        messageIDs = Set(timeline.map(\.id))
+    }
+
+    private mutating func replaceGeohashTimeline(_ timeline: [BitchatMessage], for geohash: String, keepEmpty: Bool) {
+        if timeline.isEmpty && !keepEmpty {
+            geohashTimelines[geohash] = nil
+            geohashMessageIDs[geohash] = nil
+            return
+        }
+
+        geohashTimelines[geohash] = timeline
+        geohashMessageIDs[geohash] = Set(timeline.map(\.id))
     }
 }

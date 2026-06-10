@@ -207,9 +207,14 @@ final class ConversationStore: ObservableObject {
     private var directHandlesByConversation: [ConversationID: PeerHandle] = [:]
 
     func setActiveChannel(_ channelID: ChannelID) {
-        activeChannel = channelID
+        if activeChannel != channelID {
+            activeChannel = channelID
+        }
         if selectedPrivatePeerID == nil {
-            selectedConversationID = ConversationID(channelID: channelID)
+            let conversationID = ConversationID(channelID: channelID)
+            if selectedConversationID != conversationID {
+                selectedConversationID = conversationID
+            }
         }
     }
 
@@ -218,21 +223,33 @@ final class ConversationStore: ObservableObject {
         activeChannel: ChannelID,
         identityResolver: IdentityResolver
     ) {
-        self.activeChannel = activeChannel
-        selectedPrivatePeerID = peerID
+        if self.activeChannel != activeChannel {
+            self.activeChannel = activeChannel
+        }
+        if selectedPrivatePeerID != peerID {
+            selectedPrivatePeerID = peerID
+        }
 
         if let peerID {
-            selectedConversationID = directConversationID(
+            let conversationID = directConversationID(
                 for: peerID,
                 identityResolver: identityResolver
             )
+            if selectedConversationID != conversationID {
+                selectedConversationID = conversationID
+            }
         } else {
-            selectedConversationID = ConversationID(channelID: activeChannel)
+            let conversationID = ConversationID(channelID: activeChannel)
+            if selectedConversationID != conversationID {
+                selectedConversationID = conversationID
+            }
         }
     }
 
     func replaceMessages(_ messages: [BitchatMessage], for conversationID: ConversationID) {
-        messagesByConversation[conversationID] = normalized(messages)
+        let normalizedMessages = normalized(messages)
+        guard messagesByConversation[conversationID] != normalizedMessages else { return }
+        messagesByConversation[conversationID] = normalizedMessages
     }
 
     func replaceMessages(_ messages: [BitchatMessage], for channelID: ChannelID) {
@@ -296,7 +313,7 @@ final class ConversationStore: ObservableObject {
             let conversationID = ConversationID.direct(handle)
             liveConversations.insert(conversationID)
             directHandlesByConversation[conversationID] = handle
-            messagesByConversation[conversationID] = normalized(messages)
+            replaceMessages(messages, for: conversationID)
         }
 
         let staleDirectConversations = messagesByConversation.keys.filter { conversationID in
@@ -319,9 +336,12 @@ final class ConversationStore: ObservableObject {
             }
         }
 
-        unreadConversations = unreadPeerIDs.reduce(into: publicUnread) { result, peerID in
+        let nextUnreadConversations = unreadPeerIDs.reduce(into: publicUnread) { result, peerID in
             let handle = identityResolver.canonicalHandle(for: peerID)
             result.insert(.direct(handle))
+        }
+        if unreadConversations != nextUnreadConversations {
+            unreadConversations = nextUnreadConversations
         }
     }
 

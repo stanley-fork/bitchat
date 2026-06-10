@@ -43,6 +43,74 @@ struct MessageRouterTests {
     }
 
     @Test @MainActor
+    func sendPrivate_prefersConnectedTransportOverEarlierReachableOne() async {
+        let peerID = PeerID(str: "0000000000000005")
+        let reachableOnly = MockTransport()
+        reachableOnly.reachablePeers.insert(peerID)
+        let connected = MockTransport()
+        connected.connectedPeers.insert(peerID)
+        connected.reachablePeers.insert(peerID)
+
+        let router = MessageRouter(transports: [reachableOnly, connected])
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m5")
+
+        #expect(reachableOnly.sentPrivateMessages.isEmpty)
+        #expect(connected.sentPrivateMessages.count == 1)
+    }
+
+    @Test @MainActor
+    func sendPrivate_reachableOnlySendRetainsUntilDeliveryAck() async {
+        let peerID = PeerID(str: "0000000000000006")
+        let transport = MockTransport()
+        transport.reachablePeers.insert(peerID)
+
+        let router = MessageRouter(transports: [transport])
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m6")
+        #expect(transport.sentPrivateMessages.count == 1)
+
+        // No ack yet: a flush retries over the weak signal.
+        router.flushOutbox(for: peerID)
+        #expect(transport.sentPrivateMessages.count == 2)
+
+        // Ack clears the retained copy; later flushes stop resending.
+        router.markDelivered("m6")
+        router.flushOutbox(for: peerID)
+        #expect(transport.sentPrivateMessages.count == 2)
+    }
+
+    @Test @MainActor
+    func sendPrivate_connectedSendIsNotRetained() async {
+        let peerID = PeerID(str: "0000000000000007")
+        let transport = MockTransport()
+        transport.connectedPeers.insert(peerID)
+        transport.reachablePeers.insert(peerID)
+
+        let router = MessageRouter(transports: [transport])
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m7")
+        #expect(transport.sentPrivateMessages.count == 1)
+
+        router.flushOutbox(for: peerID)
+        #expect(transport.sentPrivateMessages.count == 1)
+    }
+
+    @Test @MainActor
+    func flushOutbox_dropsUnackedMessageAfterAttemptCap() async {
+        let peerID = PeerID(str: "0000000000000008")
+        let transport = MockTransport()
+        transport.reachablePeers.insert(peerID)
+
+        let router = MessageRouter(transports: [transport])
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m8")
+
+        for _ in 0..<10 {
+            router.flushOutbox(for: peerID)
+        }
+
+        // Initial send plus capped resends; never unbounded.
+        #expect(transport.sentPrivateMessages.count == 8)
+    }
+
+    @Test @MainActor
     func sendReadReceipt_usesReachableTransport() async {
         let peerID = PeerID(str: "0000000000000003")
         let transport = MockTransport()

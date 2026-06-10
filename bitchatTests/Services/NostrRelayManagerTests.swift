@@ -90,6 +90,90 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertFalse(context.manager.isConnected)
     }
 
+    func test_connect_retriesTorWaitAndConnectsWhenTorBecomesReady() async {
+        let context = makeContext(permission: .authorized, userTorEnabled: true, torEnforced: true, torIsReady: false)
+
+        context.manager.connect()
+        XCTAssertEqual(context.torWaiter.awaitCallCount, 1)
+
+        context.torWaiter.resolve(false)
+
+        // A failed wait re-queues the same targets and waits again instead of dropping them.
+        XCTAssertEqual(context.torWaiter.awaitCallCount, 2)
+        XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
+
+        context.torWaiter.resolve(true)
+
+        let connected = await waitUntil {
+            context.sessionFactory.requestedURLs.count == self.expectedDefaultRelayCount &&
+            context.manager.relays.allSatisfy(\.isConnected)
+        }
+        XCTAssertTrue(connected)
+    }
+
+    func test_subscribe_unblocksDeferredEOSEWhenTorWaitAttemptsExhausted() async {
+        let relayURL = "wss://tor-eose-unblock.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        var eoseCount = 0
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "tor-sub-unblock",
+            relayUrls: [relayURL],
+            handler: { _ in },
+            onEOSE: { eoseCount += 1 }
+        )
+
+        for _ in 0..<TransportConfig.nostrTorReadyMaxWaitAttempts {
+            context.torWaiter.resolve(false)
+        }
+
+        // Fail-closed (no sessions), but the EOSE caller is unblocked.
+        XCTAssertEqual(eoseCount, 1)
+        XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
+    }
+
+    func test_sendEvent_survivesFailedTorWaitAndSendsWhenTorRecovers() async throws {
+        let relayURL = "wss://tor-send-retry.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        let event = try makeSignedEvent(content: "queued through tor stall")
+
+        context.manager.sendEvent(event, to: [relayURL])
+
+        XCTAssertEqual(context.manager.debugPendingMessageQueueCount, 1)
+        XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
+
+        context.torWaiter.resolve(false)
+        XCTAssertEqual(context.manager.debugPendingMessageQueueCount, 1)
+
+        context.torWaiter.resolve(true)
+
+        let sent = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.count == 1 &&
+            context.manager.debugPendingMessageQueueCount == 0
+        }
+        XCTAssertTrue(sent)
+    }
+
+    func test_sendEvent_pendingQueueDropsOldestBeyondCap() async throws {
+        let relayURL = "wss://tor-send-cap.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        let identity = try NostrIdentity.generate()
+
+        for i in 0...(TransportConfig.nostrPendingSendQueueCap + 4) {
+            let event = NostrEvent(
+                pubkey: identity.publicKeyHex,
+                createdAt: Date(),
+                kind: .textNote,
+                tags: [],
+                content: "cap-\(i)"
+            )
+            context.manager.sendEvent(try event.sign(with: identity.schnorrSigningKey()), to: [relayURL])
+        }
+
+        XCTAssertEqual(context.manager.debugPendingMessageQueueCount, TransportConfig.nostrPendingSendQueueCap)
+    }
+
     func test_sendEvent_waitsForTorReadinessBeforeSending() async throws {
         let relayURL = "wss://tor-ready.example"
         let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
@@ -437,6 +521,114 @@ final class NostrRelayManagerTests: XCTestCase {
         }
         XCTAssertTrue(delivered)
         XCTAssertEqual(receivedEvent?.id, event.id)
+    }
+
+    func test_receiveEvent_deduplicatesSameSubscriptionEventAcrossRelays() async throws {
+        let firstRelayURL = "wss://events-one.example"
+        let secondRelayURL = "wss://events-two.example"
+        let context = makeContext(permission: .denied)
+        let event = try makeSignedEvent(content: "duplicate")
+        var receivedIDs: [String] = []
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "events",
+            relayUrls: [firstRelayURL, secondRelayURL]
+        ) { event in
+            receivedIDs.append(event.id)
+        }
+        let subscriptionsSent = await waitUntil {
+            context.sessionFactory.latestConnection(for: firstRelayURL)?.sentStrings.count == 1 &&
+            context.sessionFactory.latestConnection(for: secondRelayURL)?.sentStrings.count == 1
+        }
+        XCTAssertTrue(subscriptionsSent)
+
+        try context.sessionFactory.latestConnection(for: firstRelayURL)?.emitEventMessage(subscriptionID: "events", event: event)
+        try context.sessionFactory.latestConnection(for: secondRelayURL)?.emitEventMessage(subscriptionID: "events", event: event)
+
+        let countedOnBothRelays = await waitUntil {
+            context.manager.relays.first(where: { $0.url == firstRelayURL })?.messagesReceived == 1 &&
+            context.manager.relays.first(where: { $0.url == secondRelayURL })?.messagesReceived == 1
+        }
+        XCTAssertTrue(countedOnBothRelays)
+        XCTAssertEqual(receivedIDs, [event.id])
+        XCTAssertEqual(context.manager.debugDuplicateInboundEventDropCount, 1)
+        XCTAssertEqual(context.manager.debugDuplicateInboundEventDropCount(forSubscriptionID: "events"), 1)
+    }
+
+    func test_receiveEvent_duplicateFanInDeliversOnceAndCountsDrops() async throws {
+        let relayURLs = (0..<8).map { "wss://fan-in-\($0).example" }
+        let context = makeContext(permission: .denied)
+        let event = try makeSignedEvent(content: "fan-in")
+        var receivedIDs: [String] = []
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "presence",
+            relayUrls: relayURLs
+        ) { event in
+            receivedIDs.append(event.id)
+        }
+        let subscriptionsSent = await waitUntil {
+            relayURLs.allSatisfy { relayURL in
+                context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.count == 1
+            }
+        }
+        XCTAssertTrue(subscriptionsSent)
+
+        for relayURL in relayURLs {
+            try context.sessionFactory.latestConnection(for: relayURL)?.emitEventMessage(
+                subscriptionID: "presence",
+                event: event
+            )
+        }
+
+        let countedOnEveryRelay = await waitUntil {
+            relayURLs.allSatisfy { relayURL in
+                context.manager.relays.first(where: { $0.url == relayURL })?.messagesReceived == 1
+            }
+        }
+        XCTAssertTrue(countedOnEveryRelay)
+        XCTAssertEqual(receivedIDs, [event.id])
+        XCTAssertEqual(context.manager.debugDuplicateInboundEventDropCount, relayURLs.count - 1)
+        XCTAssertEqual(
+            context.manager.debugDuplicateInboundEventDropCount(forSubscriptionID: "presence"),
+            relayURLs.count - 1
+        )
+    }
+
+    func test_receiveEvent_invalidSignatureDoesNotPoisonDuplicateCache() async throws {
+        let firstRelayURL = "wss://invalid-first-one.example"
+        let secondRelayURL = "wss://invalid-first-two.example"
+        let context = makeContext(permission: .denied)
+        let event = try makeSignedEvent(content: "valid-after-invalid")
+        let invalidEvent = invalidSignatureCopy(of: event)
+        var receivedIDs: [String] = []
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "events",
+            relayUrls: [firstRelayURL, secondRelayURL]
+        ) { event in
+            receivedIDs.append(event.id)
+        }
+        let subscriptionsSent = await waitUntil {
+            context.sessionFactory.latestConnection(for: firstRelayURL)?.sentStrings.count == 1 &&
+            context.sessionFactory.latestConnection(for: secondRelayURL)?.sentStrings.count == 1
+        }
+        XCTAssertTrue(subscriptionsSent)
+
+        try context.sessionFactory.latestConnection(for: firstRelayURL)?.emitEventMessage(subscriptionID: "events", event: invalidEvent)
+        try context.sessionFactory.latestConnection(for: secondRelayURL)?.emitEventMessage(subscriptionID: "events", event: event)
+
+        let countedOnBothRelays = await waitUntil {
+            context.manager.relays.first(where: { $0.url == firstRelayURL })?.messagesReceived == 1 &&
+            context.manager.relays.first(where: { $0.url == secondRelayURL })?.messagesReceived == 1
+        }
+        XCTAssertTrue(countedOnBothRelays)
+        XCTAssertEqual(receivedIDs, [event.id])
+        XCTAssertEqual(context.manager.debugDuplicateInboundEventDropCount, 0)
+        XCTAssertEqual(context.manager.debugDuplicateInboundEventDropCount(forSubscriptionID: "events"), 0)
     }
 
     func test_receiveEvent_withoutHandlerStillTracksReceivedCount() async throws {
@@ -878,6 +1070,12 @@ final class NostrRelayManagerTests: XCTestCase {
             content: content
         )
         return try event.sign(with: identity.schnorrSigningKey())
+    }
+
+    private func invalidSignatureCopy(of event: NostrEvent) -> NostrEvent {
+        var invalid = event
+        invalid.sig = String(repeating: "0", count: 128)
+        return invalid
     }
 
     private func waitUntil(

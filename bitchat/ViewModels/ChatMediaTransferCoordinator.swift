@@ -34,11 +34,11 @@ final class ChatMediaTransferCoordinator {
         let transferId = makeTransferID(messageID: messageID)
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
             do {
                 let packet = try ChatMediaPreparation.prepareVoiceNotePacket(at: url)
 
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.registerTransfer(transferId: transferId, messageID: messageID)
                     if let peerID = targetPeer {
                         self.viewModel.meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
@@ -49,12 +49,14 @@ final class ChatMediaTransferCoordinator {
             } catch ChatMediaPreparationError.voiceNoteTooLarge(let size) {
                 SecureLogger.warning("Voice note exceeds size limit (\(size) bytes)", category: .session)
                 try? FileManager.default.removeItem(at: url)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.handleMediaSendFailure(messageID: messageID, reason: "Voice note too large")
                 }
             } catch {
                 SecureLogger.error("Voice note send failed: \(error)", category: .session)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.handleMediaSendFailure(messageID: messageID, reason: "Failed to send voice note")
                 }
             }
@@ -65,10 +67,10 @@ final class ChatMediaTransferCoordinator {
     func processThenSendImage(_ image: UIImage?) {
         guard let image else { return }
         Task.detached { [weak self] in
-            guard let self else { return }
             do {
                 let processedURL = try ImageUtils.processImage(image)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.sendImage(from: processedURL)
                 }
             } catch {
@@ -80,10 +82,10 @@ final class ChatMediaTransferCoordinator {
     func processThenSendImage(from url: URL?) {
         guard let url else { return }
         Task.detached { [weak self] in
-            guard let self else { return }
             do {
                 let processedURL = try ImageUtils.processImage(at: url)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.sendImage(from: processedURL)
                 }
             } catch {
@@ -112,11 +114,11 @@ final class ChatMediaTransferCoordinator {
         }
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
             do {
                 let prepared = try ChatMediaPreparation.prepareImagePacket(from: sourceURL)
 
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     let message = self.enqueueMediaMessage(
                         content: "\(MimeType.Category.image.messagePrefix)\(prepared.outputURL.lastPathComponent)",
                         targetPeer: targetPeer
@@ -132,12 +134,14 @@ final class ChatMediaTransferCoordinator {
                 }
             } catch ChatMediaPreparationError.imageTooLarge(let size) {
                 SecureLogger.warning("Processed image exceeds size limit (\(size) bytes)", category: .session)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.viewModel.addSystemMessage("Image is too large to send.")
                 }
             } catch {
                 SecureLogger.error("Image send preparation failed: \(error)", category: .session)
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     self.viewModel.addSystemMessage("Failed to prepare image for sending.")
                 }
             }

@@ -66,7 +66,7 @@ final class ChatVerificationCoordinator {
         let noiseService = viewModel.meshService.getNoiseService()
 
         noiseService.onPeerAuthenticated = { [weak self] peerID, fingerprint in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
                 SecureLogger.debug("🔐 Authenticated: \(peerID)", category: .security)
@@ -103,7 +103,7 @@ final class ChatVerificationCoordinator {
         }
 
         noiseService.onHandshakeRequired = { [weak self] peerID in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.viewModel.peerIdentityStore.setEncryptionStatus(.noiseHandshaking, for: peerID)
                 self.viewModel.invalidateEncryptionCache(for: peerID)

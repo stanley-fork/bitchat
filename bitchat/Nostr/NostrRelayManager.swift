@@ -142,11 +142,22 @@ final class NostrRelayManager: ObservableObject {
     private var subscriptions: [String: Set<String>] = [:] // relay URL -> active subscription IDs
     private var pendingSubscriptions: [String: [String: String]] = [:] // relay URL -> (subscription id -> encoded REQ JSON)
     private var messageHandlers: [String: (NostrEvent) -> Void] = [:]
+    private struct InboundEventKey: Hashable {
+        let subscriptionID: String
+        let eventID: String
+    }
+    private let recentInboundEventKeyLimit = TransportConfig.nostrInboundEventDedupCap
+    private let recentInboundEventKeyTrimTarget = TransportConfig.nostrInboundEventDedupTrimTarget
+    private var recentInboundEventKeys = Set<InboundEventKey>()
+    private var recentInboundEventKeyOrder: [InboundEventKey] = []
+    private var duplicateInboundEventDropCount = 0
+    private var duplicateInboundEventDropCountBySubscription: [String: Int] = [:]
     // Coalesce duplicate subscribe requests for the same id within a short window.
     private let subscribeCoalesceInterval: TimeInterval = 1.0
     private var subscribeCoalesce: [String: Date] = [:]
     private var pendingTorConnectionURLs = Set<String>()
     private var awaitingTorForConnections = false
+    private var torReadyWaitAttempts = 0
     private var cancellables = Set<AnyCancellable>()
 
     private struct SubscriptionRequestState: Equatable {
@@ -263,6 +274,7 @@ final class NostrRelayManager: ObservableObject {
         eoseTrackers.removeAll()
         pendingTorConnectionURLs.removeAll()
         awaitingTorForConnections = false
+        torReadyWaitAttempts = 0
         updateConnectionStatus()
     }
     
@@ -285,11 +297,14 @@ final class NostrRelayManager: ObservableObject {
         // Global network policy gate
         guard dependencies.activationAllowed() else { return }
         if shouldUseTor && dependencies.torEnforced() && !dependencies.torIsReady() {
-            // Defer sends until Tor is ready to avoid premature queueing
-            dependencies.awaitTorReady { [weak self] ready in
-                guard let self = self else { return }
-                if ready { self.sendEvent(event, to: relayUrls) }
-            }
+            // Fail-closed: nothing touches the network until Tor is up. Queue the
+            // event locally so it survives a slow bootstrap (queued sends flush
+            // when relays connect), then kick off connection setup, which itself
+            // waits for Tor readiness.
+            let targetRelays = allowedRelayList(from: relayUrls ?? Self.defaultRelays)
+            guard !targetRelays.isEmpty else { return }
+            enqueuePendingSend(event, pendingRelays: Set(targetRelays))
+            ensureConnections(to: targetRelays)
             return
         }
         let requestedRelays = relayUrls ?? Self.defaultRelays
@@ -307,10 +322,18 @@ final class NostrRelayManager: ObservableObject {
             }
         }
         if !stillPending.isEmpty {
-            messageQueueLock.lock()
-            messageQueue.append(PendingSend(event: event, pendingRelays: stillPending))
-            messageQueueLock.unlock()
+            enqueuePendingSend(event, pendingRelays: stillPending)
         }
+    }
+
+    private func enqueuePendingSend(_ event: NostrEvent, pendingRelays: Set<String>) {
+        messageQueueLock.lock()
+        messageQueue.append(PendingSend(event: event, pendingRelays: pendingRelays))
+        let overflow = messageQueue.count - TransportConfig.nostrPendingSendQueueCap
+        if overflow > 0 {
+            messageQueue.removeFirst(overflow)
+        }
+        messageQueueLock.unlock()
     }
 
     /// Try to flush any queued messages for relays that are now connected.
@@ -486,6 +509,8 @@ final class NostrRelayManager: ObservableObject {
     /// Unsubscribe from a subscription
     func unsubscribe(id: String) {
         messageHandlers.removeValue(forKey: id)
+        removeRecentInboundEvents(forSubscriptionID: id)
+        duplicateInboundEventDropCountBySubscription.removeValue(forKey: id)
         // Allow immediate re-subscription by clearing coalescer timestamp
         subscribeCoalesce.removeValue(forKey: id)
         subscriptionRequestState.removeValue(forKey: id)
@@ -561,11 +586,37 @@ final class NostrRelayManager: ObservableObject {
             self.awaitingTorForConnections = false
 
             guard ready else {
-                SecureLogger.error("❌ Tor not ready; aborting relay connections (fail-closed)", category: .session)
+                self.torReadyWaitAttempts += 1
+                if self.torReadyWaitAttempts < TransportConfig.nostrTorReadyMaxWaitAttempts {
+                    SecureLogger.warning("Tor not ready; re-queueing \(pending.count) relay connection(s) (attempt \(self.torReadyWaitAttempts))", category: .session)
+                    self.queueConnectionsUntilTorReady(pending)
+                } else {
+                    // Still fail-closed (no network), but unblock any callers
+                    // waiting on EOSE so the UI doesn't hang indefinitely.
+                    // Queued subscriptions/sends are kept and flush if a later
+                    // trigger (e.g. app foreground) brings Tor up.
+                    SecureLogger.error("❌ Tor not ready after \(self.torReadyWaitAttempts) wait(s); aborting relay connections (fail-closed)", category: .session)
+                    self.torReadyWaitAttempts = 0
+                    self.unblockPendingEOSECallbacks(reason: "tor-unavailable")
+                }
                 return
             }
 
+            self.torReadyWaitAttempts = 0
             self.connectToRelays(pending, shouldLog: true)
+        }
+    }
+
+    /// Fire and clear all EOSE callbacks that are parked waiting for Tor.
+    /// Callers treat EOSE as "initial fetch finished"; firing with no data is
+    /// safe and prevents indefinite hangs when Tor cannot bootstrap.
+    private func unblockPendingEOSECallbacks(reason: String) {
+        guard !pendingEOSECallbacks.isEmpty else { return }
+        let callbacks = pendingEOSECallbacks
+        pendingEOSECallbacks.removeAll()
+        SecureLogger.warning("Unblocking \(callbacks.count) pending EOSE callback(s) without data (\(reason))", category: .session)
+        for (_, callback) in callbacks {
+            callback()
         }
     }
 
@@ -607,6 +658,53 @@ final class NostrRelayManager: ObservableObject {
         } else {
             startEOSETracking(id: id, relayURLs: requestState.relayURLs, callback: callback)
         }
+    }
+
+    private func shouldDeliverInboundEvent(subscriptionID: String, eventID: String) -> Bool {
+        guard !eventID.isEmpty else { return true }
+        let key = InboundEventKey(subscriptionID: subscriptionID, eventID: eventID)
+        guard recentInboundEventKeys.insert(key).inserted else {
+            recordDuplicateInboundEventDrop(subscriptionID: subscriptionID)
+            return false
+        }
+        recentInboundEventKeyOrder.append(key)
+
+        if recentInboundEventKeyOrder.count > recentInboundEventKeyLimit {
+            let removeCount = recentInboundEventKeyOrder.count - recentInboundEventKeyTrimTarget
+            for staleKey in recentInboundEventKeyOrder.prefix(removeCount) {
+                recentInboundEventKeys.remove(staleKey)
+            }
+            recentInboundEventKeyOrder.removeFirst(removeCount)
+        }
+        return true
+    }
+
+    private func recordDuplicateInboundEventDrop(subscriptionID: String) {
+        duplicateInboundEventDropCount += 1
+        let subscriptionCount = (duplicateInboundEventDropCountBySubscription[subscriptionID] ?? 0) + 1
+        duplicateInboundEventDropCountBySubscription[subscriptionID] = subscriptionCount
+
+        if duplicateInboundEventDropCount == 1 ||
+            duplicateInboundEventDropCount.isMultiple(of: TransportConfig.nostrDuplicateEventLogInterval) {
+            SecureLogger.debug(
+                "Dropped duplicate Nostr event deliveries total=\(duplicateInboundEventDropCount) sub=\(subscriptionID) sub_total=\(subscriptionCount)",
+                category: .session
+            )
+        }
+    }
+
+    private func removeRecentInboundEvents(forSubscriptionID subscriptionID: String) {
+        guard !recentInboundEventKeyOrder.isEmpty else { return }
+        var retainedKeys: [InboundEventKey] = []
+        retainedKeys.reserveCapacity(recentInboundEventKeyOrder.count)
+        for key in recentInboundEventKeyOrder {
+            if key.subscriptionID == subscriptionID {
+                recentInboundEventKeys.remove(key)
+            } else {
+                retainedKeys.append(key)
+            }
+        }
+        recentInboundEventKeyOrder = retainedKeys
     }
     
     private func connectToRelay(_ urlString: String) {
@@ -722,11 +820,21 @@ final class NostrRelayManager: ObservableObject {
     private func handleParsedMessage(_ parsed: ParsedInbound, from relayUrl: String) {
         switch parsed {
         case .event(let subId, let event):
-            if event.kind != 1059 {
-                SecureLogger.debug("📥 Event kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
-            }
             if let index = self.relays.firstIndex(where: { $0.url == relayUrl }) {
                 self.relays[index].messagesReceived += 1
+            }
+            guard event.isValidSignature() else {
+                SecureLogger.warning(
+                    "⚠️ Dropped invalid Nostr event id=\(event.id.prefix(16))… sub=\(subId) relay=\(relayUrl)",
+                    category: .session
+                )
+                return
+            }
+            guard shouldDeliverInboundEvent(subscriptionID: subId, eventID: event.id) else {
+                return
+            }
+            if event.kind != 1059 {
+                SecureLogger.debug("📥 Event kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
             }
             if let handler = self.messageHandlers[subId] {
                 handler(event)
@@ -919,6 +1027,14 @@ final class NostrRelayManager: ObservableObject {
         pendingSubscriptions[relayUrl]?.count ?? 0
     }
 
+    var debugDuplicateInboundEventDropCount: Int {
+        duplicateInboundEventDropCount
+    }
+
+    func debugDuplicateInboundEventDropCount(forSubscriptionID subscriptionID: String) -> Int {
+        duplicateInboundEventDropCountBySubscription[subscriptionID] ?? 0
+    }
+
     func debugFlushMessageQueue() {
         flushMessageQueue(for: nil)
     }
@@ -974,8 +1090,7 @@ private enum ParsedInbound {
             if array.count >= 3,
                let subId = array[1] as? String,
                let eventDict = array[2] as? [String: Any],
-               let event = try? NostrEvent(from: eventDict),
-               event.isValidSignature() {
+               let event = try? NostrEvent(from: eventDict) {
                 self = .event(subId: subId, event: event)
                 return
             }
