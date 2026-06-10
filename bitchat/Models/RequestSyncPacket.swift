@@ -96,7 +96,7 @@ struct RequestSyncPacket {
             }
         }
 
-        guard let pp = p, let mm = m, let dd = payload, pp >= 1, mm > 0 else { return nil }
+        guard let pp = p, let mm = m, let dd = payload, pp >= 1, pp <= GCSFilter.maxP, mm > 0 else { return nil }
         return RequestSyncPacket(p: pp, m: mm, data: dd, types: types, sinceTimestamp: sinceTimestamp, fragmentIdFilter: fragmentIdFilter)
     }
 }

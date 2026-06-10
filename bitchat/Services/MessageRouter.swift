@@ -13,6 +13,7 @@ final class MessageRouter {
         let nickname: String
         let messageID: String
         let timestamp: Date
+        var sendAttempts: Int = 0
     }
 
     private var outbox: [PeerID: [QueuedMessage]] = [:]
@@ -20,6 +21,9 @@ final class MessageRouter {
     // Outbox limits to prevent unbounded memory growth
     private static let maxMessagesPerPeer = 100
     private static let messageTTLSeconds: TimeInterval = 24 * 60 * 60 // 24 hours
+    // Bound resends of messages sent on a weak reachability signal that never
+    // get a delivery ack (e.g. peer on an old client that doesn't ack).
+    private static let maxSendAttempts = 8
 
     init(transports: [Transport]) {
         self.transports = transports
@@ -61,24 +65,51 @@ final class MessageRouter {
     // MARK: - Message Sending
 
     func sendPrivate(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String) {
-        if let transport = reachableTransport(for: peerID) {
-            SecureLogger.debug("Routing PM via \(type(of: transport)) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
+        if let transport = connectedTransport(for: peerID) {
+            // A live link is a strong delivery signal; trust it outright.
+            SecureLogger.debug("Routing PM via \(type(of: transport)) (connected) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
             transport.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname, messageID: messageID)
+            return
+        }
+
+        let message = QueuedMessage(content: content, nickname: recipientNickname, messageID: messageID, timestamp: Date(), sendAttempts: 1)
+        if let transport = reachableTransport(for: peerID) {
+            // Reachability without a connection is a freshness heuristic (e.g.
+            // the mesh retention window), so the send can silently go nowhere.
+            // Send now, but retain a copy until a delivery/read ack clears it;
+            // receivers dedup resends by message ID.
+            SecureLogger.debug("Routing PM via \(type(of: transport)) (reachable) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
+            transport.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname, messageID: messageID)
+            enqueue(message, for: peerID)
         } else {
-            // Queue for later with timestamp for TTL tracking
-            if outbox[peerID] == nil { outbox[peerID] = [] }
-
-            let message = QueuedMessage(content: content, nickname: recipientNickname, messageID: messageID, timestamp: Date())
-            outbox[peerID]?.append(message)
-
-            // Enforce per-peer size limit with FIFO eviction
-            if let count = outbox[peerID]?.count, count > Self.maxMessagesPerPeer {
-                let evicted = outbox[peerID]?.removeFirst()
-                SecureLogger.warning("📤 Outbox overflow for \(peerID.id.prefix(8))… - evicted oldest message: \(evicted?.messageID.prefix(8) ?? "?")…", category: .session)
-            }
-
+            var unsent = message
+            unsent.sendAttempts = 0
+            enqueue(unsent, for: peerID)
             SecureLogger.debug("Queued PM for \(peerID.id.prefix(8))… (no reachable transport) id=\(messageID.prefix(8))… queue=\(outbox[peerID]?.count ?? 0)", category: .session)
         }
+    }
+
+    /// A delivery or read ack confirms receipt; stop retaining the message.
+    func markDelivered(_ messageID: String) {
+        for (peerID, queue) in outbox {
+            let filtered = queue.filter { $0.messageID != messageID }
+            guard filtered.count != queue.count else { continue }
+            outbox[peerID] = filtered.isEmpty ? nil : filtered
+        }
+    }
+
+    private func enqueue(_ message: QueuedMessage, for peerID: PeerID) {
+        var queue = outbox[peerID] ?? []
+        // Re-sending an already-queued ID replaces the entry (keeps attempt count fresh)
+        queue.removeAll { $0.messageID == message.messageID }
+        queue.append(message)
+
+        // Enforce per-peer size limit with FIFO eviction
+        if queue.count > Self.maxMessagesPerPeer {
+            let evicted = queue.removeFirst()
+            SecureLogger.warning("📤 Outbox overflow for \(peerID.id.prefix(8))… - evicted oldest message: \(evicted.messageID.prefix(8))…", category: .session)
+        }
+        outbox[peerID] = queue
     }
 
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
@@ -121,9 +152,22 @@ final class MessageRouter {
                 continue
             }
 
-            if let transport = reachableTransport(for: peerID) {
-                SecureLogger.debug("Outbox -> \(type(of: transport)) for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))…", category: .session)
+            if let transport = connectedTransport(for: peerID) {
+                // Live link: send and stop retaining.
+                SecureLogger.debug("Outbox -> \(type(of: transport)) (connected) for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))…", category: .session)
                 transport.sendPrivateMessage(message.content, to: peerID, recipientNickname: message.nickname, messageID: message.messageID)
+            } else if let transport = reachableTransport(for: peerID) {
+                // Weak signal: send but keep retaining until an ack clears it,
+                // bounded by attempt count for peers that never ack.
+                guard message.sendAttempts < Self.maxSendAttempts else {
+                    SecureLogger.warning("📤 Dropping unacked PM for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))… after \(message.sendAttempts) attempts", category: .session)
+                    continue
+                }
+                SecureLogger.debug("Outbox -> \(type(of: transport)) (reachable) for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))…", category: .session)
+                transport.sendPrivateMessage(message.content, to: peerID, recipientNickname: message.nickname, messageID: message.messageID)
+                var retained = message
+                retained.sendAttempts += 1
+                remaining.append(retained)
             } else {
                 remaining.append(message)
             }

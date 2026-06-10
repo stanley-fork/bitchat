@@ -18,6 +18,7 @@ enum TransportConfig {
     static let meshTimelineCap: Int = 1337
     static let geoTimelineCap: Int = 1337
     static let contentLRUCap: Int = 2000
+    static let geoSamplingEventLRUCap: Int = 2000
 
     // Timers
     static let networkResetGraceSeconds: TimeInterval = 600 // 10 minutes
@@ -43,6 +44,9 @@ enum TransportConfig {
 
     // Nostr
     static let nostrReadAckInterval: TimeInterval = 0.35 // ~3 per second
+    static let nostrInboundEventDedupCap: Int = 4096
+    static let nostrInboundEventDedupTrimTarget: Int = 3072
+    static let nostrDuplicateEventLogInterval: Int = 50
 
     // UI thresholds
     static let uiLateInsertThreshold: TimeInterval = 15.0
@@ -146,6 +150,10 @@ enum TransportConfig {
     static let nostrRelayBackoffMultiplier: Double = 2.0
     static let nostrRelayMaxReconnectAttempts: Int = 10
     static let nostrRelayDefaultFetchLimit: Int = 100
+    // How many consecutive Tor-readiness waits (each bounded by TorManager's
+    // bootstrap deadline) to attempt before unblocking pending EOSE callers.
+    static let nostrTorReadyMaxWaitAttempts: Int = 3
+    static let nostrPendingSendQueueCap: Int = 200
 
     // Geo relay directory
     static let geoRelayFetchIntervalSeconds: TimeInterval = 60 * 60 * 24
