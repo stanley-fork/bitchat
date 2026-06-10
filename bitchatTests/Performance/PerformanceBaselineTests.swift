@@ -51,7 +51,7 @@ final class PerformanceBaselineTests: XCTestCase {
 
     // MARK: - 1a. Nostr inbound event handling (fresh events)
 
-    /// `ChatNostrCoordinator.handleNostrEvent` for never-seen geo events
+    /// `NostrInboundPipeline.handleNostrEvent` for never-seen geo events
     /// (kind 20000): signature verification, dedup record, presence/nickname
     /// bookkeeping, and public-message ingest scheduling.
     func testNostrInboundEventHandling_freshEvents() throws {
@@ -68,7 +68,7 @@ final class PerformanceBaselineTests: XCTestCase {
             keepAlive.append((context, coordinator))
             let start = Date()
             for event in events {
-                coordinator.handleNostrEvent(event)
+                coordinator.inbound.handleNostrEvent(event)
             }
             samples.append(Date().timeIntervalSince(start))
             XCTAssertEqual(context.processedEventCount, events.count)
@@ -89,7 +89,7 @@ final class PerformanceBaselineTests: XCTestCase {
         let coordinator = ChatNostrCoordinator(context: context)
         // Pre-warm: every event is now recorded as processed.
         for event in events {
-            coordinator.handleNostrEvent(event)
+            coordinator.inbound.handleNostrEvent(event)
         }
         XCTAssertEqual(context.processedEventCount, events.count)
         var samples: [TimeInterval] = []
@@ -97,7 +97,7 @@ final class PerformanceBaselineTests: XCTestCase {
         measure {
             let start = Date()
             for event in events {
-                coordinator.handleNostrEvent(event)
+                coordinator.inbound.handleNostrEvent(event)
             }
             samples.append(Date().timeIntervalSince(start))
         }
@@ -370,8 +370,9 @@ private struct SeededGenerator: RandomNumberGenerator {
 
 // MARK: - Mock ChatNostrContext
 
-/// Minimal `ChatNostrContext` for benchmarking `ChatNostrCoordinator`
-/// without a `ChatViewModel` (mirrors `ChatNostrCoordinatorContextTests`).
+/// Minimal `ChatNostrContext` for benchmarking the `ChatNostrCoordinator`
+/// stack (`NostrInboundPipeline` in particular) without a `ChatViewModel`
+/// (mirrors `ChatNostrCoordinatorContextTests`).
 /// Callbacks are cheap dictionary/array operations so the measured cost is
 /// the coordinator's own pipeline.
 @MainActor

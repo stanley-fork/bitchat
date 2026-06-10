@@ -2,10 +2,11 @@
 // ChatNostrCoordinatorContextTests.swift
 // bitchatTests
 //
-// Exercises `ChatNostrCoordinator` against a mock `ChatNostrContext` —
-// proving the coordinator works without a `ChatViewModel`, following the
-// `ChatDeliveryCoordinatorContextTests` / `ChatPrivateConversationCoordinatorContextTests`
-// exemplars.
+// Exercises the `ChatNostrCoordinator` facade and its components
+// (`NostrInboundPipeline`, `GeohashSubscriptionManager`, `GeoPresenceTracker`)
+// against a mock `ChatNostrContext` — proving the stack works without a
+// `ChatViewModel`, following the `ChatDeliveryCoordinatorContextTests` /
+// `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
 
 import Testing
@@ -15,8 +16,9 @@ import BitFoundation
 
 // MARK: - Mock Context
 
-/// Lightweight stand-in for `ChatNostrContext` proving that
-/// `ChatNostrCoordinator` is testable without a `ChatViewModel`.
+/// Lightweight stand-in for `ChatNostrContext` (and, via protocol
+/// inheritance, the component contexts) proving that the Nostr stack is
+/// testable without a `ChatViewModel`.
 @MainActor
 private final class MockChatNostrContext: ChatNostrContext {
     // Channel & subscription state
@@ -250,7 +252,7 @@ struct ChatNostrCoordinatorContextTests {
         )
         context.displayNamesByPubkey[event.pubkey] = "alice#1234"
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // Dedup recorded exactly once, presence and key mapping updated.
@@ -268,7 +270,7 @@ struct ChatNostrCoordinatorContextTests {
         #expect(context.hapticMessageIDs == [event.id])
 
         // A replay of the same event is dropped before any processing.
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
         #expect(context.recordedNostrEventIDs == [event.id])
         #expect(context.handledPublicMessages.count == 1)
@@ -288,7 +290,7 @@ struct ChatNostrCoordinatorContextTests {
             teleported: true
         )
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // Teleport detection fires even though the empty message is dropped.
@@ -310,7 +312,7 @@ struct ChatNostrCoordinatorContextTests {
         )
         context.blockedNostrPubkeys.insert(event.pubkey.lowercased())
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // The event is still recorded for dedup but nothing else happens.
@@ -337,7 +339,7 @@ struct ChatNostrCoordinatorContextTests {
             senderIdentity: sender
         )
 
-        coordinator.handleGiftWrap(giftWrap, id: recipient)
+        coordinator.inbound.handleGiftWrap(giftWrap, id: recipient)
 
         let convKey = PeerID(nostr_: sender.publicKeyHex)
         #expect(context.recordedNostrEventIDs == [giftWrap.id])
@@ -354,7 +356,7 @@ struct ChatNostrCoordinatorContextTests {
         #expect(pm.content == "psst")
 
         // The same gift wrap is dropped on replay.
-        coordinator.handleGiftWrap(giftWrap, id: recipient)
+        coordinator.inbound.handleGiftWrap(giftWrap, id: recipient)
         #expect(context.recordedNostrEventIDs == [giftWrap.id])
         #expect(context.handledPrivateMessages.count == 1)
     }
@@ -367,7 +369,7 @@ struct ChatNostrCoordinatorContextTests {
         context.currentGeohash = "u4pruyd"
         context.geoNicknames = ["abcd": "alice"]
 
-        coordinator.switchLocationChannel(to: .mesh)
+        coordinator.subscriptions.switchLocationChannel(to: .mesh)
 
         #expect(context.pipelineResetCount == 1)
         #expect(context.activeChannel == .mesh)
@@ -449,5 +451,99 @@ struct ChatNostrCoordinatorContextTests {
         #expect(coordinator.nostrPubkeyForDisplayName("carol#aa11") == "aa11")
         #expect(coordinator.nostrPubkeyForDisplayName("dave") == "bb22")
         #expect(coordinator.nostrPubkeyForDisplayName("nobody") == nil)
+    }
+}
+
+// MARK: - GeoPresenceTracker Tests
+
+/// Focused tests for seams the coordinator split made independently
+/// testable: the sampling-event LRU dedup and the per-geohash notification
+/// cooldown. The cooldown tests stop short of the live notification center by
+/// pre-seeding the timeline append as a duplicate.
+struct GeoPresenceTrackerTests {
+
+    @Test @MainActor
+    func samplingEventDedup_evictsOldestBeyondLRUCap() {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let cap = TransportConfig.geoSamplingEventLRUCap
+
+        // Empty IDs are never deduplicated.
+        #expect(tracker.shouldProcessGeoSamplingEvent(""))
+        #expect(tracker.shouldProcessGeoSamplingEvent(""))
+
+        // First sight passes; a replay is rejected.
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-0"))
+        #expect(!tracker.shouldProcessGeoSamplingEvent("ev-0"))
+
+        // Fill one past the cap: the oldest entry is evicted and accepted
+        // again, while a still-resident entry stays deduplicated.
+        for i in 1...cap {
+            #expect(tracker.shouldProcessGeoSamplingEvent("ev-\(i)"))
+        }
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-0"))
+        #expect(!tracker.shouldProcessGeoSamplingEvent("ev-\(cap)"))
+
+        // Clearing resets the dedup entirely.
+        tracker.clearGeoSamplingEventDedup()
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-\(cap)"))
+    }
+
+    @Test @MainActor
+    func notificationCooldown_skipsWithinWindow() async throws {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let sender = try NostrIdentity.generate()
+        let event = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "sampled activity",
+            geohash: "9q8yy",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+
+        // Within the cooldown window nothing is appended or re-stamped.
+        let recent = Date()
+        context.lastGeoNotificationAt["9q8yy"] = recent
+        tracker.cooldownPerGeohash("9q8yy", content: "sampled activity", event: event)
+        await drainMainQueue()
+        #expect(context.appendedGeohashMessages.isEmpty)
+        #expect(context.lastGeoNotificationAt["9q8yy"] == recent)
+        #expect(context.synchronizedGeohashes.isEmpty)
+    }
+
+    @Test @MainActor
+    func notificationCooldown_stampsGeohashOnceWindowElapses() async throws {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let sender = try NostrIdentity.generate()
+        let event = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "sampled activity",
+            geohash: "9q8yy",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+
+        // Pre-seed the same event ID so the timeline append reports a
+        // duplicate and the flow never reaches the live notification center.
+        let placeholder = BitchatMessage(
+            id: event.id,
+            sender: "seed",
+            content: "seed",
+            timestamp: Date(),
+            isRelay: false
+        )
+        #expect(context.appendGeohashMessageIfAbsent(placeholder, toGeohash: "9q8yy"))
+
+        // Cooldown elapsed: the geohash is re-stamped and the append is
+        // attempted (and rejected as a duplicate, so no store sync either).
+        let stale = Date().addingTimeInterval(-TransportConfig.uiGeoNotifyCooldownSeconds - 1)
+        context.lastGeoNotificationAt["9q8yy"] = stale
+        tracker.cooldownPerGeohash("9q8yy", content: "sampled activity", event: event)
+        await drainMainQueue()
+
+        let stamped = try #require(context.lastGeoNotificationAt["9q8yy"])
+        #expect(stamped > stale)
+        #expect(context.appendedGeohashMessages.count == 1)
+        #expect(context.synchronizedGeohashes.isEmpty)
     }
 }
