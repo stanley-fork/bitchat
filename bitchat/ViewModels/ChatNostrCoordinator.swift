@@ -191,6 +191,7 @@ final class ChatNostrCoordinator {
     private weak var context: (any ChatNostrContext)?
     private var recentGeoSamplingEventIDs = Set<String>()
     private var recentGeoSamplingEventIDOrder: [String] = []
+    private var geoEventLogCount = 0
 
     init(context: any ChatNostrContext) {
         self.context = context
@@ -450,8 +451,11 @@ final class ChatNostrCoordinator {
         if context.hasProcessedNostrEvent(event.id) { return }
         context.recordProcessedNostrEvent(event.id)
 
-        let tagSummary = event.tags.map { "[" + $0.joined(separator: ",") + "]" }.joined(separator: ",")
-        SecureLogger.debug("GeoTeleport: recv pub=\(event.pubkey.prefix(8))… tags=\(tagSummary)", category: .session)
+        // Sampled: fires for every geo event and floods dev logs in busy geohashes.
+        geoEventLogCount += 1
+        if geoEventLogCount == 1 || geoEventLogCount.isMultiple(of: TransportConfig.nostrInboundEventLogInterval) {
+            SecureLogger.debug("GeoTeleport: recv #\(geoEventLogCount) pub=\(event.pubkey.prefix(8))… tags=\(event.tags.map { "[" + $0.joined(separator: ",") + "]" }.joined(separator: ","))", category: .session)
+        }
 
         if context.isNostrBlocked(pubkeyHexLowercased: event.pubkey) {
             return

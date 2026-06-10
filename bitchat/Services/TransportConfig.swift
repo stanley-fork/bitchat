@@ -47,6 +47,8 @@ enum TransportConfig {
     static let nostrInboundEventDedupCap: Int = 4096
     static let nostrInboundEventDedupTrimTarget: Int = 3072
     static let nostrDuplicateEventLogInterval: Int = 50
+    // Sample interval for per-event debug logs on the inbound hot path.
+    static let nostrInboundEventLogInterval: Int = 100
 
     // UI thresholds
     static let uiLateInsertThreshold: TimeInterval = 15.0

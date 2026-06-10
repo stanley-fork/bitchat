@@ -152,6 +152,7 @@ final class NostrRelayManager: ObservableObject {
     private var recentInboundEventKeyOrder: [InboundEventKey] = []
     private var duplicateInboundEventDropCount = 0
     private var duplicateInboundEventDropCountBySubscription: [String: Int] = [:]
+    private var inboundEventLogCount = 0
     // Coalesce duplicate subscribe requests for the same id within a short window.
     private let subscribeCoalesceInterval: TimeInterval = 1.0
     private var subscribeCoalesce: [String: Date] = [:]
@@ -834,7 +835,11 @@ final class NostrRelayManager: ObservableObject {
                 return
             }
             if event.kind != 1059 {
-                SecureLogger.debug("📥 Event kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
+                // Per-event logging floods dev builds in busy geohashes; sample it.
+                inboundEventLogCount += 1
+                if inboundEventLogCount == 1 || inboundEventLogCount.isMultiple(of: TransportConfig.nostrInboundEventLogInterval) {
+                    SecureLogger.debug("📥 Event #\(inboundEventLogCount) kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
+                }
             }
             if let handler = self.messageHandlers[subId] {
                 handler(event)
