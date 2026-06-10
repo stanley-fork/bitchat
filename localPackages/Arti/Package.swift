@@ -37,7 +37,8 @@ let package = Package(
                 .linkedLibrary("sqlite3"),
             ]
         ),
-        // Binary framework containing the Rust static library
+        // Binary framework containing the Rust static library.
+        // Provenance and rebuild steps: repo-root docs/ARTI-BINARY-PROVENANCE.md
         .binaryTarget(
             name: "arti",
             path: "Frameworks/arti.xcframework"
