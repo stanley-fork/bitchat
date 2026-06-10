@@ -147,18 +147,18 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let autocompleteService: AutocompleteService
     let deduplicationService: MessageDeduplicationService  // internal for test access
     private lazy var outgoingCoordinator = ChatOutgoingCoordinator(viewModel: self)
-    private lazy var lifecycleCoordinator = ChatLifecycleCoordinator(viewModel: self)
-    private lazy var transportEventCoordinator = ChatTransportEventCoordinator(viewModel: self)
+    private lazy var lifecycleCoordinator = ChatLifecycleCoordinator(context: self)
+    private lazy var transportEventCoordinator = ChatTransportEventCoordinator(context: self)
     private lazy var peerListCoordinator = ChatPeerListCoordinator(viewModel: self)
     private lazy var messageFormatter = ChatMessageFormatter(viewModel: self)
-    lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(viewModel: self)
+    lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(context: self)
     lazy var deliveryCoordinator = ChatDeliveryCoordinator(context: self)
     lazy var composerCoordinator = ChatComposerCoordinator(viewModel: self)
     lazy var publicConversationCoordinator = ChatPublicConversationCoordinator(context: self)
     lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(context: self)
     lazy var nostrCoordinator = ChatNostrCoordinator(context: self)
-    lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(viewModel: self)
-    lazy var verificationCoordinator = ChatVerificationCoordinator(viewModel: self)
+    lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(context: self)
+    lazy var verificationCoordinator = ChatVerificationCoordinator(context: self)
 
     // Computed properties for compatibility
     @MainActor
@@ -451,6 +451,25 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @discardableResult
     func markGeoDeliveryAckSent(_ messageID: String) -> Bool {
         sentGeoDeliveryAcks.insert(messageID).inserted
+    }
+
+    /// Forgets that read receipts were sent for `ids` so READ acks can be
+    /// re-sent after the peer reconnects.
+    @MainActor
+    func unmarkReadReceiptsSent(_ ids: [String]) {
+        sentReadReceipts.subtract(ids)
+    }
+
+    /// Marks read receipts as sent for own messages already delivered/read in
+    /// `peerID`'s chat, syncing the chat manager's tracking with the persisted
+    /// set. (Wraps the manager's `inout` sync so the raw set never leaks.)
+    @MainActor
+    func syncReadReceiptsForSentMessages(for peerID: PeerID) {
+        privateChatManager.syncReadReceiptsForSentMessages(
+            peerID: peerID,
+            nickname: nickname,
+            externalReceipts: &sentReadReceipts
+        )
     }
 
     /// Drops every recorded read receipt whose message ID is no longer valid.
