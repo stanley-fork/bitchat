@@ -246,13 +246,17 @@ final class ChatNostrCoordinator {
     @MainActor
     func subscribeNostrEvent(_ event: NostrEvent) {
         guard let context else { return }
-        guard event.isValidSignature() else { return }
+        // Cheap rejects (kind, dedup lookup) before Schnorr verification —
+        // duplicates dominate real traffic and must not pay for crypto.
+        // Only verified events are recorded, so a forged-signature copy can
+        // never poison the dedup set and suppress the genuine event.
         guard (event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue
             || event.kind == NostrProtocol.EventKind.geohashPresence.rawValue),
               !context.hasProcessedNostrEvent(event.id)
         else {
             return
         }
+        guard event.isValidSignature() else { return }
 
         context.recordProcessedNostrEvent(event.id)
 
@@ -327,8 +331,9 @@ final class ChatNostrCoordinator {
     @MainActor
     func subscribeGiftWrap(_ giftWrap: NostrEvent, id: NostrIdentity) {
         guard let context else { return }
-        guard giftWrap.isValidSignature() else { return }
+        // Dedup lookup before Schnorr verification; record only after it passes.
         guard !context.hasProcessedNostrEvent(giftWrap.id) else { return }
+        guard giftWrap.isValidSignature() else { return }
         context.recordProcessedNostrEvent(giftWrap.id)
 
         guard let (content, senderPubkey, rumorTs) = try? NostrProtocol.decryptPrivateMessage(
@@ -441,14 +446,15 @@ final class ChatNostrCoordinator {
     @MainActor
     func handleNostrEvent(_ event: NostrEvent) {
         guard let context else { return }
-        guard event.isValidSignature() else { return }
+        // Cheap rejects (kind, dedup lookup) before Schnorr verification —
+        // duplicates dominate real traffic and must not pay for crypto.
         guard (event.kind == NostrProtocol.EventKind.ephemeralEvent.rawValue
             || event.kind == NostrProtocol.EventKind.geohashPresence.rawValue)
         else {
             return
         }
-
         if context.hasProcessedNostrEvent(event.id) { return }
+        guard event.isValidSignature() else { return }
         context.recordProcessedNostrEvent(event.id)
 
         // Sampled: fires for every geo event and floods dev logs in busy geohashes.
@@ -559,10 +565,11 @@ final class ChatNostrCoordinator {
     @MainActor
     func handleGiftWrap(_ giftWrap: NostrEvent, id: NostrIdentity) {
         guard let context else { return }
-        guard giftWrap.isValidSignature() else { return }
+        // Dedup lookup before Schnorr verification; record only after it passes.
         if context.hasProcessedNostrEvent(giftWrap.id) {
             return
         }
+        guard giftWrap.isValidSignature() else { return }
         context.recordProcessedNostrEvent(giftWrap.id)
 
         guard let (content, senderPubkey, rumorTs) = try? NostrProtocol.decryptPrivateMessage(
@@ -822,9 +829,12 @@ final class ChatNostrCoordinator {
     @MainActor
     func handleNostrMessage(_ giftWrap: NostrEvent) {
         guard let context else { return }
-        guard giftWrap.isValidSignature() else { return }
+        // Cheap dedup pre-check only; Schnorr verification runs off-main in
+        // processNostrMessage, which then does the authoritative
+        // check-and-record. Recording stays after verification so a
+        // forged-signature copy can never poison the dedup set and suppress
+        // the genuine event.
         if context.hasProcessedNostrEvent(giftWrap.id) { return }
-        context.recordProcessedNostrEvent(giftWrap.id)
 
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.processNostrMessage(giftWrap)
@@ -834,6 +844,14 @@ final class ChatNostrCoordinator {
     func processNostrMessage(_ giftWrap: NostrEvent) async {
         guard giftWrap.isValidSignature() else { return }
         guard let context else { return }
+        // Authoritative check-and-record, atomic on the main actor so two
+        // concurrent detached tasks can't both process the same event.
+        let alreadyProcessed: Bool = await MainActor.run {
+            if context.hasProcessedNostrEvent(giftWrap.id) { return true }
+            context.recordProcessedNostrEvent(giftWrap.id)
+            return false
+        }
+        if alreadyProcessed { return }
         let currentIdentity: NostrIdentity? = await MainActor.run {
             context.currentNostrIdentity()
         }
