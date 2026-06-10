@@ -484,6 +484,59 @@ struct ChatDeliveryCoordinatorContextTests {
     }
 
     @Test @MainActor
+    func middleInsertedMessage_isFoundAfterIndexWasBuilt() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let makePublic = { (id: String) in
+            BitchatMessage(
+                id: id,
+                sender: "me",
+                content: "Public message",
+                timestamp: Date(),
+                isRelay: false,
+                isPrivate: false,
+                deliveryStatus: .sending
+            )
+        }
+        context.messages = [makePublic("public-a"), makePublic("public-b")]
+
+        // Build the incremental index.
+        #expect(coordinator.updateMessageDeliveryStatus("public-a", status: .sent))
+
+        // Out-of-order arrival: PublicMessagePipeline inserts by timestamp,
+        // so the count grows while the tail ID stays the same.
+        context.messages.insert(makePublic("public-mid"), at: 1)
+
+        // The inserted message must be locatable, and the shifted tail must
+        // not be updated through a stale index entry.
+        #expect(coordinator.updateMessageDeliveryStatus("public-mid", status: .sent))
+        #expect(isSent(context.messages[1].deliveryStatus))
+        #expect(coordinator.updateMessageDeliveryStatus("public-b", status: .sent))
+        #expect(isSent(context.messages[2].deliveryStatus))
+    }
+
+    @Test @MainActor
+    func middleInsertedPrivateMessage_isFoundAfterIndexWasBuilt() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let peerID = PeerID(str: "0102030405060708")
+        context.privateChats[peerID] = [
+            makePrivateMessage(id: "pm-a", status: .sending),
+            makePrivateMessage(id: "pm-b", status: .sending)
+        ]
+
+        #expect(coordinator.updateMessageDeliveryStatus("pm-a", status: .sent))
+
+        // Timestamp re-sort (sanitizeChat) can place a late arrival mid-array.
+        context.privateChats[peerID]?.insert(makePrivateMessage(id: "pm-mid", status: .sending), at: 1)
+
+        #expect(coordinator.updateMessageDeliveryStatus("pm-mid", status: .sent))
+        #expect(isSent(context.privateChats[peerID]?[1].deliveryStatus))
+        #expect(coordinator.updateMessageDeliveryStatus("pm-b", status: .sent))
+        #expect(isSent(context.privateChats[peerID]?[2].deliveryStatus))
+    }
+
+    @Test @MainActor
     func cleanupOldReadReceipts_prunesReceiptsAgainstMockContext() async {
         let context = MockChatDeliveryContext()
         let coordinator = ChatDeliveryCoordinator(context: context)

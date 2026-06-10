@@ -238,6 +238,15 @@ private extension ChatDeliveryCoordinator {
         }
 
         if context.messages.count > indexedPublicMessageCount {
+            // Growth is only a pure append if the previously indexed tail kept
+            // its position; a middle insertion (out-of-order timestamp arrival)
+            // shifts it and invalidates every indexed location after the
+            // insertion point.
+            if indexedPublicMessageCount > 0,
+               context.messages[indexedPublicMessageCount - 1].id != indexedPublicTailMessageID {
+                rebuildMessageLocationIndex()
+                return true
+            }
             for index in indexedPublicMessageCount..<context.messages.count {
                 add(.publicTimeline(index: index), for: context.messages[index].id)
             }
@@ -265,6 +274,12 @@ private extension ChatDeliveryCoordinator {
             }
 
             guard messages.count > indexedCount else { continue }
+            // Same append-only check as the public timeline above.
+            if indexedCount > 0,
+               messages[indexedCount - 1].id != indexedPrivateTailMessageIDs[peerID] {
+                rebuildMessageLocationIndex()
+                return true
+            }
             for index in indexedCount..<messages.count {
                 add(.privateChat(peerID: peerID, index: index), for: messages[index].id)
             }
