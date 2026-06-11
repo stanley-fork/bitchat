@@ -133,6 +133,99 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
     }
 
+    func test_subscribe_parkedEOSEFiresAfterFallbackTimeoutWhenTorNeverBecomesReady() async {
+        let relayURL = "wss://tor-eose-parked-fallback.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        var eoseCount = 0
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "tor-parked-fallback",
+            relayUrls: [relayURL],
+            handler: { _ in },
+            onEOSE: { eoseCount += 1 }
+        )
+
+        // Parking the callback schedules the normal EOSE fallback, not just
+        // the Tor retry-exhaustion unblock (~minutes later).
+        XCTAssertEqual(context.scheduler.scheduled.first?.delay, TransportConfig.nostrSubscriptionEOSEFallbackSeconds)
+        XCTAssertEqual(eoseCount, 0)
+
+        context.scheduler.runNext()
+        let unblocked = await waitUntil { eoseCount == 1 }
+        XCTAssertTrue(unblocked)
+        XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
+
+        // A later retry-exhaustion unblock must not fire the callback again.
+        for _ in 0..<TransportConfig.nostrTorReadyMaxWaitAttempts {
+            context.torWaiter.resolve(false)
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(eoseCount, 1)
+    }
+
+    func test_subscribe_parkedEOSEFallbackIsNoOpWhenTorRecoversFirst() async throws {
+        let relayURL = "wss://tor-eose-parked-recover.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        var eoseCount = 0
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "tor-parked-recover",
+            relayUrls: [relayURL],
+            handler: { _ in },
+            onEOSE: { eoseCount += 1 }
+        )
+
+        // Tor recovers before the fallback fires; the callback is promoted to
+        // a real EOSE tracker when the subscription flushes.
+        context.torWaiter.resolve(true)
+        let subscribed = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.count == 1
+        }
+        XCTAssertTrue(subscribed)
+
+        // The parked fallback (scheduled first) is now a no-op.
+        context.scheduler.runNext()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(eoseCount, 0)
+
+        // The real EOSE still completes the initial load exactly once...
+        try context.sessionFactory.latestConnection(for: relayURL)?.emitEOSE(subscriptionID: "tor-parked-recover")
+        let eoseCompleted = await waitUntil { eoseCount == 1 }
+        XCTAssertTrue(eoseCompleted)
+
+        // ...and the promoted tracker's own fallback does not double-fire.
+        context.scheduler.runNext()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(eoseCount, 1)
+    }
+
+    func test_subscribe_parkedEOSEFallbackIsNoOpAfterRetryExhaustionUnblock() async {
+        let relayURL = "wss://tor-eose-parked-exhausted.example"
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        var eoseCount = 0
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "tor-parked-exhausted",
+            relayUrls: [relayURL],
+            handler: { _ in },
+            onEOSE: { eoseCount += 1 }
+        )
+
+        // Retry exhaustion unblocks the parked callback first.
+        for _ in 0..<TransportConfig.nostrTorReadyMaxWaitAttempts {
+            context.torWaiter.resolve(false)
+        }
+        XCTAssertEqual(eoseCount, 1)
+
+        // The parked fallback finds nothing to do.
+        context.scheduler.runNext()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(eoseCount, 1)
+    }
+
     func test_sendEvent_survivesFailedTorWaitAndSendsWhenTorRecovers() async throws {
         let relayURL = "wss://tor-send-retry.example"
         let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)

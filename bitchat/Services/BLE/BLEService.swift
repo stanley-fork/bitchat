@@ -74,6 +74,8 @@ final class BLEService: NSObject {
     private let identityManager: SecureIdentityStateManagerProtocol
     private let keychain: KeychainManagerProtocol
     private let idBridge: NostrIdentityBridge
+    /// Binary form of `myPeerID`; same contract — mutated only inside a
+    /// `messageQueue` barrier via `refreshPeerIdentity()`.
     private var myPeerIDData: Data = Data()
 
     // MARK: - Advertising Privacy
@@ -407,8 +409,10 @@ final class BLEService: NSObject {
     // MARK: Identity
 
     /// Derived from the Noise identity fingerprint; rotated only via
-    /// `refreshPeerIdentity()` (e.g. panic reset). Externally read-only —
-    /// no out-of-band mutation may bypass that derivation.
+    /// `refreshPeerIdentity()` (e.g. panic reset), which performs the swap
+    /// inside a `messageQueue` barrier so concurrent queue work never sees a
+    /// half-updated identity. Externally read-only — no out-of-band mutation
+    /// may bypass that derivation.
     private(set) var myPeerID = PeerID(str: "")
     /// Externally read-only; mutate via `setNickname(_:)`, which also
     /// broadcasts the change to peers.
@@ -2370,11 +2374,25 @@ extension BLEService {
         }
     }
 
+    /// Swaps `myPeerID`/`myPeerIDData` to match the current Noise identity.
+    /// The swap runs as a `messageQueue` barrier so in-flight work items that
+    /// read the identity (e.g. `sendMessage` building packets) complete
+    /// against the old value and everything after sees the new one atomically.
+    /// Callers (init, panic reset on the main thread) are never on
+    /// `messageQueue`; the re-entrancy check keeps any future on-queue caller
+    /// from deadlocking.
     private func refreshPeerIdentity() {
-        let fingerprint = noiseService.getIdentityFingerprint()
-        myPeerID = PeerID(str: fingerprint.prefix(16))
-        myPeerIDData = Data(hexString: myPeerID.id) ?? Data()
-        meshTopology.reset()
+        let swap = {
+            let fingerprint = self.noiseService.getIdentityFingerprint()
+            self.myPeerID = PeerID(str: fingerprint.prefix(16))
+            self.myPeerIDData = Data(hexString: self.myPeerID.id) ?? Data()
+            self.meshTopology.reset()
+        }
+        if DispatchQueue.getSpecific(key: messageQueueKey) != nil {
+            swap()
+        } else {
+            messageQueue.sync(flags: .barrier, execute: swap)
+        }
     }
 
 

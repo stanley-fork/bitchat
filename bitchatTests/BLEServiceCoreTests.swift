@@ -165,6 +165,23 @@ struct BLEServiceCoreTests {
     }
 
     @Test
+    func panicReset_rotatesPeerIDDerivedFromNewNoiseFingerprint() async throws {
+        let ble = makeService()
+        let originalPeerID = ble.myPeerID
+        let originalFingerprint = ble.noiseIdentityFingerprint()
+        #expect(originalPeerID == PeerID(str: originalFingerprint.prefix(16)))
+
+        ble.resetIdentityForPanic(currentNickname: "anon")
+
+        // The Noise identity is regenerated and the peer ID swaps with it
+        // (atomically, behind a messageQueue barrier).
+        let newFingerprint = ble.noiseIdentityFingerprint()
+        #expect(newFingerprint != originalFingerprint)
+        #expect(ble.myPeerID != originalPeerID)
+        #expect(ble.myPeerID == PeerID(str: newFingerprint.prefix(16)))
+    }
+
+    @Test
     func modifiedServices_rediscoverWhenBitChatServiceIsInvalidated() async throws {
         let otherService = CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB")
 
