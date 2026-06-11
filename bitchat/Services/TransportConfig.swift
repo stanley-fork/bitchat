@@ -41,6 +41,9 @@ enum TransportConfig {
     static let blePendingNotificationsCapCount: Int = 128
     static let bleNotificationRetryDelayMs: Int = 25
     static let bleNotificationRetryMaxAttempts: Int = 80
+    // Sample interval for notification backpressure logs (fire per fragment
+    // during media transfers).
+    static let bleBackpressureLogInterval: Int = 25
 
     // Nostr
     static let nostrReadAckInterval: TimeInterval = 0.35 // ~3 per second
