@@ -167,6 +167,9 @@ enum TransportConfig {
     // bootstrap deadline) to attempt before unblocking pending EOSE callers.
     static let nostrTorReadyMaxWaitAttempts: Int = 3
     static let nostrPendingSendQueueCap: Int = 200
+    // Sample interval for the send-queue overflow warning (first + every Nth
+    // dropped event). Drops are ephemeral presence/geo traffic — log-only.
+    static let nostrPendingSendDropLogInterval: Int = 10
     // Pending (not-yet-flushed) REQs are bounded per relay: oldest-by-insertion
     // eviction at the cap, plus an age sweep on connect attempts. Durable
     // subscription intent survives in subscriptionRequestState either way.

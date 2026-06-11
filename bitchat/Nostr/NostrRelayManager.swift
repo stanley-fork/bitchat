@@ -198,6 +198,9 @@ final class NostrRelayManager: ObservableObject {
     }
     private var messageQueue: [PendingSend] = []
     private let messageQueueLock = NSLock()
+    // Total pending sends dropped at the queue cap; drives the sampled
+    // overflow warning (first + every Nth drop).
+    private var pendingSendDropCount = 0
     private let encoder = JSONEncoder()
     private var shouldUseTor: Bool { dependencies.userTorEnabled() }
     
@@ -352,6 +355,18 @@ final class NostrRelayManager: ObservableObject {
             messageQueue.removeFirst(overflow)
         }
         messageQueueLock.unlock()
+        guard overflow > 0 else { return }
+        // Dropped events are ephemeral (presence/geo), so no status surfacing
+        // is needed — but the drops should be visible. Sampled so a sustained
+        // relay stall can't flood the log.
+        pendingSendDropCount += overflow
+        if pendingSendDropCount == 1 ||
+            pendingSendDropCount.isMultiple(of: TransportConfig.nostrPendingSendDropLogInterval) {
+            SecureLogger.warning(
+                "📤 Relay send queue full — dropped \(pendingSendDropCount) oldest event(s)",
+                category: .session
+            )
+        }
     }
 
     /// Try to flush any queued messages for relays that are now connected.
@@ -452,7 +467,7 @@ final class NostrRelayManager: ObservableObject {
                 if urls.isEmpty {
                     onEOSE()
                 } else if shouldWaitForTorBeforeConnecting {
-                    pendingEOSECallbacks[id] = onEOSE
+                    parkEOSECallbackUntilTorReady(id: id, callback: onEOSE)
                 } else {
                     startEOSETracking(id: id, relayURLs: Set(urls), callback: onEOSE)
                 }
@@ -620,6 +635,31 @@ final class NostrRelayManager: ObservableObject {
 
             self.torReadyWaitAttempts = 0
             self.connectToRelays(pending, shouldLog: true)
+        }
+    }
+
+    /// Park an EOSE callback while Tor is not yet ready, and schedule the same
+    /// fallback timeout `startEOSETracking` uses. Without it, a parked callback
+    /// would only be unblocked by Tor-readiness retry exhaustion (several
+    /// awaitReady timeouts, i.e. minutes), leaving callers hanging far past the
+    /// normal EOSE fallback. If Tor recovers first the callback is promoted to
+    /// a real EOSE tracker (`startPendingEOSETrackingIfNeeded`), and if retry
+    /// exhaustion fires first it is drained by `unblockPendingEOSECallbacks`;
+    /// either way it leaves `pendingEOSECallbacks` and this timer is a no-op.
+    private func parkEOSECallbackUntilTorReady(id: String, callback: @escaping () -> Void) {
+        pendingEOSECallbacks[id] = callback
+        let generation = connectionGeneration
+        dependencies.scheduleAfter(TransportConfig.nostrSubscriptionEOSEFallbackSeconds) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Stale timers from a previous connection generation are void.
+                guard generation == self.connectionGeneration else { return }
+                // Already fired (unsubscribe, retry-exhaustion unblock) or
+                // promoted to a real EOSE tracker: nothing to do.
+                guard let callback = self.pendingEOSECallbacks.removeValue(forKey: id) else { return }
+                SecureLogger.warning("Unblocking Tor-parked EOSE callback for \(id) after fallback timeout", category: .session)
+                callback()
+            }
         }
     }
 
