@@ -42,17 +42,25 @@ jobs:
             ${{ runner.os }}-${{ matrix.name }}-
 
       - name: Run Tests
-        # BITCHAT_PERF_LOG captures the PERF[...] lines that
-        # PerformanceBaselineTests reports (swift test --parallel swallows
-        # stdout of passing tests, so the floor gate reads this file instead).
+        # Perf benchmarks are excluded here and run in their own serial step
+        # below: measuring while parallel test processes contend for cores
+        # produces noisy numbers, and the XCTest measure machinery has hung
+        # intermittently under parallel workers on loaded runners.
         env:
-          BITCHAT_PERF_LOG: ${{ github.workspace }}/perf-output.log
+          BITCHAT_SKIP_PERF_BASELINES: "1"
         run: swift test --parallel --quiet --enable-code-coverage --package-path ${{ matrix.path }}
 
-      # Order-of-magnitude performance regression gate (app tests only — the
-      # package matrix entries write no PERF lines and the gate would skip
-      # anyway). Floors are deliberately generous (~25% of healthy local
-      # throughput, see bitchatTests/Performance/perf-floors.json) so this
+      # Benchmarks run serially on an otherwise idle runner for stable
+      # numbers; BITCHAT_PERF_LOG captures the PERF[...] lines for the gate.
+      - name: Run performance benchmarks (serial)
+        if: matrix.name == 'app'
+        timeout-minutes: 6
+        env:
+          BITCHAT_PERF_LOG: ${{ github.workspace }}/perf-output.log
+        run: swift test --quiet --filter PerformanceBaselineTests
+
+      # Order-of-magnitude performance regression gate. Floors are deliberately
+      # generous (see bitchatTests/Performance/perf-floors.json) so this
       # catches algorithmic regressions, never runner variance.
       - name: Performance floor gate
         if: matrix.name == 'app'
