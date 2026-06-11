@@ -629,6 +629,52 @@ struct ViewSmokeTests {
         #expect(playback.progress == 0)
     }
 
+    @Test
+    func messageRows_snapshotDeliveryStatusForSwiftUIDiffing() {
+        // Regression: `BitchatMessage` is a reference type mutated in place
+        // by `ConversationStore.applyDeliveryStatus`, and SwiftUI compares
+        // reference-typed view fields by identity — so a status-only change
+        // (delivered → read) on the SAME instance is invisible to the row's
+        // structural diff and its body gets skipped even when the list
+        // re-renders. The row views must therefore snapshot the status as a
+        // value-typed stored property at init, so a rebuilt row value
+        // compares different and re-renders.
+        func deliveryStatusSnapshot(of row: Any) -> DeliveryStatus? {
+            Mirror(reflecting: row).children
+                .first { $0.label == "deliveryStatus" }?
+                .value as? DeliveryStatus
+        }
+
+        let delivered = DeliveryStatus.delivered(to: "builder", at: Date(timeIntervalSince1970: 50))
+        let message = BitchatMessage(
+            id: "dm-status-1",
+            sender: "anon",
+            content: "hello",
+            timestamp: Date(),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "builder",
+            senderPeerID: PeerID(str: "abcdef1234567890"),
+            deliveryStatus: delivered
+        )
+
+        #expect(deliveryStatusSnapshot(of: TextMessageView(message: message)) == delivered)
+
+        // In-place mutation of the shared instance (what the store does on a
+        // READ ack); a freshly built row must carry the new status value.
+        let read = DeliveryStatus.read(by: "builder", at: Date(timeIntervalSince1970: 100))
+        message.deliveryStatus = read
+
+        #expect(deliveryStatusSnapshot(of: TextMessageView(message: message)) == read)
+
+        let mediaRow = MediaMessageView(
+            message: message,
+            media: .image(URL(fileURLWithPath: "/tmp/never-loaded.jpg")),
+            imagePreviewURL: .constant(nil)
+        )
+        #expect(deliveryStatusSnapshot(of: mediaRow) == read)
+    }
+
     #if os(iOS)
     @Test
     func cameraScannerView_previewAndCoordinatorSmoke() {
