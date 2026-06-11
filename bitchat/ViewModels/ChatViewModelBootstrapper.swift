@@ -108,17 +108,9 @@ private extension ChatViewModelBootstrapper {
             .store(in: &viewModel.cancellables)
 
         // Private message state flows through the single-writer
-        // `ConversationStore` intents and its `changes` subject; only the
-        // selection still originates in `PrivateChatManager`.
-        viewModel.privateChatManager.$selectedPeer
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.synchronizeConversationSelectionStore()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
+        // `ConversationStore` intents and its `changes` subject; selection
+        // is owned by the store too (`PrivateChatManager.selectedPeer` is a
+        // read-only mirror), so no selection bridge is needed here.
         viewModel.participantTracker.objectWillChange
             .sink { [weak viewModel] _ in
                 viewModel?.objectWillChange.send()
@@ -192,8 +184,6 @@ private extension ChatViewModelBootstrapper {
                     if viewModel.hasTrackedPrivateChatSelection {
                         viewModel.updatePrivateChatPeerIfNeeded()
                     }
-
-                    viewModel.synchronizeConversationSelectionStore()
                 }
             }
             .store(in: &viewModel.cancellables)

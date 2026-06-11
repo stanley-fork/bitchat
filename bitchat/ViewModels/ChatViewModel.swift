@@ -204,7 +204,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             } else {
                 privateChatManager.endChat()
             }
-            synchronizeConversationSelectionStore()
         }
     }
     /// Read-only derived view of the store's unread direct conversations.
@@ -243,7 +242,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         if let mapped = peerIdentityStore.stablePeerID(forShortID: shortPeerID) { return mapped }
         // Fallback: derive from active Noise session if available
         if shortPeerID.id.count == 16,
-           let key = meshService.getNoiseService().getPeerPublicKeyData(shortPeerID) {
+           let key = meshService.noiseSessionPublicKeyData(for: shortPeerID) {
             let stable = PeerID(hexData: key)
             peerIdentityStore.setStablePeerID(stable, forShortID: shortPeerID)
             return stable
@@ -536,10 +535,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     /// Moves the open private chat to `newPeerID` when the current selection is
     /// one of the peer IDs being migrated away (side-effectful: re-targets the
-    /// private chat session and resyncs the conversation stores).
+    /// private chat session — fingerprint refresh, read receipts).
+    ///
+    /// Note: when this runs after a store `migrateConversation`, the store has
+    /// already handed the selection itself off to `newPeerID` (and the manager
+    /// mirrors it), so a selection that reads `newPeerID` is also re-targeted
+    /// to run the session side effects. Selections on unrelated peers are
+    /// untouched.
     @MainActor
     func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID) {
-        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 }) else { return }
+        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 })
+                || selectedPrivateChatPeer == newPeerID else { return }
         selectedPrivateChatPeer = newPeerID
     }
 
@@ -803,7 +809,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             .store(in: &cancellables)
 
         ChatViewModelBootstrapper(viewModel: self).configure()
-        synchronizeConversationSelectionStore()
     }
 
     // MARK: - Deinitialization
@@ -1140,8 +1145,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             bleService.resetIdentityForPanic(currentNickname: nickname)
         }
 
-        synchronizeConversationSelectionStore()
-
         // No need to force UserDefaults synchronization
 
         // Reinitialize Nostr with new identity
@@ -1261,13 +1264,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     }
 
     // MARK: - Message Handling
-
-    /// Pushes the private-chat manager's selection into the store, which
-    /// derives `selectedConversationID` from it and the active channel.
-    @MainActor
-    func synchronizeConversationSelectionStore() {
-        conversations.setSelectedPrivatePeer(privateChatManager.selectedPeer)
-    }
 
     /// Invalidates the derived `messages` cache and notifies observers.
     /// (Formerly pulled the channel's timeline into a stored `messages`

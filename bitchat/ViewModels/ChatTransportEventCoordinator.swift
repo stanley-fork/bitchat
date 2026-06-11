@@ -96,7 +96,7 @@ extension ChatViewModel: ChatTransportEventContext {
     }
 
     func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? {
-        meshService.getNoiseService().getPeerPublicKeyData(peerID)
+        meshService.noiseSessionPublicKeyData(for: peerID)
     }
 
     func flushRouterOutbox(for peerID: PeerID) {

@@ -401,10 +401,17 @@ final class BLEService: NSObject {
     }
     
     // MARK: Identity
-    
-    var myPeerID = PeerID(str: "")
-    var myNickname: String = "anon"
-    
+
+    /// Derived from the Noise identity fingerprint; rotated only via
+    /// `refreshPeerIdentity()` (e.g. panic reset). Externally read-only —
+    /// no out-of-band mutation may bypass that derivation.
+    private(set) var myPeerID = PeerID(str: "")
+    /// Externally read-only; mutate via `setNickname(_:)`, which also
+    /// broadcasts the change to peers.
+    private(set) var myNickname: String = "anon"
+
+    /// Sole mutator for `myNickname`: updates the stored value and force-sends
+    /// an announce so peers learn the new name.
     func setNickname(_ nickname: String) {
         self.myNickname = nickname
         // Send announce to notify peers of nickname change (force send)
@@ -573,8 +580,40 @@ final class BLEService: NSObject {
         initiateNoiseHandshake(with: peerID)
     }
     
-    func getNoiseService() -> NoiseEncryptionService {
-        return noiseService
+    // MARK: Noise identity/session access (narrow Transport wrappers)
+
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? {
+        noiseService.getPeerPublicKeyData(peerID)
+    }
+
+    func noiseIdentityFingerprint() -> String {
+        noiseService.getIdentityFingerprint()
+    }
+
+    func noiseStaticPublicKeyData() -> Data {
+        noiseService.getStaticPublicKeyData()
+    }
+
+    func noiseSigningPublicKeyData() -> Data {
+        noiseService.getSigningPublicKeyData()
+    }
+
+    func noiseSignData(_ data: Data) -> Data? {
+        noiseService.signData(data)
+    }
+
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool {
+        noiseService.verifySignature(signature, for: data, publicKey: publicKey)
+    }
+
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    ) {
+        // `onPeerAuthenticated` is additive (the encryption service keeps an
+        // array of handlers); `onHandshakeRequired` is a single slot.
+        noiseService.onPeerAuthenticated = onPeerAuthenticated
+        noiseService.onHandshakeRequired = onHandshakeRequired
     }
 
     func getCurrentBluetoothState() -> CBManagerState {
