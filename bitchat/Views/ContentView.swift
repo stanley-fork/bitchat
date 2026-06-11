@@ -40,6 +40,7 @@ struct ContentView: View {
     @State private var messageText = ""
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.colorScheme) var colorScheme
+    @Environment(\.appTheme) private var appTheme
     @State private var showSidebar = false
     @State private var selectedMessageSender: String?
     @State private var selectedMessageSenderID: PeerID?
@@ -63,39 +64,19 @@ struct ContentView: View {
     @State private var windowCountPublic: Int = 300
     @State private var windowCountPrivate: [PeerID: Int] = [:]
 
-    private var backgroundColor: Color {
-        colorScheme == .dark ? Color.black : Color.white
-    }
-
-    private var textColor: Color {
-        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-    }
-
-    private var secondaryTextColor: Color {
-        colorScheme == .dark ? Color.green.opacity(0.8) : Color(red: 0, green: 0.5, blue: 0).opacity(0.8)
-    }
+    @ThemedPalette private var palette
 
     private var selectedPrivatePeerID: PeerID? {
         privateConversationModel.selectedPeerID
     }
 
+    private var usesGlassLayout: Bool { appTheme.usesGlassChrome }
+
     var body: some View {
-        VStack(spacing: 0) {
-            ContentHeaderView(
-                showSidebar: $showSidebar,
-                showVerifySheet: $showVerifySheet,
-                showLocationNotes: $showLocationNotes,
-                notesGeohash: $notesGeohash,
-                isNicknameFieldFocused: $isNicknameFieldFocused,
-                headerHeight: headerHeight,
-                headerPeerIconSize: headerPeerIconSize,
-                headerPeerCountFontSize: headerPeerCountFontSize,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
-                secondaryTextColor: secondaryTextColor
-            )
+        mainContent
             .onAppear {
                 conversationUIModel.setCurrentColorScheme(colorScheme)
+                conversationUIModel.setCurrentTheme(appTheme)
                 #if os(macOS)
                 DispatchQueue.main.async {
                     isNicknameFieldFocused = false
@@ -106,62 +87,11 @@ struct ContentView: View {
             .onChange(of: colorScheme) { newValue in
                 conversationUIModel.setCurrentColorScheme(newValue)
             }
-
-            Divider()
-
-            GeometryReader { geometry in
-                VStack(spacing: 0) {
-                    MessageListView(
-                        privatePeer: nil,
-                        isAtBottom: $isAtBottomPublic,
-                        messageText: $messageText,
-                        selectedMessageSender: $selectedMessageSender,
-                        selectedMessageSenderID: $selectedMessageSenderID,
-                        imagePreviewURL: $imagePreviewURL,
-                        windowCountPublic: $windowCountPublic,
-                        windowCountPrivate: $windowCountPrivate,
-                        showSidebar: $showSidebar,
-                        isTextFieldFocused: $isTextFieldFocused
-                    )
-                    .background(backgroundColor)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .frame(width: geometry.size.width, height: geometry.size.height)
+            .onChange(of: appTheme) { newValue in
+                conversationUIModel.setCurrentTheme(newValue)
             }
-
-            Divider()
-
-            if selectedPrivatePeerID == nil {
-                #if os(iOS)
-                ContentComposerView(
-                    messageText: $messageText,
-                    isTextFieldFocused: $isTextFieldFocused,
-                    voiceRecordingVM: voiceRecordingVM,
-                    autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                    backgroundColor: backgroundColor,
-                    textColor: textColor,
-                    secondaryTextColor: secondaryTextColor,
-                    onSendMessage: sendMessage,
-                    showImagePicker: $showImagePicker,
-                    imagePickerSourceType: $imagePickerSourceType
-                )
-                #else
-                ContentComposerView(
-                    messageText: $messageText,
-                    isTextFieldFocused: $isTextFieldFocused,
-                    voiceRecordingVM: voiceRecordingVM,
-                    autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                    backgroundColor: backgroundColor,
-                    textColor: textColor,
-                    secondaryTextColor: secondaryTextColor,
-                    onSendMessage: sendMessage,
-                    showMacImagePicker: $showMacImagePicker
-                )
-                #endif
-            }
-        }
-        .background(backgroundColor)
-        .foregroundColor(textColor)
+        .background(ThemedRootBackground())
+        .foregroundColor(palette.primary)
         #if os(macOS)
         .frame(minWidth: 600, minHeight: 400)
         #endif
@@ -194,9 +124,6 @@ struct ContentView: View {
                 isTextFieldFocused: $isTextFieldFocused,
                 voiceRecordingVM: voiceRecordingVM,
                 autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
-                secondaryTextColor: secondaryTextColor,
                 headerHeight: headerHeight,
                 onSendMessage: sendMessage,
                 showImagePicker: $showImagePicker,
@@ -215,9 +142,6 @@ struct ContentView: View {
                 isTextFieldFocused: $isTextFieldFocused,
                 voiceRecordingVM: voiceRecordingVM,
                 autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
-                secondaryTextColor: secondaryTextColor,
                 headerHeight: headerHeight,
                 onSendMessage: sendMessage,
                 showMacImagePicker: $showMacImagePicker
@@ -300,6 +224,96 @@ struct ContentView: View {
         .onDisappear {
             autocompleteDebounceTimer?.invalidate()
         }
+    }
+
+    /// Matrix: classic opaque bars with dividers. Glass: full-bleed message
+    /// list scrolling underneath floating chrome panels (safe-area insets),
+    /// so the translucency gains usable space instead of losing it.
+    @ViewBuilder
+    private var mainContent: some View {
+        if usesGlassLayout {
+            publicMessageList
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    headerView
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if selectedPrivatePeerID == nil {
+                        composerView
+                    }
+                }
+        } else {
+            VStack(spacing: 0) {
+                headerView
+
+                Divider()
+
+                GeometryReader { geometry in
+                    VStack(spacing: 0) {
+                        publicMessageList
+                            .background(palette.background)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+
+                Divider()
+
+                if selectedPrivatePeerID == nil {
+                    composerView
+                }
+            }
+        }
+    }
+
+    private var headerView: some View {
+        ContentHeaderView(
+            showSidebar: $showSidebar,
+            showVerifySheet: $showVerifySheet,
+            showLocationNotes: $showLocationNotes,
+            notesGeohash: $notesGeohash,
+            isNicknameFieldFocused: $isNicknameFieldFocused,
+            headerHeight: headerHeight,
+            headerPeerIconSize: headerPeerIconSize,
+            headerPeerCountFontSize: headerPeerCountFontSize
+        )
+    }
+
+    private var publicMessageList: some View {
+        MessageListView(
+            privatePeer: nil,
+            isAtBottom: $isAtBottomPublic,
+            messageText: $messageText,
+            selectedMessageSender: $selectedMessageSender,
+            selectedMessageSenderID: $selectedMessageSenderID,
+            imagePreviewURL: $imagePreviewURL,
+            windowCountPublic: $windowCountPublic,
+            windowCountPrivate: $windowCountPrivate,
+            showSidebar: $showSidebar,
+            isTextFieldFocused: $isTextFieldFocused
+        )
+    }
+
+    private var composerView: some View {
+        #if os(iOS)
+        ContentComposerView(
+            messageText: $messageText,
+            isTextFieldFocused: $isTextFieldFocused,
+            voiceRecordingVM: voiceRecordingVM,
+            autocompleteDebounceTimer: $autocompleteDebounceTimer,
+            onSendMessage: sendMessage,
+            showImagePicker: $showImagePicker,
+            imagePickerSourceType: $imagePickerSourceType
+        )
+        #else
+        ContentComposerView(
+            messageText: $messageText,
+            isTextFieldFocused: $isTextFieldFocused,
+            voiceRecordingVM: voiceRecordingVM,
+            autocompleteDebounceTimer: $autocompleteDebounceTimer,
+            onSendMessage: sendMessage,
+            showMacImagePicker: $showMacImagePicker
+        )
+        #endif
     }
 
     private func sendMessage() {

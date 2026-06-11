@@ -13,15 +13,11 @@ struct FingerprintView: View {
     @EnvironmentObject private var verificationModel: VerificationModel
     let peerID: PeerID
     @Environment(\.dismiss) var dismiss
-    @Environment(\.colorScheme) var colorScheme
-    
-    private var textColor: Color {
-        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-    }
-    
-    private var backgroundColor: Color {
-        colorScheme == .dark ? Color.black : Color.white
-    }
+    @ThemedPalette private var palette
+
+    private var textColor: Color { palette.primary }
+
+    private var backgroundColor: Color { palette.background }
 
     private enum Strings {
         static let title: LocalizedStringKey = "fingerprint.title"
@@ -53,7 +49,7 @@ struct FingerprintView: View {
             // Header
             HStack {
                 Text(Strings.title)
-                    .font(.bitchatSystem(size: 16, weight: .bold, design: .monospaced))
+                    .bitchatFont(size: 16, weight: .bold)
                     .foregroundColor(textColor)
                 
                 Spacer()
@@ -76,11 +72,11 @@ struct FingerprintView: View {
                     
                     VStack(alignment: .leading, spacing: 4) {
                         Text(fingerprintState.peerNickname)
-                            .font(.bitchatSystem(size: 18, weight: .semibold, design: .monospaced))
+                            .bitchatFont(size: 18, weight: .semibold)
                             .foregroundColor(textColor)
                         
                         Text(fingerprintState.encryptionStatus.description)
-                            .font(.bitchatSystem(size: 12, design: .monospaced))
+                            .bitchatFont(size: 12)
                             .foregroundColor(textColor.opacity(0.7))
                     }
                     
@@ -93,12 +89,12 @@ struct FingerprintView: View {
                 // Their fingerprint
                 VStack(alignment: .leading, spacing: 8) {
                     Text(Strings.theirFingerprint)
-                        .font(.bitchatSystem(size: 12, weight: .bold, design: .monospaced))
+                        .bitchatFont(size: 12, weight: .bold)
                         .foregroundColor(textColor.opacity(0.7))
                     
                     if let fingerprint = fingerprintState.theirFingerprint {
                         Text(formatFingerprint(fingerprint))
-                            .font(.bitchatSystem(size: 14, design: .monospaced))
+                            .bitchatFont(size: 14)
                             .foregroundColor(textColor)
                             .multilineTextAlignment(.leading)
                             .lineLimit(nil)
@@ -119,7 +115,7 @@ struct FingerprintView: View {
                             }
                     } else {
                         Text(Strings.handshakePending)
-                            .font(.bitchatSystem(size: 14, design: .monospaced))
+                            .bitchatFont(size: 14)
                             .foregroundColor(Color.orange)
                             .padding()
                     }
@@ -128,11 +124,11 @@ struct FingerprintView: View {
                 // My fingerprint
                 VStack(alignment: .leading, spacing: 8) {
                     Text(Strings.yourFingerprint)
-                        .font(.bitchatSystem(size: 12, weight: .bold, design: .monospaced))
+                        .bitchatFont(size: 12, weight: .bold)
                         .foregroundColor(textColor.opacity(0.7))
                     
                     Text(formatFingerprint(fingerprintState.myFingerprint))
-                        .font(.bitchatSystem(size: 14, design: .monospaced))
+                        .bitchatFont(size: 14)
                         .foregroundColor(textColor)
                         .multilineTextAlignment(.leading)
                         .lineLimit(nil)
@@ -157,7 +153,7 @@ struct FingerprintView: View {
                 if fingerprintState.canToggleVerification {
                     VStack(spacing: 12) {
                         Text(fingerprintState.isVerified ? Strings.verifiedBadge : Strings.notVerifiedBadge)
-                            .font(.bitchatSystem(size: 14, weight: .bold, design: .monospaced))
+                            .bitchatFont(size: 14, weight: .bold)
                             .foregroundColor(fingerprintState.isVerified ? Color.green : Color.orange)
                             .frame(maxWidth: .infinity)
                         
@@ -168,7 +164,7 @@ struct FingerprintView: View {
                                 Text(Strings.verifyHint(fingerprintState.peerNickname))
                             }
                         }
-                            .font(.bitchatSystem(size: 12, design: .monospaced))
+                            .bitchatFont(size: 12)
                             .foregroundColor(textColor.opacity(0.7))
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
@@ -181,7 +177,7 @@ struct FingerprintView: View {
                                 dismiss()
                             }) {
                                 Text(Strings.markVerified)
-                                    .font(.bitchatSystem(size: 14, weight: .bold, design: .monospaced))
+                                    .bitchatFont(size: 14, weight: .bold)
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 20)
                                     .padding(.vertical, 10)
@@ -195,7 +191,7 @@ struct FingerprintView: View {
                                 dismiss()
                             }) {
                                 Text(Strings.removeVerification)
-                                    .font(.bitchatSystem(size: 14, weight: .bold, design: .monospaced))
+                                    .bitchatFont(size: 14, weight: .bold)
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 20)
                                     .padding(.vertical, 10)
@@ -216,7 +212,7 @@ struct FingerprintView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(backgroundColor)
+        .themedSheetBackground()
     }
     
     private func formatFingerprint(_ fingerprint: String) -> String {

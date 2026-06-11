@@ -2,8 +2,7 @@ import SwiftUI
 
 struct GeohashPeopleList: View {
     @EnvironmentObject private var peerListModel: PeerListModel
-    let textColor: Color
-    let secondaryTextColor: Color
+    @ThemedPalette private var palette
     let onTapPerson: () -> Void
     @Environment(\.colorScheme) var colorScheme
     @State private var orderedIDs: [String] = []
@@ -20,8 +19,8 @@ struct GeohashPeopleList: View {
         if peerListModel.geohashPeople.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 Text(Strings.noneNearby)
-                    .font(.bitchatSystem(size: 14, design: .monospaced))
-                    .foregroundColor(secondaryTextColor)
+                    .bitchatFont(size: 14)
+                    .foregroundColor(palette.secondary)
                     .padding(.horizontal)
                     .padding(.top, 12)
             }
@@ -52,18 +51,18 @@ struct GeohashPeopleList: View {
                         let (base, suffix) = person.displayName.splitSuffix()
                         HStack(spacing: 0) {
                             Text(base)
-                                .font(.bitchatSystem(size: 14, design: .monospaced))
+                                .bitchatFont(size: 14)
                                 .fontWeight(person.isMe ? .bold : .regular)
                                 .foregroundColor(rowColor)
                             if !suffix.isEmpty {
                                 let suffixColor = person.isMe ? Color.orange.opacity(0.6) : rowColor.opacity(0.6)
                                 Text(suffix)
-                                    .font(.bitchatSystem(size: 14, design: .monospaced))
+                                    .bitchatFont(size: 14)
                                     .foregroundColor(suffixColor)
                             }
                             if person.isMe {
                                 Text(Strings.youSuffix)
-                                    .font(.bitchatSystem(size: 14, design: .monospaced))
+                                    .bitchatFont(size: 14)
                                     .foregroundColor(rowColor)
                             }
                         }
