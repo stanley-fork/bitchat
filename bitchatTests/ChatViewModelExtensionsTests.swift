@@ -225,7 +225,7 @@ struct ChatViewModelPrivateChatExtensionTests {
         // "Check geohash (Nostr) blocks using mapping to full pubkey"
         
         let hexPubkey = "0000000000000000000000000000000000000000000000000000000000000001"
-        viewModel.nostrKeyMapping[blockedPeerID] = hexPubkey
+        viewModel.registerNostrKeyMapping(hexPubkey, for: blockedPeerID)
         viewModel.identityManager.setNostrBlocked(hexPubkey, isBlocked: true)
         
         // Force isGeoChat/isGeoDM check to be true by setting prefix?
@@ -235,7 +235,7 @@ struct ChatViewModelPrivateChatExtensionTests {
         // We need a peerID that looks like geo.
         
         let geoPeerID = PeerID(nostr_: hexPubkey)
-        viewModel.nostrKeyMapping[geoPeerID] = hexPubkey
+        viewModel.registerNostrKeyMapping(hexPubkey, for: geoPeerID)
         
         let geoMessage = BitchatMessage(
             id: "msg-geo-blocked",
@@ -396,26 +396,6 @@ struct ChatViewModelNostrExtensionTests {
 
         try? await Task.sleep(nanoseconds: 100_000_000)
         #expect(viewModel.privateChats.isEmpty)
-    }
-
-    @Test @MainActor
-    func handleNostrMessage_invalidSignatureDoesNotPoisonDedup() async throws {
-        let (viewModel, _) = makeTestableViewModel()
-        let sender = try NostrIdentity.generate()
-        let recipient = try #require(try viewModel.idBridge.getCurrentNostrIdentity())
-        let giftWrap = try NostrProtocol.createPrivateMessage(
-            content: "verify:noop",
-            recipientPubkey: recipient.publicKeyHex,
-            senderIdentity: sender
-        )
-        var invalidGiftWrap = giftWrap
-        invalidGiftWrap.sig = String(repeating: "0", count: 128)
-
-        viewModel.handleNostrMessage(invalidGiftWrap)
-        #expect(!viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
-
-        viewModel.handleNostrMessage(giftWrap)
-        #expect(viewModel.deduplicationService.hasProcessedNostrEvent(giftWrap.id))
     }
 
     @Test @MainActor
@@ -777,7 +757,7 @@ struct ChatViewModelGeoDMTests {
         let convKey = PeerID(nostr_: recipientHex)
 
         viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: geohash)))
-        viewModel.nostrKeyMapping[convKey] = recipientHex
+        viewModel.registerNostrKeyMapping(recipientHex, for: convKey)
         viewModel.identityManager.setNostrBlocked(recipientHex, isBlocked: true)
 
         viewModel.sendGeohashDM("hello", to: convKey)
@@ -814,6 +794,131 @@ struct ChatViewModelGeoDMTests {
         #expect(viewModel.sentGeoDeliveryAcks.contains(messageID))
         #expect(viewModel.sentReadReceipts.contains(messageID))
         #expect(!viewModel.unreadPrivateMessages.contains(convKey))
+    }
+}
+
+// MARK: - Single-Writer Intent Operation Tests
+
+/// Contracts for the owner-side intent ops that are the sole mutation paths
+/// for `ChatViewModel`'s shared coordinator state (`nostrKeyMapping`,
+/// `sentReadReceipts`, `sentGeoDeliveryAcks`, `isBatchingPublic`, the geo
+/// subscription IDs, and the selected private chat hand-off).
+struct ChatViewModelIntentOperationTests {
+
+    @Test @MainActor
+    func markGeoDeliveryAckSent_returnsFalseOnSecondCall() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        #expect(viewModel.markGeoDeliveryAckSent("geo-ack-1"))
+        #expect(!viewModel.markGeoDeliveryAckSent("geo-ack-1"))
+        #expect(viewModel.markGeoDeliveryAckSent("geo-ack-2"))
+        #expect(viewModel.sentGeoDeliveryAcks == ["geo-ack-1", "geo-ack-2"])
+    }
+
+    @Test @MainActor
+    func markReadReceiptSent_returnsFalseOnSecondCall() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        #expect(viewModel.markReadReceiptSent("read-1"))
+        #expect(!viewModel.markReadReceiptSent("read-1"))
+        #expect(viewModel.sentReadReceipts.contains("read-1"))
+    }
+
+    @Test @MainActor
+    func pruneSentReadReceipts_dropsStaleIDsAndReturnsRemovedCount() async {
+        let (viewModel, _) = makeTestableViewModel()
+        viewModel.sentReadReceipts = ["keep-1", "keep-2", "drop-1", "drop-2"]
+
+        let removed = viewModel.pruneSentReadReceipts(keeping: ["keep-1", "keep-2", "unrelated"])
+
+        #expect(removed == 2)
+        #expect(viewModel.sentReadReceipts == ["keep-1", "keep-2"])
+        // Nothing stale left: a second prune removes nothing.
+        #expect(viewModel.pruneSentReadReceipts(keeping: ["keep-1", "keep-2"]) == 0)
+    }
+
+    @Test @MainActor
+    func registerNostrKeyMapping_isVisibleToNostrCoordinatorLookups() async {
+        let (viewModel, _) = makeTestableViewModel()
+        let hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        let convKey = PeerID(nostr_: hex)
+
+        // Registered through the owner intent op (as e.g. the private
+        // conversation flow does) and resolved through the Nostr coordinator,
+        // which reads the same backing dictionary via `ChatNostrContext`.
+        viewModel.registerNostrKeyMapping(hex, for: convKey)
+
+        #expect(viewModel.nostrKeyMapping[convKey] == hex)
+        #expect(viewModel.nostrCoordinator.fullNostrHex(forSenderPeerID: convKey) == hex)
+    }
+
+    @Test @MainActor
+    func removeNostrKeyMappings_dropsEveryMappingForThePubkeyCaseInsensitively() async {
+        let (viewModel, _) = makeTestableViewModel()
+        let hex = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+        let otherHex = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+        viewModel.registerNostrKeyMapping(hex.uppercased(), for: PeerID(nostr: hex))
+        viewModel.registerNostrKeyMapping(hex, for: PeerID(nostr_: hex))
+        viewModel.registerNostrKeyMapping(otherHex, for: PeerID(nostr_: otherHex))
+
+        viewModel.removeNostrKeyMappings(matchingPubkeyHexLowercased: hex)
+
+        #expect(viewModel.nostrKeyMapping[PeerID(nostr: hex)] == nil)
+        #expect(viewModel.nostrKeyMapping[PeerID(nostr_: hex)] == nil)
+        #expect(viewModel.nostrKeyMapping[PeerID(nostr_: otherHex)] == otherHex)
+    }
+
+    @Test @MainActor
+    func setPublicBatching_publishesBatchingState() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        #expect(!viewModel.isBatchingPublic)
+        viewModel.setPublicBatching(true)
+        #expect(viewModel.isBatchingPublic)
+        viewModel.setPublicBatching(false)
+        #expect(!viewModel.isBatchingPublic)
+    }
+
+    @Test @MainActor
+    func geoSubscriptionIntentOps_setClearAndDrainSubscriptions() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        viewModel.setGeoChatSubscriptionID("geo-u4pruy")
+        viewModel.setGeoDmSubscriptionID("geo-dm-u4pruy")
+        #expect(viewModel.geoSubscriptionID == "geo-u4pruy")
+        #expect(viewModel.geoDmSubscriptionID == "geo-dm-u4pruy")
+
+        viewModel.setGeoChatSubscriptionID(nil)
+        viewModel.setGeoDmSubscriptionID(nil)
+        #expect(viewModel.geoSubscriptionID == nil)
+        #expect(viewModel.geoDmSubscriptionID == nil)
+
+        viewModel.addGeoSamplingSub("geo-sample-aaaa", forGeohash: "aaaa")
+        viewModel.addGeoSamplingSub("geo-sample-bbbb", forGeohash: "bbbb")
+        viewModel.removeGeoSamplingSub("geo-sample-aaaa")
+        #expect(viewModel.geoSamplingSubs == ["geo-sample-bbbb": "bbbb"])
+
+        let cleared = viewModel.clearGeoSamplingSubs()
+        #expect(cleared == ["geo-sample-bbbb"])
+        #expect(viewModel.geoSamplingSubs.isEmpty)
+    }
+
+    @Test @MainActor
+    func handOffSelectedPrivateChat_movesSelectionOnlyWhenSelectedPeerIsMigrated() async {
+        let (viewModel, _) = makeTestableViewModel()
+        let oldPeer = PeerID(str: "aaaaaaaaaaaaaaaa")
+        let unrelatedPeer = PeerID(str: "cccccccccccccccc")
+        let newPeer = PeerID(str: "bbbbbbbbbbbbbbbb")
+
+        // Selection not among the migrated peers: untouched.
+        viewModel.selectedPrivateChatPeer = unrelatedPeer
+        viewModel.handOffSelectedPrivateChat(from: [oldPeer], to: newPeer)
+        #expect(viewModel.selectedPrivateChatPeer == unrelatedPeer)
+
+        // Selection being migrated away: handed off to the new peer.
+        viewModel.selectedPrivateChatPeer = oldPeer
+        viewModel.handOffSelectedPrivateChat(from: [oldPeer], to: newPeer)
+        #expect(viewModel.selectedPrivateChatPeer == newPeer)
     }
 }
 

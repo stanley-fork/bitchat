@@ -2,34 +2,96 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+/// The narrow surface `ChatOutgoingCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatOutgoingCoordinatorContextTests`) and makes its true
+/// dependencies explicit.
+@MainActor
+protocol ChatOutgoingContext: AnyObject {
+    // MARK: Identity & channel state
+    var nickname: String { get }
+    var myPeerID: PeerID { get }
+    var activeChannel: ChannelID { get }
+    var selectedPrivateChatPeer: PeerID? { get }
+    var isTeleported: Bool { get }
+
+    // MARK: Commands & private messages
+    func handleCommand(_ command: String)
+    func updatePrivateChatPeerIfNeeded()
+    func sendPrivateMessage(_ content: String, to peerID: PeerID)
+
+    // MARK: Public timeline (local echo)
+    func parseMentions(from content: String) -> [String]
+    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
+    func refreshVisibleMessages(from channel: ChannelID?)
+    func trimMessagesIfNeeded()
+    func addSystemMessage(_ content: String)
+
+    // MARK: Content dedup
+    func normalizedContentKey(_ content: String) -> String
+    func recordContentKey(_ key: String, timestamp: Date)
+
+    // MARK: Outbound routing
+    /// Stamps "now" as the channel's last public activity (background nudges).
+    /// (Single mutation path for the owner's `lastPublicActivityAt`; this
+    /// coordinator never reads it.)
+    func recordPublicActivity(forChannelKey key: String)
+    func sendMeshMessage(_ content: String, mentions: [String], messageID: String, timestamp: Date)
+    func sendGeohash(context: ChatViewModel.GeoOutgoingContext)
+
+    // MARK: Geohash identity (shared with the other contexts)
+    func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity
+}
+
+extension ChatViewModel: ChatOutgoingContext {
+    // `nickname`, `myPeerID`, `activeChannel`, `selectedPrivateChatPeer`,
+    // `isTeleported`, `handleCommand(_:)`, `updatePrivateChatPeerIfNeeded()`,
+    // `sendPrivateMessage(_:to:)`, `parseMentions(from:)`,
+    // `appendTimelineMessage(_:to:)`, `refreshVisibleMessages(from:)`,
+    // `trimMessagesIfNeeded()`, `addSystemMessage(_:)`,
+    // `normalizedContentKey(_:)`, `recordContentKey(_:timestamp:)`,
+    // `sendMeshMessage(_:mentions:messageID:timestamp:)`,
+    // `sendGeohash(context:)`, and `deriveNostrIdentity(forGeohash:)` are
+    // shared requirements with the other contexts or satisfied by existing
+    // `ChatViewModel` members. The single-writer intent op below lives next to
+    // its backing state's owner.
+
+    func recordPublicActivity(forChannelKey key: String) {
+        lastPublicActivityAt[key] = Date()
+    }
+}
+
 @MainActor
 final class ChatOutgoingCoordinator {
-    private unowned let viewModel: ChatViewModel
+    private unowned let context: any ChatOutgoingContext
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    init(context: any ChatOutgoingContext) {
+        self.context = context
     }
 
     func sendMessage(_ content: String) {
         guard let trimmed = content.trimmedOrNilIfEmpty else { return }
 
         if content.hasPrefix("/") {
-            Task { @MainActor [weak viewModel] in
-                viewModel?.handleCommand(content)
+            Task { @MainActor [weak context = self.context] in
+                context?.handleCommand(content)
             }
             return
         }
 
-        if viewModel.selectedPrivateChatPeer != nil {
-            viewModel.updatePrivateChatPeerIfNeeded()
+        if context.selectedPrivateChatPeer != nil {
+            context.updatePrivateChatPeerIfNeeded()
 
-            if let selectedPeer = viewModel.selectedPrivateChatPeer {
-                viewModel.sendPrivateMessage(content, to: selectedPeer)
+            if let selectedPeer = context.selectedPrivateChatPeer {
+                context.sendPrivateMessage(content, to: selectedPeer)
             }
             return
         }
 
-        let mentions = viewModel.parseMentions(from: content)
+        let mentions = context.parseMentions(from: content)
         let preparedMessage = preparePublicMessage(content: content, trimmed: trimmed, mentions: mentions)
         guard let preparedMessage else { return }
 
@@ -51,28 +113,28 @@ private extension ChatOutgoingCoordinator {
         mentions: [String]
     ) -> (message: BitchatMessage, geoContext: ChatViewModel.GeoOutgoingContext?)? {
         var geoContext: ChatViewModel.GeoOutgoingContext?
-        var displaySender = viewModel.nickname
-        var localSenderPeerID = viewModel.meshService.myPeerID
+        var displaySender = context.nickname
+        var localSenderPeerID = context.myPeerID
         var messageID: String?
         var messageTimestamp = Date()
 
-        switch viewModel.activeChannel {
+        switch context.activeChannel {
         case .mesh:
             break
 
         case .location(let channel):
             do {
-                let identity = try viewModel.idBridge.deriveIdentity(forGeohash: channel.geohash)
+                let identity = try context.deriveNostrIdentity(forGeohash: channel.geohash)
                 let suffix = String(identity.publicKeyHex.suffix(4))
-                displaySender = viewModel.nickname + "#" + suffix
+                displaySender = context.nickname + "#" + suffix
                 localSenderPeerID = PeerID(nostr: identity.publicKeyHex)
 
-                let teleported = viewModel.locationManager.teleported
+                let teleported = context.isTeleported
                 let event = try NostrProtocol.createEphemeralGeohashEvent(
                     content: trimmed,
                     geohash: channel.geohash,
                     senderIdentity: identity,
-                    nickname: viewModel.nickname,
+                    nickname: context.nickname,
                     teleported: teleported
                 )
 
@@ -86,7 +148,7 @@ private extension ChatOutgoingCoordinator {
                 )
             } catch {
                 SecureLogger.error("❌ Failed to prepare geohash message: \(error)", category: .session)
-                viewModel.addSystemMessage(
+                context.addSystemMessage(
                     String(localized: "system.location.send_failed", comment: "System message when a location channel send fails")
                 )
                 return nil
@@ -107,12 +169,12 @@ private extension ChatOutgoingCoordinator {
     }
 
     func appendLocalEcho(_ message: BitchatMessage) {
-        viewModel.timelineStore.append(message, to: viewModel.activeChannel)
-        viewModel.refreshVisibleMessages(from: viewModel.activeChannel)
+        context.appendTimelineMessage(message, to: context.activeChannel)
+        context.refreshVisibleMessages(from: context.activeChannel)
 
-        let contentKey = viewModel.deduplicationService.normalizedContentKey(message.content)
-        viewModel.deduplicationService.recordContentKey(contentKey, timestamp: message.timestamp)
-        viewModel.trimMessagesIfNeeded()
+        let contentKey = context.normalizedContentKey(message.content)
+        context.recordContentKey(contentKey, timestamp: message.timestamp)
+        context.trimMessagesIfNeeded()
     }
 
     func routePublicMessage(
@@ -122,10 +184,10 @@ private extension ChatOutgoingCoordinator {
         messageID: String,
         timestamp: Date
     ) {
-        switch viewModel.activeChannel {
+        switch context.activeChannel {
         case .mesh:
-            viewModel.lastPublicActivityAt["mesh"] = Date()
-            viewModel.meshService.sendMessage(
+            context.recordPublicActivity(forChannelKey: "mesh")
+            context.sendMeshMessage(
                 originalContent,
                 mentions: mentions,
                 messageID: messageID,
@@ -133,18 +195,18 @@ private extension ChatOutgoingCoordinator {
             )
 
         case .location(let channel):
-            viewModel.lastPublicActivityAt["geo:\(channel.geohash)"] = Date()
+            context.recordPublicActivity(forChannelKey: "geo:\(channel.geohash)")
 
             guard let geoContext, geoContext.channel.geohash == channel.geohash else {
                 SecureLogger.error("Geo: missing send context for \(channel.geohash)", category: .session)
-                viewModel.addSystemMessage(
+                context.addSystemMessage(
                     String(localized: "system.location.send_failed", comment: "System message when a location channel send fails")
                 )
                 return
             }
 
-            Task { @MainActor [weak viewModel] in
-                viewModel?.sendGeohash(context: geoContext)
+            Task { @MainActor [weak context = self.context] in
+                context?.sendGeohash(context: geoContext)
             }
         }
     }

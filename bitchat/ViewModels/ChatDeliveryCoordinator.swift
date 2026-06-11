@@ -14,8 +14,11 @@ import Foundation
 protocol ChatDeliveryContext: AnyObject {
     var messages: [BitchatMessage] { get set }
     var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var sentReadReceipts: Set<String> { get set }
     var isStartupPhase: Bool { get }
+    /// Drops every recorded read receipt whose message ID is not in `validMessageIDs`.
+    /// Returns the number of receipts removed. (Single mutation path for the
+    /// owner's `sentReadReceipts`; this coordinator never reads the raw set.)
+    func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
     func notifyUIChanged()
     /// Confirms receipt so the message router stops retaining the message for resend.
@@ -57,10 +60,7 @@ final class ChatDeliveryCoordinator {
             }
         )
 
-        let oldCount = context.sentReadReceipts.count
-        context.sentReadReceipts = context.sentReadReceipts.intersection(validMessageIDs)
-
-        let removedCount = oldCount - context.sentReadReceipts.count
+        let removedCount = context.pruneSentReadReceipts(keeping: validMessageIDs)
         if removedCount > 0 {
             SecureLogger.debug("🧹 Cleaned up \(removedCount) old read receipts", category: .session)
         }

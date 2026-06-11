@@ -25,7 +25,10 @@ protocol ChatPublicConversationContext: AnyObject {
     var currentGeohash: String? { get }
     var nickname: String { get }
     var myPeerID: PeerID { get }
-    var isBatchingPublic: Bool { get set }
+    /// Publishes the public-timeline batching state (UI animation suppression).
+    /// (Single mutation path for the owner's `isBatchingPublic`; this
+    /// coordinator never reads it.)
+    func setPublicBatching(_ isBatching: Bool)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
     func notifyUIChanged()
     func trimMessagesIfNeeded()
@@ -56,7 +59,9 @@ protocol ChatPublicConversationContext: AnyObject {
     // MARK: Geohash participants & presence
     var geoNicknames: [String: String] { get }
     var isTeleported: Bool { get }
-    var nostrKeyMapping: [PeerID: String] { get set }
+    var nostrKeyMapping: [PeerID: String] { get }
+    /// Drops every key mapping that resolves to the given (lowercased) Nostr pubkey.
+    func removeNostrKeyMappings(matchingPubkeyHexLowercased hex: String)
     func visibleGeoPeople() -> [GeoPerson]
     func geoParticipantCount(for geohash: String) -> Int
     func removeGeoParticipant(pubkeyHex: String)
@@ -83,12 +88,16 @@ protocol ChatPublicConversationContext: AnyObject {
     func recordContentKey(_ key: String, timestamp: Date)
     /// Pre-renders the message so the formatting cache is warm before display.
     func prewarmMessageFormatting(_ message: BitchatMessage)
+
+    // MARK: Notifications
+    /// Posts the you-were-mentioned local notification.
+    func notifyMention(from sender: String, message: String)
 }
 
 extension ChatViewModel: ChatPublicConversationContext {
     // `messages`, `privateChats`, `unreadPrivateMessages`, `nostrKeyMapping`,
     // `nickname`, `activeChannel`, `currentGeohash`, `geoNicknames`,
-    // `myPeerID`, `isTeleported`, `isBatchingPublic`, `notifyUIChanged()`,
+    // `myPeerID`, `isTeleported`, `notifyUIChanged()`,
     // `geoParticipantCount(for:)`, `isNostrBlocked(pubkeyHexLowercased:)`,
     // `deriveNostrIdentity(forGeohash:)`, and
     // `appendGeohashMessageIfAbsent(_:toGeohash:)` are shared requirements
@@ -179,6 +188,10 @@ extension ChatViewModel: ChatPublicConversationContext {
     func prewarmMessageFormatting(_ message: BitchatMessage) {
         _ = formatMessageAsText(message, colorScheme: currentColorScheme)
     }
+
+    func notifyMention(from sender: String, message: String) {
+        NotificationService.shared.sendMentionNotification(from: sender, message: message)
+    }
 }
 
 @MainActor
@@ -247,9 +260,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             context.unreadPrivateMessages = unread
         }
 
-        for (key, value) in context.nostrKeyMapping where value.lowercased() == hex {
-            context.nostrKeyMapping.removeValue(forKey: key)
-        }
+        context.removeNostrKeyMappings(matchingPubkeyHexLowercased: hex)
 
         addSystemMessage(
             String(
@@ -545,7 +556,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
 
         if isMentioned && message.sender != context.nickname {
             SecureLogger.info("🔔 Mention from \(message.sender)", category: .session)
-            NotificationService.shared.sendMentionNotification(from: message.sender, message: message.content)
+            context.notifyMention(from: message.sender, message: message.content)
         }
     }
 
@@ -616,7 +627,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
     }
 
     func pipelineSetBatchingState(_ pipeline: PublicMessagePipeline, isBatching: Bool) {
-        context.isBatchingPublic = isBatching
+        context.setPublicBatching(isBatching)
     }
 }
 

@@ -2,10 +2,11 @@
 // ChatNostrCoordinatorContextTests.swift
 // bitchatTests
 //
-// Exercises `ChatNostrCoordinator` against a mock `ChatNostrContext` —
-// proving the coordinator works without a `ChatViewModel`, following the
-// `ChatDeliveryCoordinatorContextTests` / `ChatPrivateConversationCoordinatorContextTests`
-// exemplars.
+// Exercises the `ChatNostrCoordinator` facade and its components
+// (`NostrInboundPipeline`, `GeohashSubscriptionManager`, `GeoPresenceTracker`)
+// against a mock `ChatNostrContext` — proving the stack works without a
+// `ChatViewModel`, following the `ChatDeliveryCoordinatorContextTests` /
+// `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
 
 import Testing
@@ -15,8 +16,9 @@ import BitFoundation
 
 // MARK: - Mock Context
 
-/// Lightweight stand-in for `ChatNostrContext` proving that
-/// `ChatNostrCoordinator` is testable without a `ChatViewModel`.
+/// Lightweight stand-in for `ChatNostrContext` (and, via protocol
+/// inheritance, the component contexts) proving that the Nostr stack is
+/// testable without a `ChatViewModel`.
 @MainActor
 private final class MockChatNostrContext: ChatNostrContext {
     // Channel & subscription state
@@ -27,6 +29,16 @@ private final class MockChatNostrContext: ChatNostrContext {
     var geoSamplingSubs: [String: String] = [:]
     var lastGeoNotificationAt: [String: Date] = [:]
     var nostrRelayManager: NostrRelayManager? { nil }
+
+    func setGeoChatSubscriptionID(_ id: String?) { geoSubscriptionID = id }
+    func setGeoDmSubscriptionID(_ id: String?) { geoDmSubscriptionID = id }
+    func addGeoSamplingSub(_ subID: String, forGeohash geohash: String) { geoSamplingSubs[subID] = geohash }
+    func removeGeoSamplingSub(_ subID: String) { geoSamplingSubs.removeValue(forKey: subID) }
+
+    func clearGeoSamplingSubs() -> [String] {
+        defer { geoSamplingSubs.removeAll() }
+        return Array(geoSamplingSubs.keys)
+    }
 
     // Public timeline & pipeline
     var messages: [BitchatMessage] = []
@@ -71,6 +83,7 @@ private final class MockChatNostrContext: ChatNostrContext {
     // Inbound private (geohash DM) payloads
     var selectedPrivateChatPeer: PeerID?
     var nostrKeyMapping: [PeerID: String] = [:]
+    func registerNostrKeyMapping(_ pubkey: String, for peerID: PeerID) { nostrKeyMapping[peerID] = pubkey }
     private(set) var handledPrivateMessages: [(payload: NoisePayload, senderPubkey: String, convKey: PeerID, timestamp: Date)] = []
     private(set) var handledDelivered: [(senderPubkey: String, convKey: PeerID)] = []
     private(set) var handledReadReceipts: [(senderPubkey: String, convKey: PeerID)] = []
@@ -202,6 +215,32 @@ private final class MockChatNostrContext: ChatNostrContext {
     func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {
         geoReadReceipts.append((messageID, recipientHex))
     }
+
+    // Favorites & notifications
+    var favoriteRelationshipsByNoiseKey: [Data: FavoritesPersistenceService.FavoriteRelationship] = [:]
+    private(set) var addedFavorites: [(noiseKey: Data, nostrPublicKey: String?, nickname: String)] = []
+    private(set) var postedLocalNotifications: [(title: String, body: String, identifier: String)] = []
+    private(set) var geohashActivityNotifications: [(geohash: String, bodyPreview: String)] = []
+
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship? {
+        favoriteRelationshipsByNoiseKey[noiseKey]
+    }
+
+    func allFavoriteRelationships() -> [FavoritesPersistenceService.FavoriteRelationship] {
+        Array(favoriteRelationshipsByNoiseKey.values)
+    }
+
+    func addFavorite(noiseKey: Data, nostrPublicKey: String?, nickname: String) {
+        addedFavorites.append((noiseKey, nostrPublicKey, nickname))
+    }
+
+    func postLocalNotification(title: String, body: String, identifier: String) {
+        postedLocalNotifications.append((title, body, identifier))
+    }
+
+    func notifyGeohashActivity(geohash: String, bodyPreview: String) {
+        geohashActivityNotifications.append((geohash, bodyPreview))
+    }
 }
 
 // MARK: - Helpers
@@ -215,14 +254,34 @@ private func drainMainQueue() async {
     }
 }
 
+private func makeFavoriteRelationship(
+    noiseKey: Data,
+    nostrPublicKey: String? = nil,
+    nickname: String = "alice",
+    isFavorite: Bool = false,
+    theyFavoritedUs: Bool = false
+) -> FavoritesPersistenceService.FavoriteRelationship {
+    FavoritesPersistenceService.FavoriteRelationship(
+        peerNoisePublicKey: noiseKey,
+        peerNostrPublicKey: nostrPublicKey,
+        peerNickname: nickname,
+        isFavorite: isFavorite,
+        theyFavoritedUs: theyFavoritedUs,
+        favoritedAt: Date(timeIntervalSince1970: 0),
+        lastUpdated: Date(timeIntervalSince1970: 0)
+    )
+}
+
 // MARK: - Coordinator Tests Against Mock Context
 
 /// Exercises `ChatNostrCoordinator` against `MockChatNostrContext` with no
 /// `ChatViewModel`. Scoped to the inbound event pipeline (dedup, presence,
 /// public-message ingest), gift-wrap DM ingest, key mapping, channel-switch
-/// teardown, and embedded ack flows. Flows that hit live singletons
-/// (`NostrRelayManager.shared` subscriptions, `TorManager`,
-/// `FavoritesPersistenceService`) remain covered by the full view-model tests.
+/// teardown, embedded ack flows, and — now that favorites and notifications
+/// are injected through the context — the favorite-notification ingest and
+/// the sampled-geohash notification cooldown. Flows that hit live singletons
+/// (`NostrRelayManager.shared` subscriptions, `TorManager`) remain covered by
+/// the full view-model tests.
 struct ChatNostrCoordinatorContextTests {
 
     @Test @MainActor
@@ -239,7 +298,7 @@ struct ChatNostrCoordinatorContextTests {
         )
         context.displayNamesByPubkey[event.pubkey] = "alice#1234"
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // Dedup recorded exactly once, presence and key mapping updated.
@@ -257,7 +316,7 @@ struct ChatNostrCoordinatorContextTests {
         #expect(context.hapticMessageIDs == [event.id])
 
         // A replay of the same event is dropped before any processing.
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
         #expect(context.recordedNostrEventIDs == [event.id])
         #expect(context.handledPublicMessages.count == 1)
@@ -277,7 +336,7 @@ struct ChatNostrCoordinatorContextTests {
             teleported: true
         )
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // Teleport detection fires even though the empty message is dropped.
@@ -299,7 +358,7 @@ struct ChatNostrCoordinatorContextTests {
         )
         context.blockedNostrPubkeys.insert(event.pubkey.lowercased())
 
-        coordinator.handleNostrEvent(event)
+        coordinator.inbound.handleNostrEvent(event)
         await drainMainQueue()
 
         // The event is still recorded for dedup but nothing else happens.
@@ -326,7 +385,7 @@ struct ChatNostrCoordinatorContextTests {
             senderIdentity: sender
         )
 
-        coordinator.handleGiftWrap(giftWrap, id: recipient)
+        coordinator.inbound.handleGiftWrap(giftWrap, id: recipient)
 
         let convKey = PeerID(nostr_: sender.publicKeyHex)
         #expect(context.recordedNostrEventIDs == [giftWrap.id])
@@ -343,9 +402,33 @@ struct ChatNostrCoordinatorContextTests {
         #expect(pm.content == "psst")
 
         // The same gift wrap is dropped on replay.
-        coordinator.handleGiftWrap(giftWrap, id: recipient)
+        coordinator.inbound.handleGiftWrap(giftWrap, id: recipient)
         #expect(context.recordedNostrEventIDs == [giftWrap.id])
         #expect(context.handledPrivateMessages.count == 1)
+    }
+
+    @Test @MainActor
+    func processNostrMessage_invalidSignatureDoesNotPoisonDedup() async throws {
+        let context = MockChatNostrContext()
+        let coordinator = ChatNostrCoordinator(context: context)
+
+        let recipient = try NostrIdentity.generate()
+        let sender = try NostrIdentity.generate()
+        let giftWrap = try NostrProtocol.createPrivateMessage(
+            content: "verify:noop",
+            recipientPubkey: recipient.publicKeyHex,
+            senderIdentity: sender
+        )
+        var invalidGiftWrap = giftWrap
+        invalidGiftWrap.sig = String(repeating: "0", count: 128)
+
+        // A forged-signature copy is rejected WITHOUT entering the dedup set...
+        await coordinator.inbound.processNostrMessage(invalidGiftWrap)
+        #expect(context.recordedNostrEventIDs.isEmpty)
+
+        // ...so the genuine event with the same ID still processes and records.
+        await coordinator.inbound.processNostrMessage(giftWrap)
+        #expect(context.recordedNostrEventIDs == [giftWrap.id])
     }
 
     @Test @MainActor
@@ -356,7 +439,7 @@ struct ChatNostrCoordinatorContextTests {
         context.currentGeohash = "u4pruyd"
         context.geoNicknames = ["abcd": "alice"]
 
-        coordinator.switchLocationChannel(to: .mesh)
+        coordinator.subscriptions.switchLocationChannel(to: .mesh)
 
         #expect(context.pipelineResetCount == 1)
         #expect(context.activeChannel == .mesh)
@@ -439,4 +522,180 @@ struct ChatNostrCoordinatorContextTests {
         #expect(coordinator.nostrPubkeyForDisplayName("dave") == "bb22")
         #expect(coordinator.nostrPubkeyForDisplayName("nobody") == nil)
     }
+}
+
+// MARK: - GeoPresenceTracker Tests
+
+/// Focused tests for seams the coordinator split made independently
+/// testable: the sampling-event LRU dedup and the per-geohash notification
+/// cooldown. The cooldown tests stop short of the live notification center by
+/// pre-seeding the timeline append as a duplicate.
+struct GeoPresenceTrackerTests {
+
+    @Test @MainActor
+    func samplingEventDedup_evictsOldestBeyondLRUCap() {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let cap = TransportConfig.geoSamplingEventLRUCap
+
+        // Empty IDs are never deduplicated.
+        #expect(tracker.shouldProcessGeoSamplingEvent(""))
+        #expect(tracker.shouldProcessGeoSamplingEvent(""))
+
+        // First sight passes; a replay is rejected.
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-0"))
+        #expect(!tracker.shouldProcessGeoSamplingEvent("ev-0"))
+
+        // Fill one past the cap: the oldest entry is evicted and accepted
+        // again, while a still-resident entry stays deduplicated.
+        for i in 1...cap {
+            #expect(tracker.shouldProcessGeoSamplingEvent("ev-\(i)"))
+        }
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-0"))
+        #expect(!tracker.shouldProcessGeoSamplingEvent("ev-\(cap)"))
+
+        // Clearing resets the dedup entirely.
+        tracker.clearGeoSamplingEventDedup()
+        #expect(tracker.shouldProcessGeoSamplingEvent("ev-\(cap)"))
+    }
+
+    @Test @MainActor
+    func notificationCooldown_skipsWithinWindow() async throws {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let sender = try NostrIdentity.generate()
+        let event = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "sampled activity",
+            geohash: "9q8yy",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+
+        // Within the cooldown window nothing is appended or re-stamped.
+        let recent = Date()
+        context.lastGeoNotificationAt["9q8yy"] = recent
+        tracker.cooldownPerGeohash("9q8yy", content: "sampled activity", event: event)
+        await drainMainQueue()
+        #expect(context.appendedGeohashMessages.isEmpty)
+        #expect(context.lastGeoNotificationAt["9q8yy"] == recent)
+        #expect(context.synchronizedGeohashes.isEmpty)
+    }
+
+    @Test @MainActor
+    func notificationCooldown_stampsGeohashOnceWindowElapses() async throws {
+        let context = MockChatNostrContext()
+        let tracker = GeoPresenceTracker(context: context)
+        let sender = try NostrIdentity.generate()
+        let event = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "sampled activity",
+            geohash: "9q8yy",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+
+        // Pre-seed the same event ID so the timeline append reports a
+        // duplicate and the flow never reaches the live notification center.
+        let placeholder = BitchatMessage(
+            id: event.id,
+            sender: "seed",
+            content: "seed",
+            timestamp: Date(),
+            isRelay: false
+        )
+        #expect(context.appendGeohashMessageIfAbsent(placeholder, toGeohash: "9q8yy"))
+
+        // Cooldown elapsed: the geohash is re-stamped and the append is
+        // attempted (and rejected as a duplicate, so no store sync either).
+        let stale = Date().addingTimeInterval(-TransportConfig.uiGeoNotifyCooldownSeconds - 1)
+        context.lastGeoNotificationAt["9q8yy"] = stale
+        tracker.cooldownPerGeohash("9q8yy", content: "sampled activity", event: event)
+        await drainMainQueue()
+
+        let stamped = try #require(context.lastGeoNotificationAt["9q8yy"])
+        #expect(stamped > stale)
+        #expect(context.appendedGeohashMessages.count == 1)
+        #expect(context.synchronizedGeohashes.isEmpty)
+    }
+    @Test @MainActor
+    func handleFavoriteNotification_persistsFavoriteAndPostsLocalNotification() async throws {
+        let context = MockChatNostrContext()
+        let coordinator = ChatNostrCoordinator(context: context)
+        let sender = try NostrIdentity.generate()
+        let noiseKey = Data(repeating: 0x42, count: 32)
+        // The favorites store bridges the sender's npub back to a Noise key.
+        context.favoriteRelationshipsByNoiseKey[noiseKey] = makeFavoriteRelationship(
+            noiseKey: noiseKey,
+            nostrPublicKey: sender.npub
+        )
+
+        coordinator.handleFavoriteNotification(content: "FAVORITE:TRUE|alice", from: sender.publicKeyHex)
+
+        #expect(context.addedFavorites.count == 1)
+        #expect(context.addedFavorites.first?.noiseKey == noiseKey)
+        #expect(context.addedFavorites.first?.nostrPublicKey == sender.publicKeyHex)
+        #expect(context.addedFavorites.first?.nickname == "alice")
+        #expect(context.postedLocalNotifications.count == 1)
+        #expect(context.postedLocalNotifications.first?.title == "New Favorite")
+        #expect(context.postedLocalNotifications.first?.body == "alice favorited you")
+
+        // Unfavorite: no store write, but the removal notification still posts.
+        coordinator.handleFavoriteNotification(content: "FAVORITE:FALSE|alice", from: sender.publicKeyHex)
+        #expect(context.addedFavorites.count == 1)
+        #expect(context.postedLocalNotifications.last?.title == "Favorite Removed")
+        #expect(context.postedLocalNotifications.last?.body == "alice unfavorited you")
+    }
+
+    @Test @MainActor
+    func geoPresence_sampledActivityNotificationRespectsPerGeohashCooldown() async throws {
+        let context = MockChatNostrContext()
+        let coordinator = ChatNostrCoordinator(context: context)
+        let sender = try NostrIdentity.generate()
+        context.geoNicknames[sender.publicKeyHex.lowercased()] = "alice"
+
+        let first = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "hello geohash",
+            geohash: "u4pruyd",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+        coordinator.presence.cooldownPerGeohash("u4pruyd", content: "hello geohash", event: first)
+        await drainMainQueue()
+
+        // Sampled message recorded, store synced, and notification posted.
+        #expect(context.appendedGeohashMessages.map(\.message.id) == [first.id])
+        #expect(context.appendedGeohashMessages.first?.message.sender == "alice#" + String(first.pubkey.suffix(4)))
+        #expect(context.synchronizedGeohashes == ["u4pruyd"])
+        #expect(context.geohashActivityNotifications.count == 1)
+        #expect(context.geohashActivityNotifications.first?.geohash == "u4pruyd")
+        #expect(context.geohashActivityNotifications.first?.bodyPreview == "hello geohash")
+        #expect(context.lastGeoNotificationAt["u4pruyd"] != nil)
+
+        // A second sampled event inside the cooldown window is fully suppressed.
+        let second = try NostrProtocol.createEphemeralGeohashEvent(
+            content: "again",
+            geohash: "u4pruyd",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+        coordinator.presence.cooldownPerGeohash("u4pruyd", content: "again", event: second)
+        await drainMainQueue()
+        #expect(context.geohashActivityNotifications.count == 1)
+        #expect(context.appendedGeohashMessages.count == 1)
+
+        // Long previews are truncated to the snippet cap with an ellipsis.
+        let longContent = String(repeating: "x", count: TransportConfig.uiGeoNotifySnippetMaxLen + 20)
+        let third = try NostrProtocol.createEphemeralGeohashEvent(
+            content: longContent,
+            geohash: "9q8yyk",
+            senderIdentity: sender,
+            nickname: "alice"
+        )
+        coordinator.presence.cooldownPerGeohash("9q8yyk", content: longContent, event: third)
+        await drainMainQueue()
+        #expect(
+            context.geohashActivityNotifications.last?.bodyPreview
+                == String(repeating: "x", count: TransportConfig.uiGeoNotifySnippetMaxLen) + "…"
+        )
+    }
+
 }

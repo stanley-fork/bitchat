@@ -2,16 +2,72 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+/// The narrow surface `ChatPeerListCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatPeerListCoordinatorContextTests`) and makes its true
+/// dependencies explicit.
+@MainActor
+protocol ChatPeerListContext: AnyObject {
+    // MARK: Connection & chat state
+    var isConnected: Bool { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    var unreadPrivateMessages: Set<PeerID> { get set }
+    var hasTrackedPrivateChatSelection: Bool { get }
+    func updatePrivateChatPeerIfNeeded()
+    func cleanupOldReadReceipts()
+
+    // MARK: Peers & sessions
+    var unifiedPeers: [BitchatPeer] { get }
+    func isPeerConnected(_ peerID: PeerID) -> Bool
+    func isPeerReachable(_ peerID: PeerID) -> Bool
+    /// Number of mesh peers currently connected or reachable, from the
+    /// transport's live peer snapshots.
+    func activeMeshPeerCount() -> Int
+    func registerEphemeralSession(peerID: PeerID)
+    func updateEncryptionStatusForPeers()
+
+    // MARK: Notifications
+    /// Posts the "bitchatters nearby" local notification.
+    func notifyNetworkAvailable(peerCount: Int)
+}
+
+extension ChatViewModel: ChatPeerListContext {
+    // `isConnected`, `privateChats`, `unreadPrivateMessages`,
+    // `hasTrackedPrivateChatSelection`, `updatePrivateChatPeerIfNeeded()`,
+    // `cleanupOldReadReceipts()`, `unifiedPeers`, `isPeerConnected(_:)`,
+    // `isPeerReachable(_:)`, `registerEphemeralSession(peerID:)`, and
+    // `updateEncryptionStatusForPeers()` are shared requirements with the
+    // other contexts or satisfied by existing `ChatViewModel` members. The
+    // member below flattens the nested transport access into an intent-named
+    // call.
+
+    func activeMeshPeerCount() -> Int {
+        meshService
+            .currentPeerSnapshots()
+            .filter { snapshot in
+                snapshot.isConnected || meshService.isPeerReachable(snapshot.peerID)
+            }
+            .count
+    }
+
+    func notifyNetworkAvailable(peerCount: Int) {
+        NotificationService.shared.sendNetworkAvailableNotification(peerCount: peerCount)
+    }
+}
+
 final class ChatPeerListCoordinator: @unchecked Sendable {
-    private unowned let viewModel: ChatViewModel
+    private unowned let context: any ChatPeerListContext
     private var recentlySeenPeers: Set<PeerID> = []
     private var lastNetworkNotificationTime = Date.distantPast
     private var networkResetTimer: Timer?
     private var networkEmptyTimer: Timer?
     private let networkResetGraceSeconds = TransportConfig.networkResetGraceSeconds
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    init(context: any ChatPeerListContext) {
+        self.context = context
     }
 
     deinit {
@@ -29,23 +85,23 @@ final class ChatPeerListCoordinator: @unchecked Sendable {
 private extension ChatPeerListCoordinator {
     @MainActor
     func handlePeerListUpdate(_ peers: [PeerID]) {
-        viewModel.isConnected = !peers.isEmpty
+        context.isConnected = !peers.isEmpty
         cleanupStaleUnreadPeerIDs()
 
         let meshPeers = peers.filter { peerID in
-            viewModel.meshService.isPeerConnected(peerID) || viewModel.meshService.isPeerReachable(peerID)
+            context.isPeerConnected(peerID) || context.isPeerReachable(peerID)
         }
 
         handleNetworkAvailability(meshPeers)
 
         for peerID in peers {
-            viewModel.identityManager.registerEphemeralSession(peerID: peerID, handshakeState: .none)
+            context.registerEphemeralSession(peerID: peerID)
         }
 
-        viewModel.updateEncryptionStatusForPeers()
+        context.updateEncryptionStatusForPeers()
 
-        if viewModel.hasTrackedPrivateChatSelection {
-            viewModel.updatePrivateChatPeerIfNeeded()
+        if context.hasTrackedPrivateChatSelection {
+            context.updatePrivateChatPeerIfNeeded()
         }
     }
 
@@ -67,7 +123,7 @@ private extension ChatPeerListCoordinator {
         if Date().timeIntervalSince(lastNetworkNotificationTime) >= cooldown {
             recentlySeenPeers.formUnion(newPeers)
             lastNetworkNotificationTime = Date()
-            NotificationService.shared.sendNetworkAvailableNotification(peerCount: meshPeers.count)
+            context.notifyNetworkAvailable(peerCount: meshPeers.count)
             SecureLogger.info(
                 "👥 Sent bitchatters nearby notification for \(meshPeers.count) mesh peers (new: \(newPeers.count))",
                 category: .session
@@ -79,34 +135,34 @@ private extension ChatPeerListCoordinator {
 
     @MainActor
     func cleanupStaleUnreadPeerIDs() {
-        let currentPeerIDs = Set(viewModel.unifiedPeerService.peers.map(\.peerID))
-        let staleIDs = viewModel.unreadPrivateMessages.subtracting(currentPeerIDs)
+        let currentPeerIDs = Set(context.unifiedPeers.map(\.peerID))
+        let staleIDs = context.unreadPrivateMessages.subtracting(currentPeerIDs)
 
         guard !staleIDs.isEmpty else {
-            viewModel.cleanupOldReadReceipts()
+            context.cleanupOldReadReceipts()
             return
         }
 
         var idsToRemove: [PeerID] = []
 
         for staleID in staleIDs {
-            if staleID.isGeoDM, let messages = viewModel.privateChats[staleID], !messages.isEmpty {
+            if staleID.isGeoDM, let messages = context.privateChats[staleID], !messages.isEmpty {
                 continue
             }
 
-            if staleID.isNoiseKeyHex, let messages = viewModel.privateChats[staleID], !messages.isEmpty {
+            if staleID.isNoiseKeyHex, let messages = context.privateChats[staleID], !messages.isEmpty {
                 continue
             }
 
             idsToRemove.append(staleID)
-            viewModel.unreadPrivateMessages.remove(staleID)
+            context.unreadPrivateMessages.remove(staleID)
         }
 
         if !idsToRemove.isEmpty {
             SecureLogger.debug("🧹 Cleaned up \(idsToRemove.count) stale unread peer IDs", category: .session)
         }
 
-        viewModel.cleanupOldReadReceipts()
+        context.cleanupOldReadReceipts()
     }
 
     @MainActor
@@ -121,18 +177,14 @@ private extension ChatPeerListCoordinator {
 
     @MainActor
     func handleNetworkResetTimerFired() {
-        let activeMeshPeers = viewModel.meshService
-            .currentPeerSnapshots()
-            .filter { snapshot in
-                snapshot.isConnected || viewModel.meshService.isPeerReachable(snapshot.peerID)
-            }
+        let activeMeshPeerCount = context.activeMeshPeerCount()
 
-        if activeMeshPeers.isEmpty {
+        if activeMeshPeerCount == 0 {
             recentlySeenPeers.removeAll()
             SecureLogger.debug("⏱️ Network notification window reset after quiet period", category: .session)
         } else {
             SecureLogger.debug(
-                "⏱️ Skipped network notification reset; still seeing \(activeMeshPeers.count) mesh peers",
+                "⏱️ Skipped network notification reset; still seeing \(activeMeshPeerCount) mesh peers",
                 category: .session
             )
         }
@@ -165,18 +217,14 @@ private extension ChatPeerListCoordinator {
 
     @MainActor
     func handleNetworkEmptyTimerFired() {
-        let activeMeshPeers = viewModel.meshService
-            .currentPeerSnapshots()
-            .filter { snapshot in
-                snapshot.isConnected || viewModel.meshService.isPeerReachable(snapshot.peerID)
-            }
+        let activeMeshPeerCount = context.activeMeshPeerCount()
 
-        if activeMeshPeers.isEmpty {
+        if activeMeshPeerCount == 0 {
             recentlySeenPeers.removeAll()
             SecureLogger.debug("⏳ Mesh empty — notification state reset after confirmation", category: .session)
         } else {
             SecureLogger.debug(
-                "⏳ Mesh empty timer cancelled; \(activeMeshPeers.count) mesh peers detected again",
+                "⏳ Mesh empty timer cancelled; \(activeMeshPeerCount) mesh peers detected again",
                 category: .session
             )
         }

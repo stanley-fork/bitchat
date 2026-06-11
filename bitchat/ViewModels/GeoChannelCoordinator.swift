@@ -9,15 +9,32 @@ import Combine
 import Foundation
 import Tor
 
+/// The narrow surface `GeoChannelCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of capturing `ChatViewModel` in
+/// per-callback closures. This keeps the coordinator independently testable
+/// (see `GeoChannelCoordinatorContextTests`) and makes its true dependencies
+/// explicit. Held `weak` — the owner retains the coordinator, and every
+/// callback was previously a `[weak viewModel]` capture.
+@MainActor
+protocol GeoChannelContext: AnyObject {
+    func switchLocationChannel(to channel: ChannelID)
+    func beginGeohashSampling(for geohashes: [String])
+    func endGeohashSampling()
+}
+
+// `switchLocationChannel(to:)`, `beginGeohashSampling(for:)`, and
+// `endGeohashSampling()` are satisfied by existing `ChatViewModel` members.
+extension ChatViewModel: GeoChannelContext {}
+
 @MainActor
 final class GeoChannelCoordinator {
     private let locationManager: LocationChannelManager
     private let bookmarksStore: GeohashBookmarksStore
     private let torManager: TorManager
 
-    private let onChannelSwitch: (ChannelID) -> Void
-    private let beginSampling: ([String]) -> Void
-    private let endSampling: () -> Void
+    private weak var context: (any GeoChannelContext)?
 
     private var cancellables = Set<AnyCancellable>()
     private var regionalGeohashes: [String] = []
@@ -27,16 +44,12 @@ final class GeoChannelCoordinator {
         locationManager: LocationChannelManager? = nil,
         bookmarksStore: GeohashBookmarksStore? = nil,
         torManager: TorManager? = nil,
-        onChannelSwitch: @escaping (ChannelID) -> Void,
-        beginSampling: @escaping ([String]) -> Void,
-        endSampling: @escaping () -> Void
+        context: any GeoChannelContext
     ) {
         self.locationManager = locationManager ?? Self.defaultLocationManager()
         self.bookmarksStore = bookmarksStore ?? GeohashBookmarksStore.shared
         self.torManager = torManager ?? Self.defaultTorManager()
-        self.onChannelSwitch = onChannelSwitch
-        self.beginSampling = beginSampling
-        self.endSampling = endSampling
+        self.context = context
 
         start()
     }
@@ -50,7 +63,7 @@ final class GeoChannelCoordinator {
             .sink { [weak self] channel in
                 guard let self else { return }
                 Task { @MainActor in
-                    self.onChannelSwitch(channel)
+                    self.context?.switchLocationChannel(to: channel)
                 }
             }
             .store(in: &cancellables)
@@ -84,7 +97,7 @@ final class GeoChannelCoordinator {
             .store(in: &cancellables)
 
         Task { @MainActor in
-            self.onChannelSwitch(self.locationManager.selectedChannel)
+            self.context?.switchLocationChannel(to: self.locationManager.selectedChannel)
         }
         updateSampling()
     }
@@ -93,13 +106,13 @@ final class GeoChannelCoordinator {
         let union = Array(Set(regionalGeohashes).union(bookmarkedGeohashes))
         Task { @MainActor in
             guard !union.isEmpty else {
-                endSampling()
+                context?.endGeohashSampling()
                 return
             }
             if torManager.isForeground() {
-                beginSampling(union)
+                context?.beginGeohashSampling(for: union)
             } else {
-                endSampling()
+                context?.endGeohashSampling()
             }
         }
     }
