@@ -317,13 +317,20 @@ final class BLEService: NSObject {
         }
         disconnectNotifyDebouncer.removeAll()
 
-        noiseService.clearEphemeralStateForPanic()
-        noiseService.clearPersistentIdentity()
+        // The crypto-service replacement and the derived identity swap must be
+        // one atomic unit with respect to messageQueue senders: a queued send
+        // must never observe the new Noise service alongside the old peer ID
+        // (it would sign with the new identity while carrying the old sender).
+        // refreshPeerIdentity() executes inline here via its re-entrancy check.
+        messageQueue.sync(flags: .barrier) {
+            noiseService.clearEphemeralStateForPanic()
+            noiseService.clearPersistentIdentity()
 
-        let newNoise = NoiseEncryptionService(keychain: keychain)
-        noiseService = newNoise
-        configureNoiseServiceCallbacks(for: newNoise)
-        refreshPeerIdentity()
+            let newNoise = NoiseEncryptionService(keychain: keychain)
+            noiseService = newNoise
+            configureNoiseServiceCallbacks(for: newNoise)
+            refreshPeerIdentity()
+        }
         restartGossipManager()
 
         setNickname(currentNickname)
