@@ -45,9 +45,9 @@ protocol ChatPeerIdentityContext: AnyObject {
     /// `peerID`'s chat. (Single mutation path into the owner's
     /// `sentReadReceipts`; this coordinator never touches the raw set.)
     func syncReadReceiptsForSentMessages(for peerID: PeerID)
-    /// Re-targets the private chat session in the chat manager (no store-sync side effects).
+    /// Re-targets the private chat session: selection mutates through the
+    /// `ConversationStore` intent (the store owns selection).
     func beginPrivateChatSession(with peerID: PeerID)
-    func synchronizeConversationSelectionStore()
     func markPrivateMessagesAsRead(from peerID: PeerID)
 
     // MARK: Unified peer service
@@ -154,15 +154,19 @@ extension ChatViewModel: ChatPeerIdentityContext {
     }
 
     func hasEstablishedNoiseSession(with peerID: PeerID) -> Bool {
-        meshService.getNoiseService().hasEstablishedSession(with: peerID)
+        if case .established = meshService.getNoiseSessionState(for: peerID) { return true }
+        return false
     }
 
     func hasNoiseSession(with peerID: PeerID) -> Bool {
-        meshService.getNoiseService().hasSession(with: peerID)
+        switch meshService.getNoiseSessionState(for: peerID) {
+        case .established, .handshaking: return true
+        case .none, .handshakeQueued, .failed: return false
+        }
     }
 
     func noiseIdentityFingerprint() -> String {
-        meshService.getNoiseService().getIdentityFingerprint()
+        meshService.noiseIdentityFingerprint()
     }
 
     func setStoredFingerprint(_ fingerprint: String, for peerID: PeerID) {
@@ -372,7 +376,6 @@ final class ChatPeerIdentityCoordinator {
             context.selectedPrivateChatFingerprint = nil
         }
         context.beginPrivateChatSession(with: peerID)
-        context.synchronizeConversationSelectionStore()
         context.markPrivateMessagesAsRead(from: peerID)
     }
 
@@ -564,7 +567,11 @@ private extension ChatPeerIdentityCoordinator {
 
     @MainActor
     func migrateNoiseKeyUpdate(oldPeerID: PeerID, newPeerID: PeerID) {
-        if context.selectedPrivateChatPeer == oldPeerID {
+        // Capture before the migration: the store hands its selection off to
+        // `newPeerID` during `migrateChatState`, and the manager's selection
+        // mirrors the store, so the old peer ID is no longer selected after.
+        let wasSelected = context.selectedPrivateChatPeer == oldPeerID
+        if wasSelected {
             SecureLogger.info("📱 Updating private chat peer ID due to key change: \(oldPeerID) -> \(newPeerID)", category: .session)
         } else if !context.privateMessages(for: oldPeerID).isEmpty {
             SecureLogger.debug("📱 Migrating private chat messages from \(oldPeerID) to \(newPeerID)", category: .session)
@@ -572,7 +579,7 @@ private extension ChatPeerIdentityCoordinator {
 
         migrateChatState(from: oldPeerID, to: newPeerID)
 
-        if context.selectedPrivateChatPeer == oldPeerID {
+        if wasSelected {
             context.selectedPrivateChatPeer = newPeerID
         }
 

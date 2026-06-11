@@ -34,7 +34,17 @@ final class FavoritesPersistenceService: ObservableObject {
     
     static let shared = FavoritesPersistenceService()
 
-    init(keychain: KeychainManagerProtocol = KeychainManager()) {
+    /// Default keychain for the `shared` singleton. Under test this is an
+    /// in-memory keychain so touching `shared` never blocks on securityd
+    /// (`SecItemCopyMatching` can hang in test environments) and never reads
+    /// or writes the developer's real keychain. Production behavior is
+    /// unchanged. Tests that need their own instance keep injecting a mock
+    /// via `init(keychain:)`.
+    private nonisolated static func makeDefaultKeychain() -> KeychainManagerProtocol {
+        TestEnvironment.isRunningTests ? PreviewKeychainManager() : KeychainManager()
+    }
+
+    init(keychain: KeychainManagerProtocol = FavoritesPersistenceService.makeDefaultKeychain()) {
         self.keychain = keychain
         loadFavorites()
         

@@ -66,7 +66,6 @@ private final class MockChatPeerIdentityContext: ChatPeerIdentityContext {
     private(set) var consolidatedPeers: [(peerID: PeerID, peerNickname: String)] = []
     private(set) var syncedReadReceiptPeers: [PeerID] = []
     private(set) var begunChatSessions: [PeerID] = []
-    private(set) var selectionStoreSyncCount = 0
     private(set) var markedReadPeers: [PeerID] = []
 
     @discardableResult
@@ -83,7 +82,6 @@ private final class MockChatPeerIdentityContext: ChatPeerIdentityContext {
         begunChatSessions.append(peerID)
     }
 
-    func synchronizeConversationSelectionStore() { selectionStoreSyncCount += 1 }
     func markPrivateMessagesAsRead(from peerID: PeerID) { markedReadPeers.append(peerID) }
 
     // Unified peer service
@@ -283,7 +281,6 @@ struct ChatPeerIdentityCoordinatorContextTests {
         #expect(context.storedFingerprints.map(\.fingerprint) == ["fp-alice"])
         #expect(context.selectedPrivateChatFingerprint == "fp-alice")
         #expect(context.begunChatSessions == [peerID])
-        #expect(context.selectionStoreSyncCount == 1)
         #expect(context.markedReadPeers == [peerID])
 
         // Established session: no second handshake.

@@ -34,9 +34,7 @@ final class MockBLEService: NSObject {
     weak var delegate: BitchatDelegate?
     var myPeerID = PeerID(str: "MOCK1234")
     var myNickname: String = "MockUser"
-    
-    private let mockKeychain = MockKeychain()
-    
+
     // Test-specific properties
     var sentMessages: [(message: BitchatMessage, packet: BitchatPacket)] = []
     var sentPackets: [BitchatPacket] = []
@@ -238,10 +236,6 @@ final class MockBLEService: NSObject {
     func emergencyDisconnectAll() {
         connectedPeers.removeAll()
         delegate?.didUpdatePeerList([])
-    }
-    
-    func getNoiseService() -> NoiseEncryptionService {
-        return NoiseEncryptionService(keychain: mockKeychain)
     }
     
     func getFingerprint(for peerID: String) -> String? {

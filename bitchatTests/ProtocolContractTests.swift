@@ -21,7 +21,6 @@ private final class DefaultTransportProbe: Transport {
     let subject = CurrentValueSubject<[TransportPeerSnapshot], Never>([])
     let myPeerID = PeerID(str: "0011223344556677")
     var myNickname = "Tester"
-    private let keychain = MockKeychain()
     private(set) var sentMessages: [(content: String, mentions: [String])] = []
 
     var peerSnapshotPublisher: AnyPublisher<[TransportPeerSnapshot], Never> {
@@ -40,7 +39,6 @@ private final class DefaultTransportProbe: Transport {
     func getFingerprint(for peerID: PeerID) -> String? { nil }
     func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState { .none }
     func triggerHandshake(with peerID: PeerID) {}
-    func getNoiseService() -> NoiseEncryptionService { NoiseEncryptionService(keychain: keychain) }
     func sendMessage(_ content: String, mentions: [String]) { sentMessages.append((content, mentions)) }
     func sendPrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String) {}
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {}

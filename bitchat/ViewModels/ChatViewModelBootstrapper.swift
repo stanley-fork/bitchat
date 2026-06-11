@@ -78,6 +78,33 @@ private extension ChatViewModelBootstrapper {
         viewModel.privateChatManager.messageRouter = viewModel.messageRouter
         viewModel.privateChatManager.unifiedPeerService = viewModel.unifiedPeerService
         viewModel.unifiedPeerService.messageRouter = viewModel.messageRouter
+        // Surface silent outbox drops (attempt cap, TTL expiry, overflow
+        // eviction) as a visible failure. The store's no-downgrade rule does
+        // not cover `.failed` over confirmed receipts, so guard here: a drop
+        // of an already-delivered/read message (e.g. a stale retained copy)
+        // must not downgrade its status.
+        viewModel.messageRouter.onMessageDropped = { [weak viewModel] messageID, peerID in
+            guard let viewModel else { return }
+            switch viewModel.conversations.deliveryStatus(forMessageID: messageID) {
+            case .delivered, .read:
+                // Field proof of the no-downgrade guard: the drop arrived
+                // after a confirmed receipt, so the `.failed` write is
+                // deliberately skipped.
+                SecureLogger.warning(
+                    "📤 Router dropped message \(messageID.prefix(8))… for \(peerID.id.prefix(8))… → .failed skipped (already delivered/read)",
+                    category: .session
+                )
+            default:
+                SecureLogger.warning(
+                    "📤 Router dropped message \(messageID.prefix(8))… for \(peerID.id.prefix(8))… → marked failed",
+                    category: .session
+                )
+                viewModel.conversations.setDeliveryStatus(
+                    .failed(reason: "Not delivered"),
+                    forMessageID: messageID
+                )
+            }
+        }
         viewModel.commandProcessor.contextProvider = viewModel
         viewModel.commandProcessor.meshService = viewModel.meshService
         viewModel.participantTracker.configure(context: viewModel)
@@ -91,17 +118,9 @@ private extension ChatViewModelBootstrapper {
             .store(in: &viewModel.cancellables)
 
         // Private message state flows through the single-writer
-        // `ConversationStore` intents and its `changes` subject; only the
-        // selection still originates in `PrivateChatManager`.
-        viewModel.privateChatManager.$selectedPeer
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.synchronizeConversationSelectionStore()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
+        // `ConversationStore` intents and its `changes` subject; selection
+        // is owned by the store too (`PrivateChatManager.selectedPeer` is a
+        // read-only mirror), so no selection bridge is needed here.
         viewModel.participantTracker.objectWillChange
             .sink { [weak viewModel] _ in
                 viewModel?.objectWillChange.send()
@@ -175,8 +194,6 @@ private extension ChatViewModelBootstrapper {
                     if viewModel.hasTrackedPrivateChatSelection {
                         viewModel.updatePrivateChatPeerIfNeeded()
                     }
-
-                    viewModel.synchronizeConversationSelectionStore()
                 }
             }
             .store(in: &viewModel.cancellables)

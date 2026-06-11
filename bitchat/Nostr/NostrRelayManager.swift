@@ -66,6 +66,9 @@ struct NostrRelayManagerDependencies {
     var makeSession: () -> NostrRelaySessionProtocol
     var scheduleAfter: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
     var now: () -> Date
+    /// Uniform random value in [0, 1) used to jitter reconnect backoff.
+    /// Injectable so tests can pin or sweep the jitter deterministically.
+    var jitterUnit: () -> Double
 }
 
 private extension NostrRelayManagerDependencies {
@@ -93,7 +96,8 @@ private extension NostrRelayManagerDependencies {
             scheduleAfter: { delay, action in
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
             },
-            now: Date.init
+            now: Date.init,
+            jitterUnit: { Double.random(in: 0..<1) }
         )
     }
 }
@@ -140,7 +144,16 @@ final class NostrRelayManager: ObservableObject {
     private var hasLocationPermission: Bool = false
     private var connections: [String: NostrRelayConnectionProtocol] = [:]
     private var subscriptions: [String: Set<String>] = [:] // relay URL -> active subscription IDs
-    private var pendingSubscriptions: [String: [String: String]] = [:] // relay URL -> (subscription id -> encoded REQ JSON)
+    // Not-yet-flushed REQs per relay, bounded by a per-relay cap (oldest by
+    // insertion order evicted) and an age sweep on connect attempts. Dicts are
+    // unordered, so each entry carries an insertion sequence and queue time.
+    private struct PendingSubscription {
+        let messageString: String // encoded REQ JSON
+        let queuedAt: Date
+        let sequence: UInt64
+    }
+    private var pendingSubscriptions: [String: [String: PendingSubscription]] = [:] // relay URL -> (subscription id -> pending REQ)
+    private var pendingSubscriptionSequence: UInt64 = 0
     private var messageHandlers: [String: (NostrEvent) -> Void] = [:]
     private struct InboundEventKey: Hashable {
         let subscriptionID: String
@@ -185,6 +198,9 @@ final class NostrRelayManager: ObservableObject {
     }
     private var messageQueue: [PendingSend] = []
     private let messageQueueLock = NSLock()
+    // Total pending sends dropped at the queue cap; drives the sampled
+    // overflow warning (first + every Nth drop).
+    private var pendingSendDropCount = 0
     private let encoder = JSONEncoder()
     private var shouldUseTor: Bool { dependencies.userTorEnabled() }
     
@@ -339,6 +355,18 @@ final class NostrRelayManager: ObservableObject {
             messageQueue.removeFirst(overflow)
         }
         messageQueueLock.unlock()
+        guard overflow > 0 else { return }
+        // Dropped events are ephemeral (presence/geo), so no status surfacing
+        // is needed — but the drops should be visible. Sampled so a sustained
+        // relay stall can't flood the log.
+        pendingSendDropCount += overflow
+        if pendingSendDropCount == 1 ||
+            pendingSendDropCount.isMultiple(of: TransportConfig.nostrPendingSendDropLogInterval) {
+            SecureLogger.warning(
+                "📤 Relay send queue full — dropped \(pendingSendDropCount) oldest event(s)",
+                category: .session
+            )
+        }
     }
 
     /// Try to flush any queued messages for relays that are now connected.
@@ -432,16 +460,14 @@ final class NostrRelayManager: ObservableObject {
                 existingSet.insert(url)
             }
             for url in urls {
-                var map = self.pendingSubscriptions[url] ?? [:]
-                map[id] = messageString
-                self.pendingSubscriptions[url] = map
+                queuePendingSubscription(id: id, messageString: messageString, for: url)
             }
             // Initialize EOSE tracking if requested
             if let onEOSE = onEOSE {
                 if urls.isEmpty {
                     onEOSE()
                 } else if shouldWaitForTorBeforeConnecting {
-                    pendingEOSECallbacks[id] = onEOSE
+                    parkEOSECallbackUntilTorReady(id: id, callback: onEOSE)
                 } else {
                     startEOSETracking(id: id, relayURLs: Set(urls), callback: onEOSE)
                 }
@@ -550,6 +576,7 @@ final class NostrRelayManager: ObservableObject {
 
     private func connectToRelays(_ relayUrls: [String], shouldLog: Bool = false) {
         guard dependencies.activationAllowed() else { return }
+        sweepStalePendingSubscriptions()
         let targets = allowedRelayList(from: relayUrls).filter {
             connections[$0] == nil && !isPermanentlyFailed($0)
         }
@@ -611,6 +638,31 @@ final class NostrRelayManager: ObservableObject {
         }
     }
 
+    /// Park an EOSE callback while Tor is not yet ready, and schedule the same
+    /// fallback timeout `startEOSETracking` uses. Without it, a parked callback
+    /// would only be unblocked by Tor-readiness retry exhaustion (several
+    /// awaitReady timeouts, i.e. minutes), leaving callers hanging far past the
+    /// normal EOSE fallback. If Tor recovers first the callback is promoted to
+    /// a real EOSE tracker (`startPendingEOSETrackingIfNeeded`), and if retry
+    /// exhaustion fires first it is drained by `unblockPendingEOSECallbacks`;
+    /// either way it leaves `pendingEOSECallbacks` and this timer is a no-op.
+    private func parkEOSECallbackUntilTorReady(id: String, callback: @escaping () -> Void) {
+        pendingEOSECallbacks[id] = callback
+        let generation = connectionGeneration
+        dependencies.scheduleAfter(TransportConfig.nostrSubscriptionEOSEFallbackSeconds) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Stale timers from a previous connection generation are void.
+                guard generation == self.connectionGeneration else { return }
+                // Already fired (unsubscribe, retry-exhaustion unblock) or
+                // promoted to a real EOSE tracker: nothing to do.
+                guard let callback = self.pendingEOSECallbacks.removeValue(forKey: id) else { return }
+                SecureLogger.warning("Unblocking Tor-parked EOSE callback for \(id) after fallback timeout", category: .session)
+                callback()
+            }
+        }
+    }
+
     /// Fire and clear all EOSE callbacks that are parked waiting for Tor.
     /// Callers treat EOSE as "initial fetch finished"; firing with no data is
     /// safe and prevents indefinite hangs when Tor cannot bootstrap.
@@ -627,8 +679,57 @@ final class NostrRelayManager: ObservableObject {
     private func subscriptionStateExists(id: String, requestState: SubscriptionRequestState) -> Bool {
         guard !requestState.relayURLs.isEmpty else { return true }
         return requestState.relayURLs.allSatisfy { url in
-            pendingSubscriptions[url]?[id] == requestState.messageString ||
+            pendingSubscriptions[url]?[id]?.messageString == requestState.messageString ||
                 subscriptions[url]?.contains(id) == true
+        }
+    }
+
+    private func queuePendingSubscription(id: String, messageString: String, for url: String) {
+        var map = pendingSubscriptions[url] ?? [:]
+        pendingSubscriptionSequence &+= 1
+        map[id] = PendingSubscription(
+            messageString: messageString,
+            queuedAt: dependencies.now(),
+            sequence: pendingSubscriptionSequence
+        )
+        // Bound per-relay pending REQs; evict oldest by insertion order. The
+        // durable intent stays in subscriptionRequestState, so an evicted REQ
+        // is still replayed if its subscription is active when the relay
+        // (re)connects.
+        var evictedCount = 0
+        while map.count > TransportConfig.nostrPendingSubscriptionsPerRelayCap,
+              let oldest = map.min(by: { $0.value.sequence < $1.value.sequence }) {
+            map.removeValue(forKey: oldest.key)
+            evictedCount += 1
+        }
+        if evictedCount > 0 {
+            // Bounds proof: the cap eviction actually removed entries.
+            SecureLogger.warning(
+                "📋 Evicted \(evictedCount) pending sub(s) over cap for \(url)",
+                category: .session
+            )
+        }
+        pendingSubscriptions[url] = map
+    }
+
+    /// Drop pending REQs older than the TTL. Runs on connect attempts (the
+    /// natural maintenance path: connect/ensureConnections/reconnects all
+    /// funnel through connectToRelays) so stale entries for relays that never
+    /// come up cannot accumulate without bound.
+    private func sweepStalePendingSubscriptions() {
+        let now = dependencies.now()
+        for (url, map) in pendingSubscriptions {
+            let fresh = map.filter {
+                now.timeIntervalSince($0.value.queuedAt) <= TransportConfig.nostrPendingSubscriptionTTLSeconds
+            }
+            guard fresh.count != map.count else { continue }
+            // Bounds proof: the age sweep actually removed entries. Warning
+            // (not debug) — stale pending REQs mean a relay never came up.
+            SecureLogger.warning(
+                "📋 Swept \(map.count - fresh.count) stale pending sub(s) for \(url)",
+                category: .session
+            )
+            pendingSubscriptions[url] = fresh.isEmpty ? nil : fresh
         }
     }
 
@@ -770,7 +871,7 @@ final class NostrRelayManager: ObservableObject {
     /// active subscription targeting this relay must be re-sent.
     private func flushPendingSubscriptions(for relayUrl: String) {
         guard let connection = connections[relayUrl] else { return }
-        var toSend = pendingSubscriptions[relayUrl] ?? [:]
+        var toSend = (pendingSubscriptions[relayUrl] ?? [:]).mapValues(\.messageString)
         for (id, state) in subscriptionRequestState where state.relayURLs.contains(relayUrl) && toSend[id] == nil {
             toSend[id] = state.messageString
         }
@@ -987,16 +1088,26 @@ final class NostrRelayManager: ObservableObject {
             return
         }
         
-        // Calculate backoff interval
-        let backoffInterval = min(
+        // Calculate backoff interval with ±jitterRatio random jitter so relays
+        // that dropped together don't all reconnect at the same instant.
+        let baseBackoffInterval = min(
             initialBackoffInterval * pow(backoffMultiplier, Double(relays[index].reconnectAttempts - 1)),
             maxBackoffInterval
         )
-        
+        let jitterRatio = TransportConfig.nostrRelayBackoffJitterRatio
+        let jitterFactor = 1.0 + (dependencies.jitterUnit() * 2.0 - 1.0) * jitterRatio
+        let backoffInterval = baseBackoffInterval * jitterFactor
+
         let nextReconnectTime = dependencies.now().addingTimeInterval(backoffInterval)
         relays[index].nextReconnectTime = nextReconnectTime
-        
-        
+
+        // Reconnects are bounded by maxReconnectAttempts and exponentially
+        // backed off, so this is low-frequency: plain debug, no sampling.
+        SecureLogger.debug(
+            "🔄 Reconnect \(relayUrl) in \(String(format: "%.1f", backoffInterval))s (base \(String(format: "%.1f", baseBackoffInterval))s, attempt \(relays[index].reconnectAttempts)/\(maxReconnectAttempts))",
+            category: .session
+        )
+
         // Schedule reconnection with exponential backoff
         let gen = connectionGeneration
         dependencies.scheduleAfter(backoffInterval) { [weak self] in
@@ -1052,6 +1163,11 @@ final class NostrRelayManager: ObservableObject {
 
     func debugPendingSubscriptionCount(for relayUrl: String) -> Int {
         pendingSubscriptions[relayUrl]?.count ?? 0
+    }
+
+    func debugPendingSubscriptionIDs(for relayUrl: String) -> Set<String> {
+        guard let map = pendingSubscriptions[relayUrl] else { return [] }
+        return Set(map.keys)
     }
 
     var debugDuplicateInboundEventDropCount: Int {

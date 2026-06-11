@@ -142,17 +142,9 @@ final class NostrTransport: Transport, @unchecked Sendable {
     func getFingerprint(for peerID: PeerID) -> String? { nil }
     func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState { .none }
     func triggerHandshake(with peerID: PeerID) { /* no-op */ }
-    
-    // Nostr does not use Noise sessions here; return a cached placeholder to avoid reallocation
-    private static var cachedNoiseService: NoiseEncryptionService?
-    func getNoiseService() -> NoiseEncryptionService {
-        if let noiseService = Self.cachedNoiseService {
-            return noiseService
-        }
-        let noiseService = NoiseEncryptionService(keychain: keychain)
-        Self.cachedNoiseService = noiseService
-        return noiseService
-    }
+
+    // Nostr does not use Noise sessions here; the inert Transport defaults
+    // for the noise* identity hooks apply.
 
     // Public broadcast not supported over Nostr here
     func sendMessage(_ content: String, mentions: [String]) { /* no-op */ }

@@ -10,6 +10,9 @@ jobs:
   test:
     name: Run Swift Tests (${{ matrix.name }})
     runs-on: macos-latest
+    # A hung test must fail fast, not hold a runner for GitHub's 360-minute
+    # default (observed: intermittent app-suite hangs starving the queue).
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false # Don't cancel other matrix jobs when one fails
@@ -39,7 +42,29 @@ jobs:
             ${{ runner.os }}-${{ matrix.name }}-
 
       - name: Run Tests
+        # Perf benchmarks are excluded here and run in their own serial step
+        # below: measuring while parallel test processes contend for cores
+        # produces noisy numbers, and the XCTest measure machinery has hung
+        # intermittently under parallel workers on loaded runners.
+        env:
+          BITCHAT_SKIP_PERF_BASELINES: "1"
         run: swift test --parallel --quiet --enable-code-coverage --package-path ${{ matrix.path }}
+
+      # Benchmarks run serially on an otherwise idle runner for stable
+      # numbers; BITCHAT_PERF_LOG captures the PERF[...] lines for the gate.
+      - name: Run performance benchmarks (serial)
+        if: matrix.name == 'app'
+        timeout-minutes: 6
+        env:
+          BITCHAT_PERF_LOG: ${{ github.workspace }}/perf-output.log
+        run: swift test --quiet --filter PerformanceBaselineTests
+
+      # Order-of-magnitude performance regression gate. Floors are deliberately
+      # generous (see bitchatTests/Performance/perf-floors.json) so this
+      # catches algorithmic regressions, never runner variance.
+      - name: Performance floor gate
+        if: matrix.name == 'app'
+        run: ./scripts/check-perf-floors.sh perf-output.log
 
       # Informational only: surfaces per-file and total line coverage in the
       # job log so coverage trends are visible on every PR. No thresholds —
@@ -62,6 +87,7 @@ jobs:
   ios-build:
     name: Build iOS app (simulator)
     runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code

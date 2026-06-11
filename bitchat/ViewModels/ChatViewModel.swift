@@ -204,7 +204,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             } else {
                 privateChatManager.endChat()
             }
-            synchronizeConversationSelectionStore()
         }
     }
     /// Read-only derived view of the store's unread direct conversations.
@@ -243,7 +242,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         if let mapped = peerIdentityStore.stablePeerID(forShortID: shortPeerID) { return mapped }
         // Fallback: derive from active Noise session if available
         if shortPeerID.id.count == 16,
-           let key = meshService.getNoiseService().getPeerPublicKeyData(shortPeerID) {
+           let key = meshService.noiseSessionPublicKeyData(for: shortPeerID) {
             let stable = PeerID(hexData: key)
             peerIdentityStore.setStablePeerID(stable, forShortID: shortPeerID)
             return stable
@@ -407,6 +406,23 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // Single-writer: mutate only via `setPublicBatching(_:)` below.
     @Published private(set) var isBatchingPublic: Bool = false
 
+    // Backing store for `sentReadReceipts` persistence. `.standard` in
+    // production; injectable so tests can use a scratch suite that does not
+    // leak state between runs.
+    let readReceiptsDefaults: UserDefaults
+
+    /// Default read-receipt persistence store. Production uses `.standard`.
+    /// Under test, a dedicated scratch suite is used instead — wiped at first
+    /// use per process — so back-to-back local test runs never see each
+    /// other's persisted receipts (and tests never pollute `.standard`).
+    static let defaultReadReceiptsDefaults: UserDefaults = {
+        guard TestEnvironment.isRunningTests else { return .standard }
+        let suiteName = "chat.bitchat.tests.readReceipts"
+        guard let scratch = UserDefaults(suiteName: suiteName) else { return .standard }
+        scratch.removePersistentDomain(forName: suiteName)
+        return scratch
+    }()
+
     // Track sent read receipts to avoid duplicates (persisted across launches)
     // Note: Persistence happens automatically in didSet, no lifecycle observers needed
     var sentReadReceipts: Set<String> = [] {  // messageID set
@@ -414,9 +430,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             // Only persist if there are changes
             guard oldValue != sentReadReceipts else { return }
 
-            // Persist to UserDefaults whenever it changes (no manual synchronize/verify re-read)
+            // Persist whenever it changes (no manual synchronize/verify re-read)
             if let data = try? JSONEncoder().encode(Array(sentReadReceipts)) {
-                UserDefaults.standard.set(data, forKey: "sentReadReceipts")
+                readReceiptsDefaults.set(data, forKey: "sentReadReceipts")
             } else {
                 SecureLogger.error("❌ Failed to encode read receipts for persistence", category: .session)
             }
@@ -429,6 +445,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // Track app startup phase to prevent marking old messages as unread
     var isStartupPhase = true
+
+    // ConversationStore field audit bookkeeping (see auditConversationStore()):
+    // runs on the read-receipt cleanup cadence, heartbeat sampled first +
+    // every `TransportConfig.conversationStoreAuditLogInterval`th audit.
+    private var storeAuditCount = 0
+    private var storeAuditLastAppendCount = 0
     // Announce Tor initial readiness once per launch to avoid duplicates
     var torInitialReadyAnnounced: Bool = false
 
@@ -536,10 +558,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     /// Moves the open private chat to `newPeerID` when the current selection is
     /// one of the peer IDs being migrated away (side-effectful: re-targets the
-    /// private chat session and resyncs the conversation stores).
+    /// private chat session — fingerprint refresh, read receipts).
+    ///
+    /// Note: when this runs after a store `migrateConversation`, the store has
+    /// already handed the selection itself off to `newPeerID` (and the manager
+    /// mirrors it), so a selection that reads `newPeerID` is also re-targeted
+    /// to run the session side effects. Selections on unrelated peers are
+    /// untouched.
     @MainActor
     func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID) {
-        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 }) else { return }
+        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 })
+                || selectedPrivateChatPeer == newPeerID else { return }
         selectedPrivateChatPeer = newPeerID
     }
 
@@ -757,7 +786,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         conversations: ConversationStore? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
-        locationManager: LocationChannelManager = .shared
+        locationManager: LocationChannelManager = .shared,
+        readReceiptsDefaults: UserDefaults? = nil
     ) {
         let conversations = conversations ?? ConversationStore()
         let peerIdentityStore = peerIdentityStore ?? PeerIdentityStore()
@@ -784,7 +814,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.autocompleteService = services.autocompleteService
         self.deduplicationService = services.deduplicationService
         self.publicMessagePipeline = services.publicMessagePipeline
-        self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts()
+        let readReceiptsDefaults = readReceiptsDefaults ?? Self.defaultReadReceiptsDefaults
+        self.readReceiptsDefaults = readReceiptsDefaults
+        self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts(userDefaults: readReceiptsDefaults)
 
         // Republish on every store change so SwiftUI observers of the
         // view model refresh. This replaces the UI-update role of the old
@@ -803,7 +835,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             .store(in: &cancellables)
 
         ChatViewModelBootstrapper(viewModel: self).configure()
-        synchronizeConversationSelectionStore()
     }
 
     // MARK: - Deinitialization
@@ -1140,8 +1171,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             bleService.resetIdentityForPanic(currentNickname: nickname)
         }
 
-        synchronizeConversationSelectionStore()
-
         // No need to force UserDefaults synchronization
 
         // Reinitialize Nostr with new identity
@@ -1261,13 +1290,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     }
 
     // MARK: - Message Handling
-
-    /// Pushes the private-chat manager's selection into the store, which
-    /// derives `selectedConversationID` from it and the active channel.
-    @MainActor
-    func synchronizeConversationSelectionStore() {
-        conversations.setSelectedPrivatePeer(privateChatManager.selectedPeer)
-    }
 
     /// Invalidates the derived `messages` cache and notifies observers.
     /// (Formerly pulled the channel's timeline into a stored `messages`
@@ -1466,6 +1488,35 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func cleanupOldReadReceipts() {
         deliveryCoordinator.cleanupOldReadReceipts()
+        auditConversationStore()
+    }
+
+    /// Periodic on-device verification of the `ConversationStore`'s
+    /// correctness invariants, piggybacked on the read-receipt cleanup
+    /// cadence (peer-list updates) so no extra timer exists. Loud on
+    /// violation (one error line each), near-silent when healthy (sampled
+    /// heartbeat: first + every Nth audit). The audit is O(total messages)
+    /// and allocation-free while healthy — measured ~0.5 ms at 5k messages
+    /// (see `PerformanceBaselineTests.testConversationStoreAudit`), cheap
+    /// relative to its cadence, so it always runs.
+    @MainActor
+    private func auditConversationStore() {
+        storeAuditCount += 1
+        let violations = conversations.auditInvariants()
+        guard violations.isEmpty else {
+            for violation in violations {
+                SecureLogger.error("🚨 ConversationStore invariant violated: \(violation)", category: .session)
+            }
+            return
+        }
+        let appendCount = conversations.appendCount
+        if storeAuditCount == 1 || storeAuditCount.isMultiple(of: TransportConfig.conversationStoreAuditLogInterval) {
+            SecureLogger.debug(
+                "Store audit OK: \(conversations.conversationsByID.count) conversations, \(conversations.totalMessageCount) messages, map=\(conversations.messageIDMapCount), appends since last audit=\(appendCount - storeAuditLastAppendCount)",
+                category: .session
+            )
+        }
+        storeAuditLastAppendCount = appendCount
     }
 
     func parseMentions(from content: String) -> [String] {

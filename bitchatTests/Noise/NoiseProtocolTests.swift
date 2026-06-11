@@ -14,6 +14,18 @@ import BitFoundation
 
 // MARK: - Test Vector Support
 
+/// Official Noise test vectors (NoiseTestVectors.json) for
+/// `Noise_XX_25519_ChaChaPoly_SHA256` — the exact protocol this app speaks
+/// (see `NoiseProtocolName` / `NoisePattern.XX`). Embedded byte-for-byte from
+/// the two canonical community vector suites:
+/// - cacophony: https://raw.githubusercontent.com/haskell-cryptography/cacophony/master/vectors/cacophony.txt
+///   (6 messages: full XX handshake transcript + 3 transport messages, with
+///   `handshake_hash`)
+/// - snow: https://raw.githubusercontent.com/mcginty/snow/main/tests/vectors/snow.txt
+///   (5 messages: full XX handshake transcript + 2 transport messages)
+/// Plain XX has no PSKs and no pre-message keys; prologue is part of both
+/// vectors and is mixed via `NoiseHandshakeState(prologue:)`. Fixed ephemerals
+/// come in through the `predeterminedEphemeralKey` test seam.
 struct NoiseTestVector: Codable {
     let protocol_name: String
     let init_prologue: String
@@ -586,9 +598,16 @@ struct NoiseProtocolTests {
     @Test func noiseTestVectors() throws {
         // Load test vectors from bundle
         let testVectors = try loadTestVectors()
-        
+        #expect(!testVectors.isEmpty, "No Noise test vectors loaded from fixture")
+
+        // Every embedded vector must target the exact protocol the app uses.
+        let appProtocolName = NoiseProtocolName(pattern: NoisePattern.XX.patternName).fullName
+
         for (index, testVector) in testVectors.enumerated() {
             print("Running test vector \(index + 1): \(testVector.protocol_name)")
+            #expect(
+                testVector.protocol_name == appProtocolName,
+                "Vector \(index + 1) targets \(testVector.protocol_name), app speaks \(appProtocolName)")
             try runTestVector(testVector)
         }
     }
@@ -612,8 +631,13 @@ struct NoiseProtocolTests {
     }
     
     private func loadTestVectors() throws -> [NoiseTestVector] {
-        // Try to load from test bundle
+        // SwiftPM puts processed resources in the module bundle; the Xcode
+        // test target puts them in the test bundle itself.
+        #if SWIFT_PACKAGE
+        let testBundle = Bundle.module
+        #else
         let testBundle = Bundle(for: MockKeychain.self)
+        #endif
         guard let url = testBundle.url(forResource: "NoiseTestVectors", withExtension: "json")
         else {
             throw NSError(

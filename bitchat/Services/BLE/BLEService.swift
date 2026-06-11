@@ -74,6 +74,8 @@ final class BLEService: NSObject {
     private let identityManager: SecureIdentityStateManagerProtocol
     private let keychain: KeychainManagerProtocol
     private let idBridge: NostrIdentityBridge
+    /// Binary form of `myPeerID`; same contract — mutated only inside a
+    /// `messageQueue` barrier via `refreshPeerIdentity()`.
     private var myPeerIDData: Data = Data()
 
     // MARK: - Advertising Privacy
@@ -91,6 +93,10 @@ final class BLEService: NSObject {
     private var pendingNoiseSessionQueues = BLENoiseSessionQueues()
     // Queue for notifications that failed due to full queue
     private var pendingNotifications = BLEOutboundNotificationBuffer<CBCentral>()
+    // Backpressure logging fires per fragment during media transfers
+    // (hundreds of lines per image); sampled via this counter, which is
+    // only touched inside collectionsQueue barriers (no sync needed).
+    var notificationBackpressureLogCount = 0
 
     // Accumulate long write chunks per central until a full frame decodes
     private var pendingWriteBuffers = BLEInboundWriteBuffer()
@@ -311,13 +317,20 @@ final class BLEService: NSObject {
         }
         disconnectNotifyDebouncer.removeAll()
 
-        noiseService.clearEphemeralStateForPanic()
-        noiseService.clearPersistentIdentity()
+        // The crypto-service replacement and the derived identity swap must be
+        // one atomic unit with respect to messageQueue senders: a queued send
+        // must never observe the new Noise service alongside the old peer ID
+        // (it would sign with the new identity while carrying the old sender).
+        // refreshPeerIdentity() executes inline here via its re-entrancy check.
+        messageQueue.sync(flags: .barrier) {
+            noiseService.clearEphemeralStateForPanic()
+            noiseService.clearPersistentIdentity()
 
-        let newNoise = NoiseEncryptionService(keychain: keychain)
-        noiseService = newNoise
-        configureNoiseServiceCallbacks(for: newNoise)
-        refreshPeerIdentity()
+            let newNoise = NoiseEncryptionService(keychain: keychain)
+            noiseService = newNoise
+            configureNoiseServiceCallbacks(for: newNoise)
+            refreshPeerIdentity()
+        }
         restartGossipManager()
 
         setNickname(currentNickname)
@@ -401,10 +414,19 @@ final class BLEService: NSObject {
     }
     
     // MARK: Identity
-    
-    var myPeerID = PeerID(str: "")
-    var myNickname: String = "anon"
-    
+
+    /// Derived from the Noise identity fingerprint; rotated only via
+    /// `refreshPeerIdentity()` (e.g. panic reset), which performs the swap
+    /// inside a `messageQueue` barrier so concurrent queue work never sees a
+    /// half-updated identity. Externally read-only — no out-of-band mutation
+    /// may bypass that derivation.
+    private(set) var myPeerID = PeerID(str: "")
+    /// Externally read-only; mutate via `setNickname(_:)`, which also
+    /// broadcasts the change to peers.
+    private(set) var myNickname: String = "anon"
+
+    /// Sole mutator for `myNickname`: updates the stored value and force-sends
+    /// an announce so peers learn the new name.
     func setNickname(_ nickname: String) {
         self.myNickname = nickname
         // Send announce to notify peers of nickname change (force send)
@@ -573,8 +595,40 @@ final class BLEService: NSObject {
         initiateNoiseHandshake(with: peerID)
     }
     
-    func getNoiseService() -> NoiseEncryptionService {
-        return noiseService
+    // MARK: Noise identity/session access (narrow Transport wrappers)
+
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? {
+        noiseService.getPeerPublicKeyData(peerID)
+    }
+
+    func noiseIdentityFingerprint() -> String {
+        noiseService.getIdentityFingerprint()
+    }
+
+    func noiseStaticPublicKeyData() -> Data {
+        noiseService.getStaticPublicKeyData()
+    }
+
+    func noiseSigningPublicKeyData() -> Data {
+        noiseService.getSigningPublicKeyData()
+    }
+
+    func noiseSignData(_ data: Data) -> Data? {
+        noiseService.signData(data)
+    }
+
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool {
+        noiseService.verifySignature(signature, for: data, publicKey: publicKey)
+    }
+
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    ) {
+        // `onPeerAuthenticated` is additive (the encryption service keeps an
+        // array of handlers); `onHandshakeRequired` is a single slot.
+        noiseService.onPeerAuthenticated = onPeerAuthenticated
+        noiseService.onHandshakeRequired = onHandshakeRequired
     }
 
     func getCurrentBluetoothState() -> CBManagerState {
@@ -885,7 +939,7 @@ final class BLEService: NSObject {
             )
 
             if case let .enqueued(count) = result {
-                SecureLogger.debug("📋 Queued \(context) packet for retry (pending=\(count))", category: .session)
+                self.logBackpressureSampled("📋 Queued \(context) packet for retry (pending=\(count))")
                 return
             }
 
@@ -2006,9 +2060,15 @@ extension BLEService: CBPeripheralManagerDelegate {
     }
     
     func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
-        SecureLogger.debug("📤 Peripheral manager ready to send more notifications", category: .session)
-
         drainPendingNotifications(logPrefix: "✅ Sent")
+    }
+
+    private func logBackpressureSampled(_ message: @autoclosure () -> String) {
+        notificationBackpressureLogCount += 1
+        if notificationBackpressureLogCount == 1 ||
+            notificationBackpressureLogCount.isMultiple(of: TransportConfig.bleBackpressureLogInterval) {
+            SecureLogger.debug("\(message()) [backpressure event #\(notificationBackpressureLogCount)]", category: .session)
+        }
     }
 
     private func drainPendingNotifications(logPrefix: String) {
@@ -2021,11 +2081,7 @@ extension BLEService: CBPeripheralManagerDelegate {
             let sentCount = self.sendPendingNotifications(pending, characteristic: characteristic)
 
             if sentCount > 0 {
-                SecureLogger.debug("\(logPrefix) \(sentCount) pending notifications from retry queue", category: .session)
-            }
-
-            if !self.pendingNotifications.isEmpty {
-                SecureLogger.debug("📋 Still have \(self.pendingNotifications.count) pending notifications", category: .session)
+                self.logBackpressureSampled("\(logPrefix) \(sentCount) pending notifications from retry queue (\(self.pendingNotifications.count) still pending)")
             }
         }
     }
@@ -2043,7 +2099,7 @@ extension BLEService: CBPeripheralManagerDelegate {
             guard success else {
                 let remaining = Array(pending.dropFirst(index))
                 pendingNotifications.prepend(remaining)
-                SecureLogger.debug("⚠️ Notification queue still full after \(sentCount) sent, re-queuing \(remaining.count) items", category: .session)
+                logBackpressureSampled("⚠️ Notification queue still full after \(sentCount) sent, re-queuing \(remaining.count) items")
                 break
             }
 
@@ -2325,11 +2381,25 @@ extension BLEService {
         }
     }
 
+    /// Swaps `myPeerID`/`myPeerIDData` to match the current Noise identity.
+    /// The swap runs as a `messageQueue` barrier so in-flight work items that
+    /// read the identity (e.g. `sendMessage` building packets) complete
+    /// against the old value and everything after sees the new one atomically.
+    /// Callers (init, panic reset on the main thread) are never on
+    /// `messageQueue`; the re-entrancy check keeps any future on-queue caller
+    /// from deadlocking.
     private func refreshPeerIdentity() {
-        let fingerprint = noiseService.getIdentityFingerprint()
-        myPeerID = PeerID(str: fingerprint.prefix(16))
-        myPeerIDData = Data(hexString: myPeerID.id) ?? Data()
-        meshTopology.reset()
+        let swap = {
+            let fingerprint = self.noiseService.getIdentityFingerprint()
+            self.myPeerID = PeerID(str: fingerprint.prefix(16))
+            self.myPeerIDData = Data(hexString: self.myPeerID.id) ?? Data()
+            self.meshTopology.reset()
+        }
+        if DispatchQueue.getSpecific(key: messageQueueKey) != nil {
+            swap()
+        } else {
+            messageQueue.sync(flags: .barrier, execute: swap)
+        }
     }
 
 

@@ -109,8 +109,34 @@ final class MockTransport: Transport {
         triggeredHandshakes.append(peerID)
     }
 
-    func getNoiseService() -> NoiseEncryptionService {
-        NoiseEncryptionService(keychain: mockKeychain)
+    // Noise identity wrappers backed by a mock-keychain encryption service
+    // (mirrors the previous `getNoiseService()` placeholder behavior: a real
+    // identity, but no peer sessions). Exposed so tests can assert against
+    // the same identity the wrappers use.
+    private(set) lazy var mockNoiseService = NoiseEncryptionService(keychain: mockKeychain)
+
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? {
+        mockNoiseService.getPeerPublicKeyData(peerID)
+    }
+
+    func noiseIdentityFingerprint() -> String {
+        mockNoiseService.getIdentityFingerprint()
+    }
+
+    func noiseStaticPublicKeyData() -> Data {
+        mockNoiseService.getStaticPublicKeyData()
+    }
+
+    func noiseSigningPublicKeyData() -> Data {
+        mockNoiseService.getSigningPublicKeyData()
+    }
+
+    func noiseSignData(_ data: Data) -> Data? {
+        mockNoiseService.signData(data)
+    }
+
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool {
+        mockNoiseService.verifySignature(signature, for: data, publicKey: publicKey)
     }
 
     // MARK: - Messaging

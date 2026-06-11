@@ -298,6 +298,47 @@ struct AppArchitectureTests {
         #expect(inboxModel.messages(for: selectedPeerID).map(\.id) == ["dm-sel-1"])
     }
 
+    @Test("PrivateInboxModel republishes read receipts for the selected DM (ephemeral- and stable-keyed)")
+    @MainActor
+    func privateInboxModelRepublishesReadReceiptsForSelectedConversation() {
+        // A DM's messages can live under BOTH .directPeer(ephemeral) and
+        // .directPeer(stableKey) (mirroring shares one BitchatMessage
+        // instance); the view's read-receipt update must fire no matter
+        // which of the two keys the selection holds.
+        let ephemeralPeerID = PeerID(str: "abcdef1234567890")
+        let stablePeerID = PeerID(str: String(repeating: "ab", count: 32))
+
+        for selectedPeerID in [ephemeralPeerID, stablePeerID] {
+            let store = ConversationStore()
+            let inboxModel = PrivateInboxModel(conversations: store)
+            store.setSelectedPrivatePeer(selectedPeerID)
+
+            // One shared instance mirrored into both direct conversations,
+            // exactly like `mirrorToEphemeralIfNeeded`.
+            let message = makeArchitectureMessage(
+                id: "dm-read-1",
+                isPrivate: true,
+                senderPeerID: ephemeralPeerID
+            )
+            store.append(message, to: .directPeer(ephemeralPeerID))
+            store.upsertByID(message, in: .directPeer(stablePeerID))
+
+            var emissions = 0
+            let cancellable = inboxModel.objectWillChange.sink { _ in emissions += 1 }
+            defer { cancellable.cancel() }
+
+            // ID-only intent — the exact call `ChatDeliveryCoordinator`
+            // makes when a READ ack arrives.
+            let read = DeliveryStatus.read(by: "builder", at: Date(timeIntervalSince1970: 100))
+            #expect(store.setDeliveryStatus(read, forMessageID: "dm-read-1"))
+
+            // The fan-out emits .statusChanged for both containing
+            // conversations; exactly the selected one republishes the model.
+            #expect(emissions == 1)
+            #expect(inboxModel.messages(for: selectedPeerID).first?.deliveryStatus == read)
+        }
+    }
+
     @Test("PublicChatModel ignores appends to background conversations")
     @MainActor
     func publicChatModelIsolatesBackgroundConversations() {

@@ -61,7 +61,27 @@ protocol Transport: AnyObject {
     func getFingerprint(for peerID: PeerID) -> String?
     func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState
     func triggerHandshake(with peerID: PeerID)
-    func getNoiseService() -> NoiseEncryptionService
+
+    // Noise identity/session access. Narrow, purpose-named wrappers so the
+    // underlying NoiseEncryptionService (and its peer-binding/session
+    // orchestration) is never exposed outside the transport.
+    /// The remote static public key of the Noise session with `peerID`, if established.
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data?
+    /// Fingerprint of our own Noise static identity key.
+    func noiseIdentityFingerprint() -> String
+    /// Our Noise static public key (Curve25519 key agreement).
+    func noiseStaticPublicKeyData() -> Data
+    /// Our Noise signing public key (Ed25519).
+    func noiseSigningPublicKeyData() -> Data
+    /// Signs `data` with our Noise signing key.
+    func noiseSignData(_ data: Data) -> Data?
+    /// Verifies an Ed25519 `signature` over `data` against `publicKey`.
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool
+    /// Registers session-lifecycle callbacks (peer authenticated / handshake required).
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    )
 
     // Messaging
     func sendMessage(_ content: String, mentions: [String])
@@ -85,6 +105,19 @@ protocol Transport: AnyObject {
 }
 
 extension Transport {
+    // Noise identity hooks default to inert for transports that do not carry
+    // Noise sessions (e.g. NostrTransport).
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? { nil }
+    func noiseIdentityFingerprint() -> String { "" }
+    func noiseStaticPublicKeyData() -> Data { Data() }
+    func noiseSigningPublicKeyData() -> Data { Data() }
+    func noiseSignData(_ data: Data) -> Data? { nil }
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool { false }
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    ) {}
+
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {}

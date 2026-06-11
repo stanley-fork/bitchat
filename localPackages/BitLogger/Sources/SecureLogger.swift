@@ -136,25 +136,32 @@ public extension SecureLogger {
 
     static func info(_ message: @autoclosure () -> String, category: OSLog = .noise,
                      file: String = #file, line: Int = #line, function: String = #function) {
+        #if DEBUG
         guard shouldLog(.info) else { return }
         log(message(), category: category, level: .info, file: file, line: line, function: function)
+        #endif
     }
 
     static func warning(_ message: @autoclosure () -> String, category: OSLog = .noise,
                         file: String = #file, line: Int = #line, function: String = #function) {
+        #if DEBUG
         guard shouldLog(.warning) else { return }
         log(message(), category: category, level: .warning, file: file, line: line, function: function)
+        #endif
     }
 
     static func error(_ message: @autoclosure () -> String, category: OSLog = .noise,
                       file: String = #file, line: Int = #line, function: String = #function) {
+        #if DEBUG
         guard shouldLog(.error) else { return }
         log(message(), category: category, level: .error, file: file, line: line, function: function)
+        #endif
     }
     
     /// Log errors with context
     static func error(_ error: Error, context: @autoclosure () -> String, category: OSLog = .noise,
                       file: String = #file, line: Int = #line, function: String = #function) {
+        #if DEBUG
         let location = formatLocation(file: file, line: line, function: function)
         let sanitized = context().sanitized()
         let errorDesc = error.localizedDescription.sanitized()
@@ -163,6 +170,7 @@ public extension SecureLogger {
         os_log("%{public}@ Error in %{public}@: %{public}@", log: category, type: .error, location, sanitized, errorDesc)
         #else
         os_log("%{private}@ Error in %{private}@: %{private}@", log: category, type: .error, location, sanitized, errorDesc)
+        #endif
         #endif
     }
 }
@@ -242,32 +250,25 @@ private extension SecureLogger {
     /// Log general messages with automatic sensitive data filtering
     static func log(_ message: @autoclosure () -> String, category: OSLog, level: LogLevel,
                     file: String, line: Int, function: String) {
+        // All public wrappers are compiled out of release builds; this core
+        // is gated too so no future call path can reintroduce production
+        // logging. bitchat is privacy-first: release builds emit nothing.
+        #if DEBUG
         guard shouldLog(level) else { return }
         let location = formatLocation(file: file, line: line, function: function)
         let sanitized = "\(location) \(message())".sanitized()
-        
-        #if DEBUG
         os_log("%{public}@", log: category, type: level.osLogType, sanitized)
-        #else
-        // In release builds, only log non-debug messages
-        if level != .debug {
-            os_log("%{private}@", log: category, type: level.osLogType, sanitized)
-        }
         #endif
     }
     
     /// Log a security event
     static func logSecurityEvent(_ event: SecurityEvent, level: LogLevel = .info,
                                  file: String, line: Int, function: String) {
+        #if DEBUG
         guard shouldLog(level) else { return }
         let location = formatLocation(file: file, line: line, function: function)
         let message = "\(location) \(event.message)"
-        
-        #if DEBUG
         os_log("%{public}@", log: .security, type: level.osLogType, message)
-        #else
-        // In release, use private logging to prevent sensitive data exposure
-        os_log("%{private}@", log: .security, type: level.osLogType, message)
         #endif
     }
     

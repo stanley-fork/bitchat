@@ -13,11 +13,24 @@ struct MediaMessageView: View {
     @EnvironmentObject private var conversationUIModel: ConversationUIModel
     let message: BitchatMessage
     let media: BitchatMessage.Media
+    /// Value snapshot of the message's mutable delivery status, captured at
+    /// construction (see `TextMessageView.deliveryStatus`): `BitchatMessage`
+    /// is a reference type mutated in place, and SwiftUI compares reference
+    /// fields by identity, so without the snapshot a status-only change
+    /// (send progress, delivered → read) would not re-render this row.
+    private let deliveryStatus: DeliveryStatus?
 
     @Binding var imagePreviewURL: URL?
 
+    init(message: BitchatMessage, media: BitchatMessage.Media, imagePreviewURL: Binding<URL?>) {
+        self.message = message
+        self.media = media
+        self.deliveryStatus = message.deliveryStatus
+        self._imagePreviewURL = imagePreviewURL
+    }
+
     var body: some View {
-        let state = mediaSendState(for: message)
+        let state = mediaSendState(for: deliveryStatus)
         let isFromMe = conversationUIModel.isMediaMessageFromCurrentUser(message)
         let cancelAction: (() -> Void)? = state.canCancel ? { conversationUIModel.cancelMediaSend(messageID: message.id) } : nil
 
@@ -27,7 +40,7 @@ struct MediaMessageView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.isPrivate && conversationUIModel.isSentByCurrentUser(message),
-                   let status = message.deliveryStatus {
+                   let status = deliveryStatus {
                     DeliveryStatusView(status: status)
                         .padding(.leading, 4)
                 }
@@ -63,10 +76,10 @@ struct MediaMessageView: View {
         .padding(.vertical, 4)
     }
 
-    private func mediaSendState(for message: BitchatMessage) -> (isSending: Bool, progress: Double?, canCancel: Bool) {
+    private func mediaSendState(for deliveryStatus: DeliveryStatus?) -> (isSending: Bool, progress: Double?, canCancel: Bool) {
         var isSending = false
         var progress: Double?
-        if let status = message.deliveryStatus {
+        if let status = deliveryStatus {
             switch status {
             case .sending:
                 isSending = true
