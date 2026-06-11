@@ -128,6 +128,16 @@ final class Conversation: ObservableObject, Identifiable {
         return true
     }
 
+    /// Removes a single message by ID. Returns the removed message, or
+    /// `nil` when no message with that ID exists.
+    fileprivate func remove(messageID: String) -> BitchatMessage? {
+        guard let index = indexByMessageID[messageID] else { return nil }
+        let removed = messages.remove(at: index)
+        indexByMessageID.removeValue(forKey: messageID)
+        reindex(from: index)
+        return removed
+    }
+
     fileprivate func clearMessages() {
         messages.removeAll()
         indexByMessageID.removeAll()
@@ -191,6 +201,7 @@ enum ConversationChange {
     case appended(ConversationID, BitchatMessage)
     case updated(ConversationID, messageID: String)
     case statusChanged(ConversationID, messageID: String, DeliveryStatus)
+    case messageRemoved(ConversationID, messageID: String)
     case cleared(ConversationID)
     case removed(ConversationID)
     case migrated(from: ConversationID, to: ConversationID)
@@ -322,6 +333,19 @@ final class ConversationStore: ObservableObject {
         changes.send(.migrated(from: source, to: destination))
     }
 
+    /// Removes a single message by ID from a conversation. Returns the
+    /// removed message, or `nil` (emitting nothing) when the conversation or
+    /// message is unknown.
+    @discardableResult
+    func removeMessage(withID messageID: String, from id: ConversationID) -> BitchatMessage? {
+        guard let conversation = conversationsByID[id],
+              let removed = conversation.remove(messageID: messageID) else {
+            return nil
+        }
+        changes.send(.messageRemoved(id, messageID: messageID))
+        return removed
+    }
+
     /// Empties a conversation's timeline but keeps the conversation (and
     /// its unread/selection state) alive.
     func clear(_ id: ConversationID) {
@@ -368,6 +392,75 @@ final class ConversationStore: ObservableObject {
             return TransportConfig.geoTimelineCap
         case .direct:
             return TransportConfig.privateChatCap
+        }
+    }
+}
+
+// MARK: - Migration step 2 compatibility (raw per-peer keying + derived views)
+
+extension ConversationID {
+    /// Direct-conversation ID keyed by the *raw* routing peer ID.
+    ///
+    /// Migration step 2 keeps one conversation per `PeerID` — exactly the
+    /// buckets the legacy `privateChats` dictionary had — so the
+    /// ephemeral/stable mirroring and consolidation coordinators keep their
+    /// current semantics. Step 5 canonicalizes direct conversations through
+    /// `IdentityResolver` and this helper goes away.
+    static func directPeer(_ peerID: PeerID) -> ConversationID {
+        .direct(PeerHandle(
+            id: "peer:\(peerID.id)",
+            routingPeerID: peerID,
+            displayName: nil,
+            noisePublicKeyHex: nil,
+            nostrPublicKey: nil
+        ))
+    }
+}
+
+extension ConversationStore {
+    /// All direct conversations' messages keyed by routing peer ID — the
+    /// compat shape of the legacy `privateChats` dictionary. Values are the
+    /// conversations' backing arrays (COW), so building this is
+    /// O(#conversations), not O(#messages).
+    func directMessagesByRoutingPeerID() -> [PeerID: [BitchatMessage]] {
+        var messagesByPeerID: [PeerID: [BitchatMessage]] = [:]
+        messagesByPeerID.reserveCapacity(conversationsByID.count)
+        for (id, conversation) in conversationsByID {
+            guard case .direct(let handle) = id else { continue }
+            messagesByPeerID[handle.routingPeerID] = conversation.messages
+        }
+        return messagesByPeerID
+    }
+
+    /// Unread direct conversations as routing peer IDs — the compat shape of
+    /// the legacy `unreadPrivateMessages` set.
+    func unreadDirectRoutingPeerIDs() -> Set<PeerID> {
+        var peerIDs = Set<PeerID>()
+        for id in unreadConversations {
+            guard case .direct(let handle) = id else { continue }
+            peerIDs.insert(handle.routingPeerID)
+        }
+        return peerIDs
+    }
+
+    /// `true` when any direct conversation contains a message with `messageID`
+    /// (O(1) per conversation via the incremental ID index).
+    func directConversationsContainMessage(withID messageID: String) -> Bool {
+        for (id, conversation) in conversationsByID {
+            guard case .direct = id else { continue }
+            if conversation.containsMessage(withID: messageID) { return true }
+        }
+        return false
+    }
+
+    /// Removes every direct conversation (panic clear).
+    func removeAllDirectConversations() {
+        let directIDs = conversationIDs.filter { id in
+            if case .direct = id { return true }
+            return false
+        }
+        for id in directIDs {
+            removeConversation(id)
         }
     }
 }

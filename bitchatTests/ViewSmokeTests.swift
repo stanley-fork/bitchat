@@ -359,7 +359,7 @@ struct ViewSmokeTests {
             makeSnapshot(peerID: blockedPeer, nickname: "Mallory", noiseByte: 0x55)
         ])
         try? await Task.sleep(nanoseconds: 50_000_000)
-        viewModel.unreadPrivateMessages.insert(blockedPeer)
+        viewModel.markPrivateChatUnread(blockedPeer)
 
         _ = mount(
             MeshPeerList(

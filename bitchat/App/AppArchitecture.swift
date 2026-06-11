@@ -356,6 +356,32 @@ final class LegacyConversationStore: ObservableObject {
         markRead(directConversationID(for: peerID, identityResolver: identityResolver))
     }
 
+    // MARK: Migration step 2 bridge entry points (DELETE IN STEP 5)
+    // Used only by `LegacyConversationStoreBridge` to mirror single
+    // conversations out of the new `ConversationStore` without the
+    // full-dictionary `synchronizePrivateChats` pass.
+
+    func replaceDirectMessages(
+        _ messages: [BitchatMessage],
+        for peerID: PeerID,
+        identityResolver: IdentityResolver
+    ) {
+        let handle = identityResolver.canonicalHandle(for: peerID, displayName: messages.last?.sender)
+        let conversationID = ConversationID.direct(handle)
+        directHandlesByConversation[conversationID] = handle
+        replaceMessages(messages, for: conversationID)
+    }
+
+    func markUnread(
+        peerID: PeerID,
+        identityResolver: IdentityResolver
+    ) {
+        let conversationID = directConversationID(for: peerID, identityResolver: identityResolver)
+        if !unreadConversations.contains(conversationID) {
+            unreadConversations.insert(conversationID)
+        }
+    }
+
     private func normalized(_ messages: [BitchatMessage]) -> [BitchatMessage] {
         var uniqueMessages: [String: BitchatMessage] = [:]
 

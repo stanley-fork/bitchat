@@ -164,13 +164,19 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     var connectedPeers: Set<PeerID> { unifiedPeerService.connectedPeerIDs }
     @Published var allPeers: [BitchatPeer] = []
+
+    /// Read-only compat view of all direct conversations in the new
+    /// `ConversationStore`, keyed by routing peer ID (migration step 2 shim;
+    /// views/feature models observe `Conversation` objects directly in
+    /// step 5). All mutations go through the private-chat intent ops below.
+    /// Rebuilt per access — O(#conversations) thanks to COW message arrays;
+    /// measured equal to a change-invalidated cache on
+    /// `pipeline.privateIngest`, so the simpler form wins.
+    @MainActor
     var privateChats: [PeerID: [BitchatMessage]] {
-        get { privateChatManager.privateChats }
-        set {
-            privateChatManager.privateChats = newValue
-            schedulePrivateConversationStoreSynchronization()
-        }
+        conversations.directMessagesByRoutingPeerID()
     }
+    @MainActor
     var selectedPrivateChatPeer: PeerID? {
         get { privateChatManager.selectedPeer }
         set {
@@ -179,19 +185,19 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             } else {
                 privateChatManager.endChat()
             }
-            synchronizePrivateConversationStore()
             synchronizeConversationSelectionStore()
         }
     }
+    /// Read-only compat view of the store's unread direct conversations
+    /// (migration step 2 shim). Mutate via `markPrivateChatUnread(_:)` /
+    /// `markPrivateChatRead(_:)`.
+    @MainActor
     var unreadPrivateMessages: Set<PeerID> {
-        get { privateChatManager.unreadMessages }
-        set {
-            privateChatManager.unreadMessages = newValue
-            schedulePrivateConversationStoreSynchronization()
-        }
+        conversations.unreadDirectRoutingPeerIDs()
     }
 
     /// Check if there are any unread messages (including from temporary Nostr peer IDs)
+    @MainActor
     var hasAnyUnreadMessages: Bool {
         !unreadPrivateMessages.isEmpty
     }
@@ -271,6 +277,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let idBridge: NostrIdentityBridge
     let identityManager: SecureIdentityStateManagerProtocol
     let conversationStore: LegacyConversationStore
+    /// Single source of truth for conversation message state
+    /// (docs/CONVERSATION-STORE-DESIGN.md). Owned by `AppRuntime` and passed
+    /// through, mirroring the legacy store's wiring.
+    let conversations: ConversationStore
+    /// Keeps `LegacyConversationStore` fed from `conversations` while feature
+    /// models still read Legacy (DELETE IN STEP 5).
+    private var legacyStoreBridge: LegacyConversationStoreBridge?
     let identityResolver: IdentityResolver
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
@@ -374,7 +387,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // MARK: - Message Delivery Tracking
 
     var cancellables = Set<AnyCancellable>()
-    private var pendingPrivateConversationStoreSyncTask: Task<Void, Never>?
 
     var transferIdToMessageIDs: [String: [String]] {
         mediaTransferCoordinator.transferIdToMessageIDs
@@ -525,6 +537,100 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         selectedPrivateChatPeer = newPeerID
     }
 
+    // MARK: - Private Conversation Store Intents
+    // The sole mutation paths for private (direct) message state. Each op
+    // forwards to the single-writer `ConversationStore`
+    // (docs/CONVERSATION-STORE-DESIGN.md); the read-only `privateChats` /
+    // `unreadPrivateMessages` shims above are derived from the same store.
+
+    /// Appends a private message in timestamp order. Returns `false` when a
+    /// message with the same ID is already in that chat (O(1) dedup via the
+    /// conversation's ID index).
+    @MainActor
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        conversations.append(message, to: .directPeer(peerID))
+    }
+
+    /// Replace-or-append a private message by ID (media progress, mirrored
+    /// copies); an existing message keeps its timeline position.
+    @MainActor
+    func upsertPrivateMessage(_ message: BitchatMessage, in peerID: PeerID) {
+        conversations.upsertByID(message, in: .directPeer(peerID))
+    }
+
+    /// Applies a delivery status to a private message by ID. Returns `false`
+    /// when the message is unknown or the update would downgrade the status
+    /// (read beats delivered beats sent).
+    @MainActor
+    @discardableResult
+    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
+        conversations.setDeliveryStatus(status, forMessageID: messageID, in: .directPeer(peerID))
+    }
+
+    /// Flags the peer's chat as unread (store unread state).
+    @MainActor
+    func markPrivateChatUnread(_ peerID: PeerID) {
+        conversations.markUnread(.directPeer(peerID))
+    }
+
+    /// Clears the peer's unread flag (store unread state only; read-receipt
+    /// sending stays in `PrivateChatManager.markAsRead`).
+    @MainActor
+    func markPrivateChatRead(_ peerID: PeerID) {
+        conversations.markRead(.directPeer(peerID))
+    }
+
+    /// Empties the peer's chat but keeps the conversation alive (`/clear`).
+    @MainActor
+    func clearPrivateChat(_ peerID: PeerID) {
+        conversations.clear(.directPeer(peerID))
+    }
+
+    /// Removes the peer's chat entirely, including unread state.
+    @MainActor
+    func removePrivateChat(_ peerID: PeerID) {
+        conversations.removeConversation(.directPeer(peerID))
+    }
+
+    /// Moves all messages from `oldPeerID`'s chat into `newPeerID`'s chat
+    /// (ephemeral↔stable peer-ID handoff): dedups by ID, preserves order,
+    /// carries unread state, removes the old chat.
+    @MainActor
+    func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID) {
+        conversations.migrateConversation(from: .directPeer(oldPeerID), to: .directPeer(newPeerID))
+    }
+
+    /// `true` when any private chat contains a message with `messageID`
+    /// (O(1) per conversation via the store's ID indexes).
+    @MainActor
+    func privateChatsContainMessage(withID messageID: String) -> Bool {
+        conversations.directConversationsContainMessage(withID: messageID)
+    }
+
+    /// `true` when `peerID`'s chat contains a message with `messageID`.
+    @MainActor
+    func privateChat(_ peerID: PeerID, containsMessageWithID messageID: String) -> Bool {
+        conversations.conversationsByID[.directPeer(peerID)]?.containsMessage(withID: messageID) ?? false
+    }
+
+    /// Removes a message by ID from every private chat that contains it,
+    /// dropping chats that become empty. Returns the removed message, if any.
+    @MainActor
+    @discardableResult
+    func removePrivateMessage(withID messageID: String) -> BitchatMessage? {
+        var removed: BitchatMessage?
+        for (id, conversation) in conversations.conversationsByID {
+            guard case .direct = id, conversation.containsMessage(withID: messageID) else { continue }
+            let message = conversations.removeMessage(withID: messageID, from: id)
+            removed = removed ?? message
+            if conversation.messages.isEmpty {
+                conversations.removeConversation(id)
+            }
+        }
+        return removed
+    }
+
     // MARK: - Initialization
 
     @MainActor
@@ -533,6 +639,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         idBridge: NostrIdentityBridge,
         identityManager: SecureIdentityStateManagerProtocol,
         conversationStore: LegacyConversationStore? = nil,
+        conversations: ConversationStore? = nil,
         identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
@@ -546,6 +653,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             identityManager: identityManager,
             transport: BLEService(keychain: keychain, idBridge: idBridge, identityManager: identityManager),
             conversationStore: conversationStore,
+            conversations: conversations,
             identityResolver: identityResolver,
             peerIdentityStore: peerIdentityStore ?? PeerIdentityStore(),
             locationPresenceStore: locationPresenceStore ?? LocationPresenceStore(),
@@ -562,12 +670,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         identityManager: SecureIdentityStateManagerProtocol,
         transport: Transport,
         conversationStore: LegacyConversationStore? = nil,
+        conversations: ConversationStore? = nil,
         identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
         locationManager: LocationChannelManager = .shared
     ) {
         let conversationStore = conversationStore ?? LegacyConversationStore()
+        let conversations = conversations ?? ConversationStore()
         let identityResolver = identityResolver ?? IdentityResolver()
         let peerIdentityStore = peerIdentityStore ?? PeerIdentityStore()
         let locationPresenceStore = locationPresenceStore ?? LocationPresenceStore()
@@ -582,6 +692,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.idBridge = idBridge
         self.identityManager = identityManager
         self.conversationStore = conversationStore
+        self.conversations = conversations
         self.identityResolver = identityResolver
         self.peerIdentityStore = peerIdentityStore
         self.locationPresenceStore = locationPresenceStore
@@ -595,6 +706,25 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.deduplicationService = services.deduplicationService
         self.publicMessagePipeline = services.publicMessagePipeline
         self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts()
+
+        // Keep the legacy store fed from the new store until the feature
+        // models cut over (migration step 5).
+        self.legacyStoreBridge = LegacyConversationStoreBridge(
+            store: conversations,
+            legacyStore: conversationStore,
+            identityResolver: identityResolver
+        )
+
+        // Republish on every store change so SwiftUI observers of the
+        // view model refresh. This replaces the UI-update role of the old
+        // `PrivateChatManager.@Published` dictionaries (their debounced
+        // Legacy synchronization sinks are gone; the bridge above feeds
+        // Legacy instead).
+        conversations.changes
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
 
         ChatViewModelBootstrapper(viewModel: self).configure()
         initializeConversationStore()
@@ -789,8 +919,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             recipientNickname: meshService.peerNickname(peerID: peerID),
             senderPeerID: meshService.myPeerID
         )
-        if privateChats[peerID] == nil { privateChats[peerID] = [] }
-        privateChats[peerID]?.append(systemMessage)
+        appendPrivateMessage(systemMessage, to: peerID)
         objectWillChange.send()
     }
 
@@ -885,8 +1014,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             meshCap: TransportConfig.meshTimelineCap,
             geohashCap: TransportConfig.geoTimelineCap
         )
-        privateChatManager.privateChats.removeAll()
-        privateChatManager.unreadMessages.removeAll()
+        conversations.removeAllDirectConversations()
 
         // Delete all keychain data (including Noise and Nostr keys)
         _ = keychain.deleteAllKeychainData()
@@ -1080,24 +1208,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         publicConversationCoordinator.synchronizeAllPublicConversationStores()
     }
 
+    /// Full Legacy-store resynchronization from the new `ConversationStore`.
+    /// Needed when `IdentityResolver` learns new peer associations, which can
+    /// re-key a direct conversation's canonical handle in Legacy
+    /// (DELETE IN STEP 5 with the bridge).
     @MainActor
-    func schedulePrivateConversationStoreSynchronization() {
-        guard pendingPrivateConversationStoreSyncTask == nil else { return }
-        pendingPrivateConversationStoreSyncTask = Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self else { return }
-            self.pendingPrivateConversationStoreSyncTask = nil
-            self.synchronizePrivateConversationStore()
-        }
-    }
-
-    @MainActor
-    func synchronizePrivateConversationStore() {
-        conversationStore.synchronizePrivateChats(
-            privateChatManager.privateChats,
-            unreadPeerIDs: privateChatManager.unreadMessages,
-            identityResolver: identityResolver
-        )
+    func resynchronizeLegacyPrivateConversations() {
+        legacyStoreBridge?.resynchronizeAll()
     }
 
     @MainActor

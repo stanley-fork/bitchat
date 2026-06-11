@@ -15,9 +15,17 @@ protocol ChatTransportEventContext: AnyObject {
     var isConnected: Bool { get set }
     var nickname: String { get }
     var myPeerID: PeerID { get }
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    var unreadPrivateMessages: Set<PeerID> { get }
     var selectedPrivateChatPeer: PeerID? { get set }
+    /// Appends a private message via the single-writer store intent;
+    /// returns `false` on duplicate message ID.
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
+    /// Removes the peer's chat entirely, including unread state.
+    func removePrivateChat(_ peerID: PeerID)
+    func markPrivateChatUnread(_ peerID: PeerID)
+    func markPrivateChatRead(_ peerID: PeerID)
     /// Forgets that read receipts were sent for `ids` so READ acks can be
     /// re-sent after the peer reconnects. (Single mutation path for the
     /// owner's `sentReadReceipts`; this coordinator never reads the raw set.)
@@ -251,13 +259,12 @@ private extension ChatTransportEventCoordinator {
         to stablePeerID: PeerID,
         in context: any ChatTransportEventContext
     ) {
-        if let messages = context.privateChats[shortPeerID] {
-            if context.privateChats[stablePeerID] == nil {
-                context.privateChats[stablePeerID] = []
-            }
+        let hadUnread = context.unreadPrivateMessages.contains(shortPeerID)
 
-            let existingIDs = Set(context.privateChats[stablePeerID]?.map(\.id) ?? [])
-            for message in messages where !existingIDs.contains(message.id) {
+        if let messages = context.privateChats[shortPeerID] {
+            for message in messages {
+                // Rewrite senderPeerID to the stable key so read receipts
+                // keep working; store append dedups by ID and keeps order.
                 let migrated = BitchatMessage(
                     id: message.id,
                     sender: message.sender,
@@ -273,16 +280,15 @@ private extension ChatTransportEventCoordinator {
                     mentions: message.mentions,
                     deliveryStatus: message.deliveryStatus
                 )
-                context.privateChats[stablePeerID]?.append(migrated)
+                context.appendPrivateMessage(migrated, to: stablePeerID)
             }
 
-            context.privateChats[stablePeerID]?.sort { $0.timestamp < $1.timestamp }
-            context.privateChats.removeValue(forKey: shortPeerID)
+            context.removePrivateChat(shortPeerID)
         }
 
-        if context.unreadPrivateMessages.contains(shortPeerID) {
-            context.unreadPrivateMessages.remove(shortPeerID)
-            context.unreadPrivateMessages.insert(stablePeerID)
+        if hadUnread {
+            context.markPrivateChatRead(shortPeerID)
+            context.markPrivateChatUnread(stablePeerID)
         }
 
         context.selectedPrivateChatPeer = stablePeerID

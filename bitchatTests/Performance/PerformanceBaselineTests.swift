@@ -655,6 +655,17 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
         return oldCount - sentReadReceipts.count
     }
 
+    @discardableResult
+    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
+        guard var chat = privateChats[peerID],
+              let index = chat.firstIndex(where: { $0.id == messageID }) else {
+            return false
+        }
+        chat[index].deliveryStatus = status
+        privateChats[peerID] = chat
+        return true
+    }
+
     /// 2000 public + `peerCount` x `messagesPerPeer` private messages with
     /// deterministic IDs and timestamps.
     static func makeCorpus(publicCount: Int, peerCount: Int, messagesPerPeer: Int) -> PerfDeliveryContext {

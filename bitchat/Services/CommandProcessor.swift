@@ -31,7 +31,7 @@ protocol CommandContextProvider: AnyObject {
     var activeChannel: ChannelID { get }
     var selectedPrivateChatPeer: PeerID? { get }
     var blockedUsers: Set<String> { get }
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
     var idBridge: NostrIdentityBridge { get }
 
     // MARK: - Peer Lookup
@@ -43,6 +43,8 @@ protocol CommandContextProvider: AnyObject {
     func startPrivateChat(with peerID: PeerID)
     func sendPrivateMessage(_ content: String, to peerID: PeerID)
     func clearCurrentPublicTimeline()
+    /// Empties the peer's chat (single-writer store intent for `/clear`).
+    func clearPrivateChat(_ peerID: PeerID)
     func sendPublicRaw(_ content: String)
 
     // MARK: - System Messages
@@ -160,7 +162,7 @@ final class CommandProcessor {
     
     private func handleClear() -> CommandResult {
         if let peerID = contextProvider?.selectedPrivateChatPeer {
-            contextProvider?.privateChats[peerID]?.removeAll()
+            contextProvider?.clearPrivateChat(peerID)
         } else {
             contextProvider?.clearCurrentPublicTimeline()
         }

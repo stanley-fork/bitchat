@@ -15,6 +15,11 @@ final class AppRuntime: ObservableObject {
     let chatViewModel: ChatViewModel
     let events = AppEventStream()
     let conversationStore: LegacyConversationStore
+    /// Single source of truth for conversation message state
+    /// (docs/CONVERSATION-STORE-DESIGN.md). The legacy store above keeps
+    /// feeding the feature models until step 5, mirrored from this one by
+    /// `LegacyConversationStoreBridge`.
+    let conversations: ConversationStore
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
     let publicChatModel: PublicChatModel
@@ -44,10 +49,12 @@ final class AppRuntime: ObservableObject {
         self.idBridge = idBridge
         let identityResolver = IdentityResolver()
         let conversationStore = LegacyConversationStore()
+        let conversations = ConversationStore()
         let peerIdentityStore = PeerIdentityStore()
         let locationPresenceStore = LocationPresenceStore()
         let locationManager = LocationChannelManager.shared
         self.conversationStore = conversationStore
+        self.conversations = conversations
         self.peerIdentityStore = peerIdentityStore
         self.locationPresenceStore = locationPresenceStore
         self.chatViewModel = ChatViewModel(
@@ -55,6 +62,7 @@ final class AppRuntime: ObservableObject {
             idBridge: idBridge,
             identityManager: SecureIdentityStateManager(keychain),
             conversationStore: conversationStore,
+            conversations: conversations,
             identityResolver: identityResolver,
             peerIdentityStore: peerIdentityStore,
             locationPresenceStore: locationPresenceStore,

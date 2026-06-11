@@ -14,7 +14,9 @@ protocol ChatPeerListContext: AnyObject {
     // MARK: Connection & chat state
     var isConnected: Bool { get set }
     var privateChats: [PeerID: [BitchatMessage]] { get }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    var unreadPrivateMessages: Set<PeerID> { get }
+    /// Clears the peer's unread flag (single-writer store intent).
+    func markPrivateChatRead(_ peerID: PeerID)
     var hasTrackedPrivateChatSelection: Bool { get }
     func updatePrivateChatPeerIfNeeded()
     func cleanupOldReadReceipts()
@@ -155,7 +157,7 @@ private extension ChatPeerListCoordinator {
             }
 
             idsToRemove.append(staleID)
-            context.unreadPrivateMessages.remove(staleID)
+            context.markPrivateChatRead(staleID)
         }
 
         if !idsToRemove.isEmpty {

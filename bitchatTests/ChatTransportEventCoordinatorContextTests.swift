@@ -33,6 +33,30 @@ private final class MockChatTransportEventContext: ChatTransportEventContext {
     private(set) var unmarkedReadReceiptBatches: [[String]] = []
     private(set) var notifyUIChangedCount = 0
 
+    // Conversation store intents (mirror `ConversationStore` semantics)
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        var chat = privateChats[peerID] ?? []
+        guard !chat.contains(where: { $0.id == message.id }) else { return false }
+        let index = chat.firstIndex(where: { $0.timestamp > message.timestamp }) ?? chat.count
+        chat.insert(message, at: index)
+        privateChats[peerID] = chat
+        return true
+    }
+
+    func removePrivateChat(_ peerID: PeerID) {
+        privateChats.removeValue(forKey: peerID)
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    func markPrivateChatUnread(_ peerID: PeerID) {
+        unreadPrivateMessages.insert(peerID)
+    }
+
+    func markPrivateChatRead(_ peerID: PeerID) {
+        unreadPrivateMessages.remove(peerID)
+    }
+
     func unmarkReadReceiptsSent(_ ids: [String]) {
         unmarkedReadReceiptBatches.append(ids)
     }

@@ -32,6 +32,10 @@ private final class MockChatPeerListContext: ChatPeerListContext {
     private(set) var updatePrivateChatPeerIfNeededCount = 0
     private(set) var cleanupOldReadReceiptsCount = 0
 
+    func markPrivateChatRead(_ peerID: PeerID) {
+        unreadPrivateMessages.remove(peerID)
+    }
+
     func updatePrivateChatPeerIfNeeded() {
         updatePrivateChatPeerIfNeededCount += 1
     }

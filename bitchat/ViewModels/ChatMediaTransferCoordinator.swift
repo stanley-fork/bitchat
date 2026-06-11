@@ -25,7 +25,10 @@ protocol ChatMediaTransferContext: AnyObject {
     func currentPublicSender() -> (name: String, peerID: PeerID)
 
     // MARK: Message state
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    /// Appends a private message via the single-writer store intent.
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
     func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
     func refreshVisibleMessages(from channel: ChannelID?)
     func trimMessagesIfNeeded()
@@ -228,9 +231,7 @@ final class ChatMediaTransferCoordinator {
                 senderPeerID: context.myPeerID,
                 deliveryStatus: .sending
             )
-            var chats = context.privateChats
-            chats[peerID, default: []].append(message)
-            context.privateChats = chats
+            context.appendPrivateMessage(message, to: peerID)
             context.trimMessagesIfNeeded()
         } else {
             let (displayName, senderPeerID) = context.currentPublicSender()

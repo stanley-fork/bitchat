@@ -48,12 +48,17 @@ protocol ChatPublicConversationContext: AnyObject {
     func setConversationActiveChannel(_ channel: ChannelID)
     func replaceConversationMessages(_ messages: [BitchatMessage], for channelID: ChannelID)
     func replaceConversationMessages(_ messages: [BitchatMessage], for conversationID: ConversationID)
-    func synchronizePrivateConversationStore()
     func synchronizeConversationSelectionStore()
 
     // MARK: Private chats (block cleanup & message removal)
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    /// Removes the peer's chat entirely, including unread state
+    /// (single-writer store intent).
+    func removePrivateChat(_ peerID: PeerID)
+    /// Removes a message by ID from every private chat containing it,
+    /// dropping chats that become empty. Returns the removed message.
+    @discardableResult
+    func removePrivateMessage(withID messageID: String) -> BitchatMessage?
     func cleanupLocalFile(forMessage message: BitchatMessage)
 
     // MARK: Geohash participants & presence
@@ -251,13 +256,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
 
         let conversationPeerID = PeerID(nostr_: hex)
         if context.privateChats[conversationPeerID] != nil {
-            var privateChats = context.privateChats
-            privateChats.removeValue(forKey: conversationPeerID)
-            context.privateChats = privateChats
-
-            var unread = context.unreadPrivateMessages
-            unread.remove(conversationPeerID)
-            context.unreadPrivateMessages = unread
+            context.removePrivateChat(conversationPeerID)
         }
 
         context.removeNostrKeyMappings(matchingPubkeyHexLowercased: hex)
@@ -325,21 +324,9 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             synchronizeAllPublicConversationStores()
         }
 
-        var chats = context.privateChats
-        for (peerID, items) in chats {
-            let filtered = items.filter { $0.id != messageID }
-            if filtered.count != items.count {
-                if filtered.isEmpty {
-                    chats.removeValue(forKey: peerID)
-                } else {
-                    chats[peerID] = filtered
-                }
-                if removedMessage == nil {
-                    removedMessage = items.first(where: { $0.id == messageID })
-                }
-            }
+        if let removedPrivateMessage = context.removePrivateMessage(withID: messageID) {
+            removedMessage = removedMessage ?? removedPrivateMessage
         }
-        context.privateChats = chats
 
         if cleanupFile, let removedMessage {
             context.cleanupLocalFile(forMessage: removedMessage)
@@ -351,7 +338,6 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
     func initializeConversationStore() {
         context.setConversationActiveChannel(context.activeChannel)
         synchronizePublicConversationStore(for: context.activeChannel)
-        context.synchronizePrivateConversationStore()
         context.synchronizeConversationSelectionStore()
     }
 

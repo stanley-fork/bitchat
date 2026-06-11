@@ -13,8 +13,13 @@ import Foundation
 @MainActor
 protocol ChatDeliveryContext: AnyObject {
     var messages: [BitchatMessage] { get set }
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
     var isStartupPhase: Bool { get }
+    /// Applies a delivery status to a private message by ID (single-writer
+    /// store intent; full delivery migration is step 4). Returns `false`
+    /// when the message is unknown or the update would downgrade the status.
+    @discardableResult
+    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool
     /// Drops every recorded read receipt whose message ID is not in `validMessageIDs`.
     /// Returns the number of receipts removed. (Single mutation path for the
     /// owner's `sentReadReceipts`; this coordinator never reads the raw set.)
@@ -98,7 +103,6 @@ final class ChatDeliveryCoordinator {
         }
 
         var didUpdateStatus = false
-        var didUpdatePrivateStatus = false
         let locations = withValidLocations(for: messageID) { $0 }
         guard !locations.isEmpty else { return false }
 
@@ -116,10 +120,9 @@ final class ChatDeliveryCoordinator {
             }
         }
 
-        var privateChats = context.privateChats
         for location in locations {
             guard case .privateChat(let peerID, let index) = location,
-                  let chatMessages = privateChats[peerID],
+                  let chatMessages = context.privateChats[peerID],
                   index < chatMessages.count,
                   chatMessages[index].id == messageID else {
                 continue
@@ -128,14 +131,9 @@ final class ChatDeliveryCoordinator {
             let currentStatus = chatMessages[index].deliveryStatus
             guard !shouldSkipUpdate(currentStatus: currentStatus, newStatus: status) else { continue }
 
-            chatMessages[index].deliveryStatus = status
-            privateChats[peerID] = chatMessages
-            didUpdateStatus = true
-            didUpdatePrivateStatus = true
-        }
-
-        if didUpdatePrivateStatus {
-            context.privateChats = privateChats
+            if context.setPrivateDeliveryStatus(status, forMessageID: messageID, peerID: peerID) {
+                didUpdateStatus = true
+            }
         }
 
         if didUpdateStatus {

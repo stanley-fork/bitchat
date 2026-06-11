@@ -42,6 +42,16 @@ private final class MockChatMediaTransferContext: ChatMediaTransferContext {
 
     // Message state
     var privateChats: [PeerID: [BitchatMessage]] = [:]
+
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        var chat = privateChats[peerID] ?? []
+        guard !chat.contains(where: { $0.id == message.id }) else { return false }
+        chat.append(message)
+        privateChats[peerID] = chat
+        return true
+    }
+
     var meshTimeline: [BitchatMessage] = []
     private(set) var refreshedChannels: [ChannelID?] = []
     private(set) var trimCount = 0

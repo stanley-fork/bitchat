@@ -17,8 +17,13 @@ import Foundation
 @MainActor
 protocol ChatPeerIdentityContext: AnyObject {
     // MARK: Conversation state
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    var unreadPrivateMessages: Set<PeerID> { get }
+    /// Clears the peer's unread flag (single-writer store intent).
+    func markPrivateChatRead(_ peerID: PeerID)
+    /// Moves all messages from `oldPeerID`'s chat into `newPeerID`'s chat
+    /// (dedup by ID, order preserved, unread carried, old chat removed).
+    func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID)
     var selectedPrivateChatPeer: PeerID? { get set }
     var selectedPrivateChatFingerprint: String? { get set }
     var nickname: String { get }
@@ -39,7 +44,6 @@ protocol ChatPeerIdentityContext: AnyObject {
     func syncReadReceiptsForSentMessages(for peerID: PeerID)
     /// Re-targets the private chat session in the chat manager (no store-sync side effects).
     func beginPrivateChatSession(with peerID: PeerID)
-    func synchronizePrivateConversationStore()
     func synchronizeConversationSelectionStore()
     func markPrivateMessagesAsRead(from peerID: PeerID)
 
@@ -305,9 +309,7 @@ final class ChatPeerIdentityCoordinator {
             context.selectedPrivateChatPeer = currentPeerID
         }
 
-        var unread = context.unreadPrivateMessages
-        unread.remove(currentPeerID)
-        context.unreadPrivateMessages = unread
+        context.markPrivateChatRead(currentPeerID)
     }
 
     @MainActor
@@ -367,7 +369,6 @@ final class ChatPeerIdentityCoordinator {
             context.selectedPrivateChatFingerprint = nil
         }
         context.beginPrivateChatSession(with: peerID)
-        context.synchronizePrivateConversationStore()
         context.synchronizeConversationSelectionStore()
         context.markPrivateMessagesAsRead(from: peerID)
     }
@@ -553,30 +554,9 @@ private extension ChatPeerIdentityCoordinator {
 
     @MainActor
     func migrateChatState(from oldPeerID: PeerID, to newPeerID: PeerID) {
-        if let oldMessages = context.privateChats[oldPeerID] {
-            var chats = context.privateChats
-            chats[newPeerID, default: []].append(contentsOf: oldMessages)
-            chats[newPeerID]?.sort { $0.timestamp < $1.timestamp }
-
-            var seenMessageIDs = Set<String>()
-            chats[newPeerID] = chats[newPeerID]?.filter { message in
-                if seenMessageIDs.contains(message.id) {
-                    return false
-                }
-                seenMessageIDs.insert(message.id)
-                return true
-            }
-
-            chats.removeValue(forKey: oldPeerID)
-            context.privateChats = chats
-        }
-
-        var unread = context.unreadPrivateMessages
-        if unread.contains(oldPeerID) {
-            unread.remove(oldPeerID)
-            unread.insert(newPeerID)
-            context.unreadPrivateMessages = unread
-        }
+        // The store migration dedups by message ID, preserves timestamp
+        // order, carries the unread flag, and removes the old chat.
+        context.migratePrivateChat(from: oldPeerID, to: newPeerID)
     }
 
     @MainActor

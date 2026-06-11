@@ -111,7 +111,6 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     private(set) var conversationActiveChannels: [ChannelID] = []
     private(set) var replacedChannelMessages: [(channel: ChannelID, messageIDs: [String])] = []
     private(set) var replacedConversationMessages: [(conversation: ConversationID, messageIDs: [String])] = []
-    private(set) var privateStoreSyncCount = 0
     private(set) var selectionStoreSyncCount = 0
 
     func setConversationActiveChannel(_ channel: ChannelID) {
@@ -126,10 +125,6 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
         replacedConversationMessages.append((conversationID, messages.map(\.id)))
     }
 
-    func synchronizePrivateConversationStore() {
-        privateStoreSyncCount += 1
-    }
-
     func synchronizeConversationSelectionStore() {
         selectionStoreSyncCount += 1
     }
@@ -137,7 +132,30 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     // Private chats
     var privateChats: [PeerID: [BitchatMessage]] = [:]
     var unreadPrivateMessages: Set<PeerID> = []
+    private(set) var removedPrivateChats: [PeerID] = []
     private(set) var cleanedUpFileMessageIDs: [String] = []
+
+    func removePrivateChat(_ peerID: PeerID) {
+        removedPrivateChats.append(peerID)
+        privateChats.removeValue(forKey: peerID)
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    @discardableResult
+    func removePrivateMessage(withID messageID: String) -> BitchatMessage? {
+        var removed: BitchatMessage?
+        for (peerID, chat) in privateChats {
+            guard let message = chat.first(where: { $0.id == messageID }) else { continue }
+            removed = removed ?? message
+            let remaining = chat.filter { $0.id != messageID }
+            if remaining.isEmpty {
+                privateChats.removeValue(forKey: peerID)
+            } else {
+                privateChats[peerID] = remaining
+            }
+        }
+        return removed
+    }
 
     func cleanupLocalFile(forMessage message: BitchatMessage) {
         cleanedUpFileMessageIDs.append(message.id)

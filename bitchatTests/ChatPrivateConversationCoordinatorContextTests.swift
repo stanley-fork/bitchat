@@ -48,6 +48,90 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
         notifyUIChangedCount += 1
     }
 
+    // Conversation store intents (mirror `ConversationStore` semantics:
+    // ordered insert, dedup by ID, no-downgrade status, unread carry on
+    // migrate) while recording calls for assertions.
+    private(set) var upsertedMessages: [(messageID: String, peerID: PeerID)] = []
+    private(set) var migratedChats: [(from: PeerID, to: PeerID)] = []
+
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        var chat = privateChats[peerID] ?? []
+        guard !chat.contains(where: { $0.id == message.id }) else {
+            privateChats[peerID] = chat
+            return false
+        }
+        let index = chat.firstIndex(where: { $0.timestamp > message.timestamp }) ?? chat.count
+        chat.insert(message, at: index)
+        privateChats[peerID] = chat
+        return true
+    }
+
+    func upsertPrivateMessage(_ message: BitchatMessage, in peerID: PeerID) {
+        upsertedMessages.append((message.id, peerID))
+        if var chat = privateChats[peerID],
+           let index = chat.firstIndex(where: { $0.id == message.id }) {
+            chat[index] = message
+            privateChats[peerID] = chat
+        } else {
+            appendPrivateMessage(message, to: peerID)
+        }
+    }
+
+    @discardableResult
+    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
+        guard var chat = privateChats[peerID],
+              let index = chat.firstIndex(where: { $0.id == messageID }) else {
+            return false
+        }
+        if Conversation.shouldSkipStatusUpdate(current: chat[index].deliveryStatus, new: status) {
+            return false
+        }
+        chat[index].deliveryStatus = status
+        privateChats[peerID] = chat
+        return true
+    }
+
+    func markPrivateChatUnread(_ peerID: PeerID) {
+        unreadPrivateMessages.insert(peerID)
+    }
+
+    func markPrivateChatRead(_ peerID: PeerID) {
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    func removePrivateChat(_ peerID: PeerID) {
+        privateChats.removeValue(forKey: peerID)
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID) {
+        migratedChats.append((oldPeerID, newPeerID))
+        guard oldPeerID != newPeerID, let source = privateChats[oldPeerID] else { return }
+        for message in source {
+            appendPrivateMessage(message, to: newPeerID)
+        }
+        if privateChats[newPeerID] == nil {
+            privateChats[newPeerID] = []
+        }
+        let wasUnread = unreadPrivateMessages.contains(oldPeerID)
+        privateChats.removeValue(forKey: oldPeerID)
+        unreadPrivateMessages.remove(oldPeerID)
+        if wasUnread {
+            unreadPrivateMessages.insert(newPeerID)
+        }
+    }
+
+    func privateChatsContainMessage(withID messageID: String) -> Bool {
+        privateChats.values.contains { chat in
+            chat.contains { $0.id == messageID }
+        }
+    }
+
+    func privateChat(_ peerID: PeerID, containsMessageWithID messageID: String) -> Bool {
+        privateChats[peerID]?.contains { $0.id == messageID } == true
+    }
+
     // Peers & identity
     var myPeerID = PeerID(str: "0011223344556677")
     var nicknamesByPeerID: [PeerID: String] = [:]
@@ -149,10 +233,9 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
         privateMessageNotifications.append((senderName, message, peerID))
     }
 
-    // System messages & chat hygiene
+    // System messages
     private(set) var systemMessages: [String] = []
     private(set) var meshOnlySystemMessages: [String] = []
-    private(set) var sanitizedPeerIDs: [PeerID] = []
 
     func addSystemMessage(_ content: String) {
         systemMessages.append(content)
@@ -160,10 +243,6 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
 
     func addMeshOnlySystemMessage(_ content: String) {
         meshOnlySystemMessages.append(content)
-    }
-
-    func sanitizeChat(for peerID: PeerID) {
-        sanitizedPeerIDs.append(peerID)
     }
 
     static let dummyIdentity = NostrIdentity(
@@ -256,7 +335,9 @@ struct ChatPrivateConversationCoordinatorContextTests {
         // A different id appends.
         coordinator.addMessageToPrivateChatsIfNeeded(makeIncomingMessage(id: "m2"), targetPeerID: peerID)
         #expect(context.privateChats[peerID]?.map(\.id) == ["m1", "m2"])
-        #expect(context.sanitizedPeerIDs == [peerID, peerID, peerID])
+        // Every add went through the store's upsert intent.
+        #expect(context.upsertedMessages.map(\.peerID) == [peerID, peerID, peerID])
+        #expect(context.upsertedMessages.map(\.messageID) == ["m1", "m1", "m2"])
 
         #expect(coordinator.isDuplicateMessage("m1", targetPeerID: peerID))
         #expect(!coordinator.isDuplicateMessage("m3", targetPeerID: peerID))
@@ -436,7 +517,9 @@ struct ChatPrivateConversationCoordinatorContextTests {
         #expect(context.unreadPrivateMessages.isEmpty)
         #expect(context.clearedFingerprints == [oldPeerID])
         #expect(context.selectedPrivateChatPeer == newPeerID)
-        #expect(context.sanitizedPeerIDs == [newPeerID])
+        // The wholesale move went through the store's migrate intent.
+        #expect(context.migratedChats.map(\.from) == [oldPeerID])
+        #expect(context.migratedChats.map(\.to) == [newPeerID])
         #expect(context.notifyUIChangedCount == 1)
     }
 

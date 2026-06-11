@@ -54,7 +54,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .read(by: "Peer", at: Date())
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         // Action: try to downgrade to .delivered
         viewModel.didUpdateMessageDeliveryStatus(messageID, status: .delivered(to: "Peer", at: Date()))
@@ -85,7 +85,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         // Action: upgrade to .delivered
         viewModel.didUpdateMessageDeliveryStatus(messageID, status: .delivered(to: "Peer", at: Date()))
@@ -114,7 +114,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(messageID, status: .sent)
 
@@ -140,7 +140,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .delivered(to: "Peer", at: Date().addingTimeInterval(-60))
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         // Action: upgrade to .read
         viewModel.didUpdateMessageDeliveryStatus(messageID, status: .read(by: "Peer", at: Date()))
@@ -173,7 +173,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         // Action: receive read receipt
         let receipt = ReadReceipt(
@@ -207,7 +207,7 @@ struct ChatViewModelDeliveryStatusTests {
             senderPeerID: transport.myPeerID,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
         viewModel.sentReadReceipts = ["keep-receipt", "drop-receipt"]
         viewModel.isStartupPhase = false
 
@@ -265,7 +265,7 @@ struct ChatViewModelDeliveryStatusTests {
                 deliveryStatus: .sent
             )
         ]
-        viewModel.privateChats[firstPeerID] = [
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -277,8 +277,8 @@ struct ChatViewModelDeliveryStatusTests {
                 senderPeerID: transport.myPeerID,
                 deliveryStatus: .sent
             )
-        ]
-        viewModel.privateChats[secondPeerID] = [
+        ], for: firstPeerID)
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -290,7 +290,7 @@ struct ChatViewModelDeliveryStatusTests {
                 senderPeerID: transport.myPeerID,
                 deliveryStatus: .sent
             )
-        ]
+        ], for: secondPeerID)
 
         let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(
             messageID,
@@ -331,10 +331,15 @@ struct ChatViewModelDeliveryStatusTests {
             deliveryStatus: .sent
         )
 
-        viewModel.privateChats[peerID] = [targetMessage, olderMessage]
+        viewModel.seedPrivateChat([targetMessage], for: peerID)
         #expect(isSent(viewModel.deliveryCoordinator.deliveryStatus(for: messageID)))
 
-        viewModel.privateChats[peerID] = [olderMessage, targetMessage]
+        // A late arrival with an older timestamp is inserted before the
+        // target by the store, shifting its position and invalidating the
+        // delivery coordinator's location index.
+        viewModel.seedPrivateChat([olderMessage], for: peerID)
+        #expect(viewModel.privateChats[peerID]?.map(\.id) == ["older-msg", messageID])
+
         let didUpdate = viewModel.deliveryCoordinator.updateMessageDeliveryStatus(
             messageID,
             status: .read(by: "Peer", at: Date())
@@ -400,6 +405,20 @@ private final class MockChatDeliveryContext: ChatDeliveryContext {
 
     func markMessageDelivered(_ messageID: String) {
         markedDeliveredMessageIDs.append(messageID)
+    }
+
+    @discardableResult
+    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
+        guard var chat = privateChats[peerID],
+              let index = chat.firstIndex(where: { $0.id == messageID }) else {
+            return false
+        }
+        if Conversation.shouldSkipStatusUpdate(current: chat[index].deliveryStatus, new: status) {
+            return false
+        }
+        chat[index].deliveryStatus = status
+        privateChats[peerID] = chat
+        return true
     }
 }
 

@@ -38,8 +38,22 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
     var nostrKeyMapping: [PeerID: String] = [:]
     private(set) var ownerLevelReadPasses: [PeerID] = []
     private(set) var managerReadMarks: [PeerID] = []
-    private(set) var privateStoreSyncCount = 0
     private(set) var systemMessages: [String] = []
+
+    // Conversation store intents
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        var chat = privateChats[peerID] ?? []
+        guard !chat.contains(where: { $0.id == message.id }) else { return false }
+        let index = chat.firstIndex(where: { $0.timestamp > message.timestamp }) ?? chat.count
+        chat.insert(message, at: index)
+        privateChats[peerID] = chat
+        return true
+    }
+
+    func markPrivateChatRead(_ peerID: PeerID) {
+        unreadPrivateMessages.remove(peerID)
+    }
 
     @discardableResult
     func markReadReceiptSent(_ messageID: String) -> Bool {
@@ -61,7 +75,6 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
         work()
     }
 
-    func synchronizePrivateConversationStore() { privateStoreSyncCount += 1 }
     func addSystemMessage(_ content: String) { systemMessages.append(content) }
 
     // Peers & sessions
@@ -234,7 +247,6 @@ struct ChatLifecycleCoordinatorContextTests {
         coordinator.markPrivateMessagesAsRead(from: convKey)
 
         #expect(context.managerReadMarks == [convKey])
-        #expect(context.privateStoreSyncCount == 1)
         // Only the peer's own un-acked, non-relay message gets a READ.
         #expect(context.geoReadReceipts.map(\.messageID) == ["m1"])
         #expect(context.geoReadReceipts.first?.recipientHex == recipientHex)

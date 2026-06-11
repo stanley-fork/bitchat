@@ -13,9 +13,14 @@ import Foundation
 protocol ChatLifecycleContext: AnyObject {
     // MARK: Chat & receipt state
     var messages: [BitchatMessage] { get }
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    var privateChats: [PeerID: [BitchatMessage]] { get }
+    var unreadPrivateMessages: Set<PeerID> { get }
     var selectedPrivateChatPeer: PeerID? { get }
+    /// Appends a private message via the single-writer store intent.
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
+    /// Clears the peer's unread flag (store unread state only).
+    func markPrivateChatRead(_ peerID: PeerID)
     var sentReadReceipts: Set<String> { get }
     var nickname: String { get }
     var myPeerID: PeerID { get }
@@ -33,7 +38,6 @@ protocol ChatLifecycleContext: AnyObject {
     /// Schedules main-actor work after a UI-timing delay. Injected so tests
     /// can run the work synchronously instead of polling wall-clock queues.
     func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void)
-    func synchronizePrivateConversationStore()
     func addSystemMessage(_ content: String)
 
     // MARK: Peers & sessions
@@ -72,8 +76,8 @@ extension ChatViewModel: ChatLifecycleContext {
     // `messages`, `privateChats`, `unreadPrivateMessages`,
     // `selectedPrivateChatPeer`, `sentReadReceipts`, `nickname`, `myPeerID`,
     // `activeChannel`, `nostrKeyMapping`, `markReadReceiptSent(_:)`,
-    // `markPrivateMessagesAsRead(from:)`,
-    // `synchronizePrivateConversationStore()`, `addSystemMessage(_:)`,
+    // `markPrivateMessagesAsRead(from:)`, `appendPrivateMessage(_:to:)`,
+    // `markPrivateChatRead(_:)`, `addSystemMessage(_:)`,
     // `peerNickname(for:)`, `unifiedPeer(for:)`, `noiseSessionState(for:)`,
     // the routing/ack members, `isTeleported`,
     // `deriveNostrIdentity(forGeohash:)`, `recordGeoParticipant(pubkeyHex:)`,
@@ -178,7 +182,6 @@ final class ChatLifecycleCoordinator {
 
     func markPrivateMessagesAsRead(from peerID: PeerID) {
         context.markChatAsRead(from: peerID)
-        context.synchronizePrivateConversationStore()
 
         if peerID.isGeoDM,
            let recipientHex = context.nostrKeyMapping[peerID],
@@ -215,7 +218,7 @@ final class ChatLifecycleCoordinator {
             peerNostrPubkey = favoriteStatus?.peerNostrPublicKey
 
             if let noiseKeyHex, context.unreadPrivateMessages.contains(noiseKeyHex) {
-                context.unreadPrivateMessages.remove(noiseKeyHex)
+                context.markPrivateChatRead(noiseKeyHex)
             }
         }
 
@@ -312,12 +315,7 @@ private extension ChatLifecycleCoordinator {
             senderPeerID: context.myPeerID
         )
 
-        var chats = context.privateChats
-        if chats[peerID] == nil {
-            chats[peerID] = []
-        }
-        chats[peerID]?.append(notice)
-        context.privateChats = chats
+        context.appendPrivateMessage(notice, to: peerID)
     }
 
     func sendPublicGeohashScreenshotMessage(_ message: String, channel: GeohashChannel) {

@@ -631,7 +631,7 @@ struct AppArchitectureTests {
         transport.reachablePeers.insert(otherPeerID)
         viewModel.nickname = "builder"
         viewModel.verifiedFingerprints.insert(verifiedFingerprint)
-        viewModel.unreadPrivateMessages = Set([otherPeerID])
+        viewModel.markPrivateChatUnread(otherPeerID)
         transport.updatePeerSnapshots([
             makeArchitectureSnapshot(
                 peerID: myPeerID,

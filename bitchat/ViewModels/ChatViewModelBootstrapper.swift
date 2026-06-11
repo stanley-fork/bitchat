@@ -74,6 +74,7 @@ final class ChatViewModelBootstrapper {
 
 private extension ChatViewModelBootstrapper {
     func wireServiceGraph() {
+        viewModel.privateChatManager.conversationStore = viewModel.conversations
         viewModel.privateChatManager.messageRouter = viewModel.messageRouter
         viewModel.privateChatManager.unifiedPeerService = viewModel.unifiedPeerService
         viewModel.unifiedPeerService.messageRouter = viewModel.messageRouter
@@ -89,24 +90,10 @@ private extension ChatViewModelBootstrapper {
             }
             .store(in: &viewModel.cancellables)
 
-        viewModel.privateChatManager.$privateChats
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.schedulePrivateConversationStoreSynchronization()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
-        viewModel.privateChatManager.$unreadMessages
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.schedulePrivateConversationStoreSynchronization()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
+        // Private message state now flows: store intent →
+        // `ConversationStore.changes` → `LegacyConversationStoreBridge` (and
+        // the ChatViewModel shim-cache sink), so the old `$privateChats` /
+        // `$unreadMessages` debounced synchronization sinks are gone.
         viewModel.privateChatManager.$selectedPeer
             .receive(on: DispatchQueue.main)
             .sink { [weak viewModel] _ in
@@ -192,7 +179,9 @@ private extension ChatViewModelBootstrapper {
                         viewModel.updatePrivateChatPeerIfNeeded()
                     }
 
-                    viewModel.synchronizePrivateConversationStore()
+                    // Peer registrations can change a conversation's
+                    // canonical handle in the legacy store; re-key it.
+                    viewModel.resynchronizeLegacyPrivateConversations()
                     viewModel.synchronizeConversationSelectionStore()
                 }
             }
