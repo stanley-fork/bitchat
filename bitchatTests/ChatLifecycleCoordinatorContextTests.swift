@@ -54,6 +54,13 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
         managerReadMarks.append(peerID)
     }
 
+    // Scheduled work runs synchronously so tests never poll wall-clock queues.
+    private(set) var scheduledDelays: [TimeInterval] = []
+    func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
+        scheduledDelays.append(delay)
+        work()
+    }
+
     func synchronizePrivateConversationStore() { privateStoreSyncCount += 1 }
     func addSystemMessage(_ content: String) { systemMessages.append(content) }
 
@@ -299,10 +306,9 @@ struct ChatLifecycleCoordinatorContextTests {
         #expect(context.refreshBluetoothStateCount == 2)
         #expect(context.managerReadMarks == [peerID])
 
-        let deadline = Date().addingTimeInterval(2)
-        while context.ownerLevelReadPasses.isEmpty && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
+        // The mock executes scheduled work synchronously, so the delayed
+        // owner-level pass has already run - no wall-clock polling.
+        #expect(context.scheduledDelays == [TransportConfig.uiAnimationMediumSeconds])
         #expect(context.ownerLevelReadPasses == [peerID])
     }
     @Test @MainActor

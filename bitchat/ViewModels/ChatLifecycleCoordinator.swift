@@ -30,6 +30,9 @@ protocol ChatLifecycleContext: AnyObject {
     func markPrivateMessagesAsRead(from peerID: PeerID)
     /// Marks the chat read in the private chat manager (sends pending mesh READ acks).
     func markChatAsRead(from peerID: PeerID)
+    /// Schedules main-actor work after a UI-timing delay. Injected so tests
+    /// can run the work synchronously instead of polling wall-clock queues.
+    func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void)
     func synchronizePrivateConversationStore()
     func addSystemMessage(_ content: String)
 
@@ -83,6 +86,14 @@ extension ChatViewModel: ChatLifecycleContext {
         privateChatManager.markAsRead(from: peerID)
     }
 
+    func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            Task { @MainActor in
+                work()
+            }
+        }
+    }
+
     func stopMeshServices() {
         meshService.stopServices()
     }
@@ -119,10 +130,8 @@ final class ChatLifecycleCoordinator {
         markPrivateMessagesAsRead(from: peerID)
 
         let context = self.context
-        DispatchQueue.main.asyncAfter(deadline: .now() + TransportConfig.uiAnimationMediumSeconds) { [weak context] in
-            Task { @MainActor in
-                context?.markPrivateMessagesAsRead(from: peerID)
-            }
+        context.scheduleOnMainAfter(TransportConfig.uiAnimationMediumSeconds) { [weak context] in
+            context?.markPrivateMessagesAsRead(from: peerID)
         }
     }
 
