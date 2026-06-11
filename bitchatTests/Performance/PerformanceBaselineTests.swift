@@ -328,6 +328,139 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("formatting.formatMessage", samples: samples, operations: batchSize, unit: "messages")
     }
 
+    // MARK: - 6a. End-to-end private ingest pipeline (current architecture)
+
+    /// Baseline for the full private-message ingest cycle through a real
+    /// `ChatViewModel`: `handlePrivateMessage` → `privateChats` passthrough →
+    /// `PrivateChatManager`'s `@Published` dict → bootstrapper Combine sink →
+    /// `Task.yield`-debounced `ConversationStore.synchronizePrivateChats`
+    /// (full-dict replace) → `PrivateInboxModel.refreshMessages` (full
+    /// rebuild). Measures wall time from first ingest until the store AND the
+    /// feature model both reflect every message. The peer is not mesh-active
+    /// and no chat is selected, so notification/read-receipt side paths stay
+    /// cold (notifications are no-ops under test anyway).
+    func testPipelinePrivateIngest() {
+        let messageCount = 200
+        // 64-hex (stable Noise key) peer ID: skips the short-ID consolidation
+        // and ephemeral-mirror paths so every pass does identical work.
+        let peerID = PeerID(str: String(repeating: "ab", count: 32))
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let messages: [BitchatMessage] = (0..<messageCount).map { i in
+            BitchatMessage(
+                id: "perf-dm-\(i)",
+                sender: "perfsender",
+                content: "private pipeline message \(i)",
+                timestamp: base.addingTimeInterval(Double(i)),
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "me",
+                senderPeerID: peerID
+            )
+        }
+        // Fresh fixture per pass so dedup scans and store syncs start from the
+        // same empty state every iteration. Kept alive so weakly captured
+        // coordinator Task hops stay valid.
+        var keepAlive: [PerfPipelineFixture] = []
+        var samples: [TimeInterval] = []
+
+        measure {
+            let fixture = PerfPipelineFixture()
+            keepAlive.append(fixture)
+            let start = Date()
+            for message in messages {
+                fixture.viewModel.handlePrivateMessage(message)
+            }
+            // Drain the main queue until the debounced ConversationStore sync
+            // ran and the PrivateInboxModel mirror caught up.
+            let consistent = spinMainRunLoop(timeout: 10) {
+                fixture.conversationStore.directMessagesByPeerID()[peerID]?.count == messageCount
+                    && fixture.privateInbox.messagesByPeerID[peerID]?.count == messageCount
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertTrue(consistent, "ConversationStore/PrivateInboxModel never converged")
+            XCTAssertEqual(fixture.viewModel.privateChats[peerID]?.count, messageCount)
+        }
+
+        reportThroughput("pipeline.privateIngest", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    // MARK: - 6b. End-to-end public ingest pipeline (current architecture)
+
+    /// Baseline for the full public-message ingest cycle through a real
+    /// `ChatViewModel`: `didReceivePublicMessage` (transport delegate entry,
+    /// main-actor Task hop per message) → `handlePublicMessage` (rate limit,
+    /// `PublicTimelineStore` append, per-message full-array
+    /// `ConversationStore` sync) → `PublicMessagePipeline` timer-batched
+    /// flush into `ChatViewModel.messages` → `PublicChatModel` mirror.
+    /// Measures until `messages` and the feature model reflect every message,
+    /// so the pipeline's flush latency is part of the cycle. Senders are
+    /// spread 4-per-peer to stay under the 5-token sender rate bucket.
+    func testPipelinePublicIngest() {
+        let messageCount = 200
+        let senderCount = 50
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        struct InboundPublic {
+            let peerID: PeerID
+            let nickname: String
+            let content: String
+            let timestamp: Date
+            let messageID: String
+        }
+        let items: [InboundPublic] = (0..<messageCount).map { i in
+            let sender = i % senderCount
+            return InboundPublic(
+                peerID: PeerID(str: String(format: "%016x", 0xC0DE_0000 + sender)),
+                nickname: "perfpeer\(sender)",
+                content: "public pipeline message \(i) from sender \(sender)",
+                timestamp: base.addingTimeInterval(Double(i)),
+                messageID: "perf-pub-\(i)"
+            )
+        }
+        let expectedIDs = Set(items.map(\.messageID))
+        var keepAlive: [PerfPipelineFixture] = []
+        var samples: [TimeInterval] = []
+
+        measure {
+            let fixture = PerfPipelineFixture()
+            keepAlive.append(fixture)
+            let start = Date()
+            for item in items {
+                fixture.viewModel.didReceivePublicMessage(
+                    from: item.peerID,
+                    nickname: item.nickname,
+                    content: item.content,
+                    timestamp: item.timestamp,
+                    messageID: item.messageID
+                )
+            }
+            // Drain the per-message main-actor hops and whichever surfacing
+            // path wins (the pipeline's batched timer flush or the startup
+            // channel apply's `refreshVisibleMessages`, which pulls the whole
+            // timeline into `messages`), plus the PublicChatModel mirror.
+            let consistent = spinMainRunLoop(timeout: 10) {
+                fixture.viewModel.messages.count >= messageCount
+                    && fixture.publicChat.messages.count >= messageCount
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertTrue(consistent, "messages/PublicChatModel never converged")
+            let ingested = fixture.viewModel.messages.filter { expectedIDs.contains($0.id) }
+            XCTAssertEqual(ingested.count, messageCount)
+        }
+
+        reportThroughput("pipeline.publicIngest", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    /// Spins the main run loop in small slices (draining main-queue tasks and
+    /// timers) until `condition` holds or `timeout` elapses.
+    private func spinMainRunLoop(timeout: TimeInterval, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+        return true
+    }
+
     // MARK: - Fixtures
 
     /// Builds deterministic signed kind-20000 geohash events. Content cycles
@@ -514,6 +647,42 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
             }
         }
         return context
+    }
+}
+
+// MARK: - End-to-end pipeline fixture
+
+/// A real `ChatViewModel` over `MockTransport` plus the AppRuntime-style
+/// feature models (`PrivateInboxModel` / `PublicChatModel`) bound to the same
+/// `ConversationStore`, so end-to-end ingest benchmarks cover the full
+/// current store-synchronization chain. Mirrors the construction used by
+/// `ChatViewModelExtensionsTests`.
+@MainActor
+private final class PerfPipelineFixture {
+    let viewModel: ChatViewModel
+    let transport: MockTransport
+    let conversationStore: ConversationStore
+    let privateInbox: PrivateInboxModel
+    let publicChat: PublicChatModel
+
+    init() {
+        let keychain = MockKeychain()
+        let idBridge = NostrIdentityBridge(keychain: MockKeychainHelper())
+        let identityManager = MockIdentityManager(keychain)
+        let transport = MockTransport()
+        let conversationStore = ConversationStore()
+
+        self.transport = transport
+        self.conversationStore = conversationStore
+        self.viewModel = ChatViewModel(
+            keychain: keychain,
+            idBridge: idBridge,
+            identityManager: identityManager,
+            transport: transport,
+            conversationStore: conversationStore
+        )
+        self.privateInbox = PrivateInboxModel(conversationStore: conversationStore)
+        self.publicChat = PublicChatModel(conversationStore: conversationStore)
     }
 }
 
