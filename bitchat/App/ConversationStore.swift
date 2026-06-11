@@ -64,10 +64,25 @@ final class Conversation: ObservableObject, Identifiable {
         return messages[index]
     }
 
+    /// All message IDs currently in this conversation (unordered).
+    var messageIDs: Dictionary<String, Int>.Keys {
+        indexByMessageID.keys
+    }
+
     // MARK: Store-internal mutations
 
+    /// Result of an ordered insert. `trimmedMessageIDs` reports messages
+    /// evicted by the cap so the store can keep its message-ID →
+    /// conversation map exact.
+    fileprivate struct InsertResult {
+        let inserted: Bool
+        let trimmedMessageIDs: [String]
+
+        static let duplicate = InsertResult(inserted: false, trimmedMessageIDs: [])
+    }
+
     fileprivate enum UpsertOutcome {
-        case appended
+        case appended(trimmedMessageIDs: [String])
         case updated
     }
 
@@ -75,9 +90,9 @@ final class Conversation: ObservableObject, Identifiable {
     /// Fast path appends when the timestamp is >= the current tail;
     /// otherwise a binary search finds the upper-bound insertion point so
     /// arrival order is preserved among equal timestamps.
-    /// Returns `false` if a message with the same ID already exists.
-    fileprivate func insert(_ message: BitchatMessage) -> Bool {
-        guard indexByMessageID[message.id] == nil else { return false }
+    /// Reports `inserted: false` if a message with the same ID already exists.
+    fileprivate func insert(_ message: BitchatMessage) -> InsertResult {
+        guard indexByMessageID[message.id] == nil else { return .duplicate }
 
         if let last = messages.last, message.timestamp < last.timestamp {
             let index = insertionIndex(for: message.timestamp)
@@ -88,8 +103,7 @@ final class Conversation: ObservableObject, Identifiable {
             indexByMessageID[message.id] = messages.count - 1
         }
 
-        trimIfNeeded()
-        return true
+        return InsertResult(inserted: true, trimmedMessageIDs: trimIfNeeded())
     }
 
     /// Replace-or-append by message ID. An existing message keeps its
@@ -100,14 +114,14 @@ final class Conversation: ObservableObject, Identifiable {
             messages[index] = message
             return .updated
         }
-        _ = insert(message)
-        return .appended
+        let result = insert(message)
+        return .appended(trimmedMessageIDs: result.trimmedMessageIDs)
     }
 
     /// Applies a delivery status keyed by message ID, honoring the
-    /// no-downgrade rule (mirrors `ChatDeliveryCoordinator.shouldSkipUpdate`):
-    /// equal statuses are skipped, and `.read` is never downgraded to
-    /// `.delivered` or `.sent`.
+    /// no-downgrade rule (the SOLE enforcement point — every delivery
+    /// update flows through the store): equal statuses are skipped, and
+    /// `.read` is never downgraded to `.delivered` or `.sent`.
     /// Returns `true` when the status was applied.
     fileprivate func applyDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
         guard let index = indexByMessageID[messageID] else { return false }
@@ -197,14 +211,17 @@ final class Conversation: ObservableObject, Identifiable {
         }
     }
 
-    private func trimIfNeeded() {
-        guard messages.count > cap else { return }
+    /// Trims oldest messages over the cap; returns the trimmed message IDs.
+    private func trimIfNeeded() -> [String] {
+        guard messages.count > cap else { return [] }
         let overflow = messages.count - cap
-        for message in messages.prefix(overflow) {
-            indexByMessageID.removeValue(forKey: message.id)
+        let trimmedIDs = messages.prefix(overflow).map(\.id)
+        for id in trimmedIDs {
+            indexByMessageID.removeValue(forKey: id)
         }
         messages.removeFirst(overflow)
         reindex(from: 0)
+        return trimmedIDs
     }
 }
 
@@ -242,6 +259,19 @@ final class ConversationStore: ObservableObject {
 
     private(set) var conversationsByID: [ConversationID: Conversation] = [:]
 
+    /// Store-level message-ID → conversation-membership map for ID-only
+    /// lookups (delivery receipts arrive with a message ID, not a
+    /// conversation). Maintained incrementally at every mutation point —
+    /// all mutation is centralized in the intent API below, so the map is
+    /// exact, never scanned or rebuilt.
+    ///
+    /// The value is a `Set` because a private message can legitimately live
+    /// in TWO direct conversations: step 2's raw per-peer keying mirrors a
+    /// message into both the stable-key and ephemeral-peer chats
+    /// (`mirrorToEphemeralIfNeeded`). A delivery update must reach both
+    /// copies.
+    private var conversationIDsByMessageID: [String: Set<ConversationID>] = [:]
+
     let changes = PassthroughSubject<ConversationChange, Never>()
 
     // MARK: Intent API
@@ -264,7 +294,10 @@ final class ConversationStore: ObservableObject {
     @discardableResult
     func append(_ message: BitchatMessage, to id: ConversationID) -> Bool {
         let conversation = conversation(for: id)
-        guard conversation.insert(message) else { return false }
+        let result = conversation.insert(message)
+        guard result.inserted else { return false }
+        registerMessageID(message.id, in: id)
+        unregisterMessageIDs(result.trimmedMessageIDs, from: id)
         changes.send(.appended(id, message))
         return true
     }
@@ -273,7 +306,9 @@ final class ConversationStore: ObservableObject {
     func upsertByID(_ message: BitchatMessage, in id: ConversationID) {
         let conversation = conversation(for: id)
         switch conversation.upsert(message) {
-        case .appended:
+        case .appended(let trimmedMessageIDs):
+            registerMessageID(message.id, in: id)
+            unregisterMessageIDs(trimmedMessageIDs, from: id)
             changes.send(.appended(id, message))
         case .updated:
             changes.send(.updated(id, messageID: message.id))
@@ -291,6 +326,44 @@ final class ConversationStore: ObservableObject {
         }
         changes.send(.statusChanged(id, messageID: messageID, status))
         return true
+    }
+
+    /// Applies a delivery status to EVERY conversation containing
+    /// `messageID` (ID-only — delivery receipts don't know conversations;
+    /// mirrored private copies live in two direct chats). Returns `false`
+    /// when the message is unknown or no copy changed (equal status or
+    /// downgrade — read beats delivered beats sent).
+    ///
+    /// `BitchatMessage` is a reference type, so mirrored copies sharing one
+    /// instance are updated by the first apply; subsequent conversations
+    /// skip as already-equal (state stays correct everywhere, the
+    /// `.statusChanged` event fires for the conversation that applied).
+    @discardableResult
+    func setDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
+        guard let ids = conversationIDsByMessageID[messageID] else { return false }
+        var applied = false
+        for id in ids where setDeliveryStatus(status, forMessageID: messageID, in: id) {
+            applied = true
+        }
+        return applied
+    }
+
+    /// Current delivery status of `messageID` in whichever conversation
+    /// holds it (mirrored copies share status — see `setDeliveryStatus`).
+    func deliveryStatus(forMessageID messageID: String) -> DeliveryStatus? {
+        guard let ids = conversationIDsByMessageID[messageID] else { return nil }
+        for id in ids {
+            if let status = conversationsByID[id]?.message(withID: messageID)?.deliveryStatus {
+                return status
+            }
+        }
+        return nil
+    }
+
+    /// Every conversation currently containing `messageID` (empty when the
+    /// message is unknown).
+    func conversationIDs(forMessageID messageID: String) -> Set<ConversationID> {
+        conversationIDsByMessageID[messageID] ?? []
     }
 
     func markRead(_ id: ConversationID) {
@@ -329,7 +402,13 @@ final class ConversationStore: ObservableObject {
 
         let destinationConversation = conversation(for: destination)
         for message in sourceConversation.messages {
-            _ = destinationConversation.insert(message)
+            let result = destinationConversation.insert(message)
+            guard result.inserted else { continue }
+            registerMessageID(message.id, in: destination)
+            unregisterMessageIDs(result.trimmedMessageIDs, from: destination)
+        }
+        for messageID in sourceConversation.messageIDs {
+            unregisterMessageID(messageID, from: source)
         }
 
         let wasUnread = unreadConversations.contains(source)
@@ -359,6 +438,7 @@ final class ConversationStore: ObservableObject {
               let removed = conversation.remove(messageID: messageID) else {
             return nil
         }
+        unregisterMessageID(messageID, from: id)
         changes.send(.messageRemoved(id, messageID: messageID))
         return removed
     }
@@ -368,7 +448,9 @@ final class ConversationStore: ObservableObject {
     /// conversation is consistent. No-op for unknown conversations.
     func removeMessages(from id: ConversationID, where predicate: (BitchatMessage) -> Bool) {
         guard let conversation = conversationsByID[id] else { return }
-        for messageID in conversation.removeAll(where: predicate) {
+        let removedIDs = conversation.removeAll(where: predicate)
+        unregisterMessageIDs(removedIDs, from: id)
+        for messageID in removedIDs {
             changes.send(.messageRemoved(id, messageID: messageID))
         }
     }
@@ -377,6 +459,9 @@ final class ConversationStore: ObservableObject {
     /// its unread/selection state) alive.
     func clear(_ id: ConversationID) {
         guard let conversation = conversationsByID[id] else { return }
+        for messageID in conversation.messageIDs {
+            unregisterMessageID(messageID, from: id)
+        }
         conversation.clearMessages()
         changes.send(.cleared(id))
     }
@@ -384,7 +469,10 @@ final class ConversationStore: ObservableObject {
     /// Removes a conversation entirely, including unread state; clears the
     /// selection if it pointed at the removed conversation.
     func removeConversation(_ id: ConversationID) {
-        guard conversationsByID.removeValue(forKey: id) != nil else { return }
+        guard let conversation = conversationsByID.removeValue(forKey: id) else { return }
+        for messageID in conversation.messageIDs {
+            unregisterMessageID(messageID, from: id)
+        }
         conversationIDs.removeAll { $0 == id }
         unreadConversations.remove(id)
         if selectedConversationID == id {
@@ -400,6 +488,7 @@ final class ConversationStore: ObservableObject {
         conversationsByID.removeAll()
         conversationIDs.removeAll()
         unreadConversations.removeAll()
+        conversationIDsByMessageID.removeAll()
         if selectedConversationID != nil {
             selectedConversationID = nil
         }
@@ -410,6 +499,26 @@ final class ConversationStore: ObservableObject {
     }
 
     // MARK: Internals
+
+    private func registerMessageID(_ messageID: String, in id: ConversationID) {
+        conversationIDsByMessageID[messageID, default: []].insert(id)
+    }
+
+    private func unregisterMessageID(_ messageID: String, from id: ConversationID) {
+        guard var ids = conversationIDsByMessageID[messageID] else { return }
+        ids.remove(id)
+        if ids.isEmpty {
+            conversationIDsByMessageID.removeValue(forKey: messageID)
+        } else {
+            conversationIDsByMessageID[messageID] = ids
+        }
+    }
+
+    private func unregisterMessageIDs(_ messageIDs: [String], from id: ConversationID) {
+        for messageID in messageIDs {
+            unregisterMessageID(messageID, from: id)
+        }
+    }
 
     private static func cap(for id: ConversationID) -> Int {
         switch id {
@@ -471,13 +580,23 @@ extension ConversationStore {
     }
 
     /// `true` when any direct conversation contains a message with `messageID`
-    /// (O(1) per conversation via the incremental ID index).
+    /// (O(1) via the store-level message-ID → conversation map).
     func directConversationsContainMessage(withID messageID: String) -> Bool {
+        conversationIDs(forMessageID: messageID).contains { id in
+            if case .direct = id { return true }
+            return false
+        }
+    }
+
+    /// Message IDs across all direct conversations (read-receipt pruning
+    /// keeps only receipts whose messages still exist).
+    func directMessageIDs() -> Set<String> {
+        var messageIDs = Set<String>()
         for (id, conversation) in conversationsByID {
             guard case .direct = id else { continue }
-            if conversation.containsMessage(withID: messageID) { return true }
+            messageIDs.formUnion(conversation.messageIDs)
         }
-        return false
+        return messageIDs
     }
 
     /// Removes every direct conversation (panic clear).
@@ -501,12 +620,10 @@ extension ConversationStore {
     /// message, if any.
     @discardableResult
     func removePublicMessage(withID messageID: String) -> BitchatMessage? {
-        for (id, conversation) in conversationsByID {
+        for id in conversationIDs(forMessageID: messageID) {
             switch id {
             case .mesh, .geohash:
-                if conversation.containsMessage(withID: messageID) {
-                    return removeMessage(withID: messageID, from: id)
-                }
+                return removeMessage(withID: messageID, from: id)
             case .direct:
                 continue
             }

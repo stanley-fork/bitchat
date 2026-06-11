@@ -194,26 +194,18 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("gcs.buildAndDecode", samples: samples, operations: repsPerPass, unit: "filters")
     }
 
-    // MARK: - 4a. Delivery location index (incremental path)
+    // MARK: - 4a. Delivery status updates through the coordinator (store path)
 
-    /// `ChatDeliveryCoordinator.updateMessageDeliveryStatus` against a warm
-    /// location index: 2000 public + 50x40 private messages, 500 status
-    /// updates per pass. Statuses alternate sent <-> delivered so every call
-    /// performs a real update (never the skip path).
+    /// `ChatDeliveryCoordinator.updateMessageDeliveryStatus` over the
+    /// `ConversationStore`'s message-ID → conversation map: 2000 public
+    /// (split mesh + geohash to stay under the per-conversation cap) + 50x40
+    /// private messages, 500 status updates per pass. Statuses alternate
+    /// sent <-> delivered so every call performs a real update (never the
+    /// skip path).
     func testDeliveryStatusIncrementalUpdates() {
         let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 50, messagesPerPeer: 40)
         let coordinator = ChatDeliveryCoordinator(context: context)
-        // Warm the index so the measure block exercises the incremental path.
-        XCTAssertTrue(coordinator.updateMessageDeliveryStatus(context.messages[0].id, status: .sent))
-
-        // 250 public + 250 private IDs spread across the corpus.
-        var targetIDs: [String] = []
-        for i in stride(from: 0, to: 2000, by: 8) { targetIDs.append(context.messages[i].id) }
-        let peerIDs = context.privateChats.keys.sorted { $0.id < $1.id }
-        for (offset, peer) in peerIDs.enumerated() where offset < 25 {
-            guard let chat = context.privateChats[peer] else { continue }
-            for i in stride(from: 0, to: chat.count, by: 4) { targetIDs.append(chat[i].id) }
-        }
+        let targetIDs = context.makeTargetIDs(publicTargets: 250, privateTargets: 250)
         XCTAssertEqual(targetIDs.count, 500)
 
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
@@ -235,46 +227,38 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("delivery.incrementalUpdate", samples: samples, operations: targetIDs.count, unit: "updates")
     }
 
-    // MARK: - 4b. Delivery location index (rebuild path)
+    // MARK: - 4b. Delivery status updates against the store directly
 
-    /// The expensive path: a non-append insertion (out-of-order arrival at
-    /// the head of the timeline) invalidates the index, so the next status
-    /// update triggers a full rebuild over ~4000 message locations.
-    func testDeliveryStatusIndexRebuild() {
+    /// `ConversationStore.setDeliveryStatus(_:forMessageID:)` at the same
+    /// scale as 4a, without the coordinator/context wrapping — the store-side
+    /// cost of an ID-only delivery update (map lookup + per-conversation
+    /// ID-index apply + change emission). Replaces the deleted
+    /// `delivery.indexRebuild` benchmark: the positional location index and
+    /// its rebuild path no longer exist; the store's ID indexes are
+    /// maintained inside each mutation, so there is no rebuild to measure.
+    func testDeliveryStatusStoreUpdates() {
         let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 50, messagesPerPeer: 40)
-        let coordinator = ChatDeliveryCoordinator(context: context)
-        // Warm the index before the first insertion invalidates it.
-        XCTAssertTrue(coordinator.updateMessageDeliveryStatus(context.messages[0].id, status: .sent))
+        let store = context.store
+        let targetIDs = context.makeTargetIDs(publicTargets: 250, privateTargets: 250)
+        XCTAssertEqual(targetIDs.count, 500)
 
-        // Pre-built head insertions, one consumed per measure pass.
-        let insertions: [BitchatMessage] = (0..<32).map { i in
-            BitchatMessage(
-                id: "insert-\(i)",
-                sender: "alice",
-                content: "out-of-order arrival \(i)",
-                timestamp: Date(timeIntervalSince1970: 1_690_000_000),
-                isRelay: false
-            )
-        }
-        let probeID = context.messages[1000].id
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
-        var pass = 0
         var toggle = false
         var samples: [TimeInterval] = []
 
         measure {
-            precondition(pass < insertions.count, "add more pre-built insertions")
-            context.messages.insert(insertions[pass], at: 0)
-            pass += 1
             toggle.toggle()
             let status: DeliveryStatus = toggle ? .delivered(to: "peer", at: fixedDate) : .sent
             let start = Date()
-            let updated = coordinator.updateMessageDeliveryStatus(probeID, status: status)
+            var updated = 0
+            for id in targetIDs where store.setDeliveryStatus(status, forMessageID: id) {
+                updated += 1
+            }
             samples.append(Date().timeIntervalSince(start))
-            XCTAssertTrue(updated)
+            XCTAssertEqual(updated, targetIDs.count)
         }
 
-        reportThroughput("delivery.indexRebuild", samples: samples, operations: 1, unit: "rebuilds")
+        reportThroughput("delivery.storeUpdate", samples: samples, operations: targetIDs.count, unit: "updates")
     }
 
     // MARK: - 5. Message formatting
@@ -638,14 +622,32 @@ private final class PerfNostrContext: ChatNostrContext {
 
 // MARK: - Mock ChatDeliveryContext
 
+/// Minimal `ChatDeliveryContext` over a real `ConversationStore` (the
+/// coordinator is a thin mapper onto store intents, so the measured cost is
+/// the store's ID-map delivery path).
 @MainActor
 private final class PerfDeliveryContext: ChatDeliveryContext {
-    var messages: [BitchatMessage] = []
-    var privateChats: [PeerID: [BitchatMessage]] = [:]
+    let store = ConversationStore()
     var sentReadReceipts: Set<String> = []
     var isStartupPhase: Bool { false }
+    private var publicIDs: [String] = []
+    private var privateIDsByPeer: [(peerID: PeerID, messageIDs: [String])] = []
+
     func notifyUIChanged() {}
     func markMessageDelivered(_ messageID: String) {}
+
+    @discardableResult
+    func setDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
+        store.setDeliveryStatus(status, forMessageID: messageID)
+    }
+
+    func deliveryStatus(forMessageID messageID: String) -> DeliveryStatus? {
+        store.deliveryStatus(forMessageID: messageID)
+    }
+
+    func privateMessageIDs() -> Set<String> {
+        store.directMessageIDs()
+    }
 
     func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
         let oldCount = sentReadReceipts.count
@@ -653,35 +655,30 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
         return oldCount - sentReadReceipts.count
     }
 
-    @discardableResult
-    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
-        guard var chat = privateChats[peerID],
-              let index = chat.firstIndex(where: { $0.id == messageID }) else {
-            return false
-        }
-        chat[index].deliveryStatus = status
-        privateChats[peerID] = chat
-        return true
-    }
-
-    /// 2000 public + `peerCount` x `messagesPerPeer` private messages with
-    /// deterministic IDs and timestamps.
+    /// `publicCount` public messages (split evenly between mesh and one
+    /// geohash conversation so the corpus stays under the per-conversation
+    /// cap) + `peerCount` x `messagesPerPeer` private messages, seeded into
+    /// the store with deterministic IDs and timestamps.
     static func makeCorpus(publicCount: Int, peerCount: Int, messagesPerPeer: Int) -> PerfDeliveryContext {
         let context = PerfDeliveryContext()
         let base = Date(timeIntervalSince1970: 1_700_000_000)
-        context.messages = (0..<publicCount).map { i in
-            BitchatMessage(
+        let geohashID = ConversationID.geohash("u4pruyd")
+        for i in 0..<publicCount {
+            let message = BitchatMessage(
                 id: "pub-\(i)",
                 sender: "peer\(i % 20)",
                 content: "public message number \(i)",
                 timestamp: base.addingTimeInterval(Double(i)),
                 isRelay: false
             )
+            context.store.append(message, to: i % 2 == 0 ? .mesh : geohashID)
+            context.publicIDs.append(message.id)
         }
         for p in 0..<peerCount {
             let peerID = PeerID(str: String(format: "%016x", 0xA000_0000 + p))
-            context.privateChats[peerID] = (0..<messagesPerPeer).map { i in
-                BitchatMessage(
+            var messageIDs: [String] = []
+            for i in 0..<messagesPerPeer {
+                let message = BitchatMessage(
                     id: "dm-\(p)-\(i)",
                     sender: "peer\(p)",
                     content: "private message \(i) for peer \(p)",
@@ -691,9 +688,31 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
                     recipientNickname: "me",
                     senderPeerID: peerID
                 )
+                context.store.append(message, to: .directPeer(peerID))
+                messageIDs.append(message.id)
             }
+            context.privateIDsByPeer.append((peerID, messageIDs))
         }
         return context
+    }
+
+    /// Deterministic update targets spread across the corpus: `publicTargets`
+    /// public IDs plus `privateTargets` private IDs.
+    func makeTargetIDs(publicTargets: Int, privateTargets: Int) -> [String] {
+        var targetIDs: [String] = []
+        let publicStride = max(1, publicIDs.count / publicTargets)
+        for i in stride(from: 0, to: publicIDs.count, by: publicStride) where targetIDs.count < publicTargets {
+            targetIDs.append(publicIDs[i])
+        }
+        var privateCount = 0
+        outer: for (_, messageIDs) in privateIDsByPeer {
+            for i in stride(from: 0, to: messageIDs.count, by: 4) {
+                guard privateCount < privateTargets else { break outer }
+                targetIDs.append(messageIDs[i])
+                privateCount += 1
+            }
+        }
+        return targetIDs
     }
 }
 

@@ -562,4 +562,159 @@ struct ConversationStoreTests {
         #expect(!conversation.containsMessage(withID: "one"))
         #expect(store.append(makeMessage(id: "one", timestamp: 2000), to: id))
     }
+
+    // MARK: - Store-level message-ID → conversation map (ID-only delivery)
+
+    @Test("ID map tracks append, upsert, and removal")
+    @MainActor
+    func messageIDMapTracksAppendAndRemoval() {
+        let store = ConversationStore()
+        let direct = makeDirectConversationID("aa")
+
+        #expect(store.conversationIDs(forMessageID: "m1").isEmpty)
+
+        store.append(makeMessage(id: "m1", timestamp: 1), to: .mesh)
+        #expect(store.conversationIDs(forMessageID: "m1") == [.mesh])
+
+        // Upsert-as-append registers; upsert-in-place does not duplicate.
+        store.upsertByID(makeMessage(id: "d1", timestamp: 1, isPrivate: true), in: direct)
+        store.upsertByID(makeMessage(id: "d1", timestamp: 1, isPrivate: true, deliveryStatus: .sent), in: direct)
+        #expect(store.conversationIDs(forMessageID: "d1") == [direct])
+
+        store.removeMessage(withID: "m1", from: .mesh)
+        #expect(store.conversationIDs(forMessageID: "m1").isEmpty)
+
+        store.removeMessages(from: direct, where: { $0.id == "d1" })
+        #expect(store.conversationIDs(forMessageID: "d1").isEmpty)
+    }
+
+    @Test("ID map handles multi-conversation membership (mirrored private copies)")
+    @MainActor
+    func messageIDMapHandlesMirroredCopies() {
+        let store = ConversationStore()
+        let stable = makeDirectConversationID("stable")
+        let ephemeral = makeDirectConversationID("ephemeral")
+
+        // Step 2's keying mirrors one private message into the stable-key
+        // AND ephemeral-peer conversations (distinct copies here to prove
+        // per-conversation bookkeeping).
+        store.upsertByID(makeMessage(id: "dm-1", timestamp: 1, isPrivate: true, deliveryStatus: .sent), in: stable)
+        store.upsertByID(makeMessage(id: "dm-1", timestamp: 1, isPrivate: true, deliveryStatus: .sent), in: ephemeral)
+        #expect(store.conversationIDs(forMessageID: "dm-1") == [stable, ephemeral])
+
+        // An ID-only delivery update reaches BOTH copies.
+        #expect(store.setDeliveryStatus(.delivered(to: "bob", at: Date()), forMessageID: "dm-1"))
+        for id in [stable, ephemeral] {
+            guard case .delivered = store.conversation(for: id).message(withID: "dm-1")?.deliveryStatus else {
+                Issue.record("expected .delivered in \(id)")
+                return
+            }
+        }
+
+        // Removing one copy keeps the other resolvable.
+        store.removeMessage(withID: "dm-1", from: ephemeral)
+        #expect(store.conversationIDs(forMessageID: "dm-1") == [stable])
+    }
+
+    @Test("ID-only setDeliveryStatus enforces no-downgrade and unknown IDs")
+    @MainActor
+    func idOnlyDeliveryStatusRules() {
+        let store = ConversationStore()
+        let direct = makeDirectConversationID("aa")
+        store.append(
+            makeMessage(id: "dm-1", timestamp: 1, isPrivate: true, deliveryStatus: .read(by: "bob", at: Date())),
+            to: direct
+        )
+
+        // Unknown message.
+        #expect(!store.setDeliveryStatus(.sent, forMessageID: "missing"))
+        #expect(store.deliveryStatus(forMessageID: "missing") == nil)
+
+        // Downgrade from .read is refused; status is readable by ID alone.
+        #expect(!store.setDeliveryStatus(.delivered(to: "bob", at: Date()), forMessageID: "dm-1"))
+        guard case .read = store.deliveryStatus(forMessageID: "dm-1") else {
+            Issue.record("expected .read to survive the downgrade attempt")
+            return
+        }
+    }
+
+    @Test("ID map follows migration between conversations")
+    @MainActor
+    func messageIDMapFollowsMigration() {
+        let store = ConversationStore()
+        let source = makeDirectConversationID("ephemeral")
+        let destination = makeDirectConversationID("stable")
+        store.append(makeMessage(id: "dm-1", timestamp: 1, isPrivate: true), to: source)
+        store.append(makeMessage(id: "dm-2", timestamp: 2, isPrivate: true), to: source)
+        // Already present in the destination: migration dedups, and the map
+        // must not retain a stale source membership.
+        store.append(makeMessage(id: "dm-2", timestamp: 2, isPrivate: true), to: destination)
+
+        store.migrateConversation(from: source, to: destination)
+
+        #expect(store.conversationIDs(forMessageID: "dm-1") == [destination])
+        #expect(store.conversationIDs(forMessageID: "dm-2") == [destination])
+        // Delivery updates keep flowing after the handoff.
+        #expect(store.setDeliveryStatus(.sent, forMessageID: "dm-1"))
+    }
+
+    @Test("ID map drops trimmed messages")
+    @MainActor
+    func messageIDMapDropsTrimmedMessages() {
+        let store = ConversationStore()
+        let id = ConversationID.geohash("u4pruyd")
+        let conversation = store.conversation(for: id)
+        store.append(makeMessage(id: "first", timestamp: 1), to: id)
+        for index in 0..<conversation.cap {
+            store.append(makeMessage(id: "filler-\(index)", timestamp: 2 + TimeInterval(index)), to: id)
+        }
+
+        // "first" fell off the cap: the map must forget it.
+        #expect(store.conversationIDs(forMessageID: "first").isEmpty)
+        #expect(!store.setDeliveryStatus(.sent, forMessageID: "first"))
+        // Survivors stay resolvable.
+        #expect(store.conversationIDs(forMessageID: "filler-0") == [id])
+    }
+
+    @Test("ID map is emptied by clear, removeConversation, and clearAll")
+    @MainActor
+    func messageIDMapClearedWithConversations() {
+        let store = ConversationStore()
+        let direct = makeDirectConversationID("aa")
+        store.append(makeMessage(id: "m1", timestamp: 1), to: .mesh)
+        store.append(makeMessage(id: "d1", timestamp: 1, isPrivate: true), to: direct)
+
+        store.clear(.mesh)
+        #expect(store.conversationIDs(forMessageID: "m1").isEmpty)
+        #expect(store.conversationIDs(forMessageID: "d1") == [direct])
+
+        store.removeConversation(direct)
+        #expect(store.conversationIDs(forMessageID: "d1").isEmpty)
+
+        store.append(makeMessage(id: "m2", timestamp: 2), to: .mesh)
+        store.clearAll()
+        #expect(store.conversationIDs(forMessageID: "m2").isEmpty)
+    }
+
+    @Test("shared message instance across conversations stays consistent")
+    @MainActor
+    func sharedInstanceMirroredCopiesStayConsistent() {
+        let store = ConversationStore()
+        let stable = makeDirectConversationID("stable")
+        let ephemeral = makeDirectConversationID("ephemeral")
+        // The production mirroring path upserts the SAME BitchatMessage
+        // instance (reference type) into both conversations.
+        let message = makeMessage(id: "dm-1", timestamp: 1, isPrivate: true, deliveryStatus: .sent)
+        store.upsertByID(message, in: stable)
+        store.upsertByID(message, in: ephemeral)
+
+        #expect(store.setDeliveryStatus(.delivered(to: "bob", at: Date()), forMessageID: "dm-1"))
+
+        for id in [stable, ephemeral] {
+            guard case .delivered = store.conversation(for: id).message(withID: "dm-1")?.deliveryStatus else {
+                Issue.record("expected .delivered in \(id)")
+                return
+            }
+        }
+    }
 }

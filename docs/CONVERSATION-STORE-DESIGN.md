@@ -1,9 +1,11 @@
 # Conversation Store: Single Source of Truth
 
-**Status:** Steps 1–3 implemented (additive store, private cutover, public
-cutover; `PublicTimelineStore` deleted). Baselines recorded in
+**Status:** Steps 1–4 implemented (additive store, private cutover, public
+cutover, delivery via store; `PublicTimelineStore` and
+`ChatDeliveryCoordinator.messageLocationIndex` deleted). Baselines recorded in
 `bitchatTests/Performance/PerformanceBaselineTests.swift` (`pipeline.privateIngest`,
-`pipeline.publicIngest`, `store.append`).
+`pipeline.publicIngest`, `store.append`, `delivery.incrementalUpdate`,
+`delivery.storeUpdate`).
 
 ---
 

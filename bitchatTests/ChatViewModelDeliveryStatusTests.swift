@@ -304,7 +304,7 @@ struct ChatViewModelDeliveryStatusTests {
     }
 
     @Test @MainActor
-    func deliveryStatus_indexRefreshesAfterPrivateChatReorder() async {
+    func deliveryStatus_survivesPrivateChatReorder() async {
         let (viewModel, transport) = makeTestableViewModel()
         let peerID = PeerID(str: "0102030405060708")
         let messageID = "reordered-msg-1"
@@ -335,8 +335,8 @@ struct ChatViewModelDeliveryStatusTests {
         #expect(isSent(viewModel.deliveryCoordinator.deliveryStatus(for: messageID)))
 
         // A late arrival with an older timestamp is inserted before the
-        // target by the store, shifting its position and invalidating the
-        // delivery coordinator's location index.
+        // target by the store, shifting its position; the store's ID-keyed
+        // indexes must keep the target updatable.
         viewModel.seedPrivateChat([olderMessage], for: peerID)
         #expect(viewModel.privateChats[peerID]?.map(\.id) == ["older-msg", messageID])
 
@@ -383,15 +383,30 @@ struct ChatViewModelDeliveryStatusTests {
 // MARK: - Mock Delivery Context
 
 /// Lightweight stand-in for `ChatDeliveryContext` proving that
-/// `ChatDeliveryCoordinator` is testable without constructing a `ChatViewModel`.
+/// `ChatDeliveryCoordinator` is testable without constructing a
+/// `ChatViewModel`: the delivery surface forwards to a real
+/// `ConversationStore` (the coordinator is a thin mapper over store
+/// intents), and assertions read store state.
 @MainActor
 private final class MockChatDeliveryContext: ChatDeliveryContext {
-    var messages: [BitchatMessage] = []
-    var privateChats: [PeerID: [BitchatMessage]] = [:]
+    let store = ConversationStore()
     var sentReadReceipts: Set<String> = []
     var isStartupPhase = false
     private(set) var notifyUIChangedCount = 0
     private(set) var markedDeliveredMessageIDs: [String] = []
+
+    @discardableResult
+    func setDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
+        store.setDeliveryStatus(status, forMessageID: messageID)
+    }
+
+    func deliveryStatus(forMessageID messageID: String) -> DeliveryStatus? {
+        store.deliveryStatus(forMessageID: messageID)
+    }
+
+    func privateMessageIDs() -> Set<String> {
+        store.directMessageIDs()
+    }
 
     func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
         let oldCount = sentReadReceipts.count
@@ -406,29 +421,19 @@ private final class MockChatDeliveryContext: ChatDeliveryContext {
     func markMessageDelivered(_ messageID: String) {
         markedDeliveredMessageIDs.append(messageID)
     }
-
-    @discardableResult
-    func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool {
-        guard var chat = privateChats[peerID],
-              let index = chat.firstIndex(where: { $0.id == messageID }) else {
-            return false
-        }
-        if Conversation.shouldSkipStatusUpdate(current: chat[index].deliveryStatus, new: status) {
-            return false
-        }
-        chat[index].deliveryStatus = status
-        privateChats[peerID] = chat
-        return true
-    }
 }
 
 @MainActor
-private func makePrivateMessage(id: String, status: DeliveryStatus) -> BitchatMessage {
+private func makePrivateMessage(
+    id: String,
+    status: DeliveryStatus,
+    timestamp: Date = Date()
+) -> BitchatMessage {
     BitchatMessage(
         id: id,
         sender: "me",
         content: "Test message",
-        timestamp: Date(),
+        timestamp: timestamp,
         isRelay: false,
         isPrivate: true,
         recipientNickname: "Peer",
@@ -437,10 +442,28 @@ private func makePrivateMessage(id: String, status: DeliveryStatus) -> BitchatMe
     )
 }
 
+@MainActor
+private func makePublicMessage(
+    id: String,
+    status: DeliveryStatus,
+    timestamp: Date = Date()
+) -> BitchatMessage {
+    BitchatMessage(
+        id: id,
+        sender: "me",
+        content: "Public message",
+        timestamp: timestamp,
+        isRelay: false,
+        isPrivate: false,
+        deliveryStatus: status
+    )
+}
+
 // MARK: - Coordinator Tests Against Mock Context
 
 /// Exercises `ChatDeliveryCoordinator` against `MockChatDeliveryContext` —
-/// the exemplar for the narrow-dependency coordinator pattern.
+/// the exemplar for the narrow-dependency coordinator pattern. State is
+/// seeded into and asserted against the mock's `ConversationStore`.
 struct ChatDeliveryCoordinatorContextTests {
 
     @Test @MainActor
@@ -449,7 +472,7 @@ struct ChatDeliveryCoordinatorContextTests {
         let coordinator = ChatDeliveryCoordinator(context: context)
         let peerID = PeerID(str: "0102030405060708")
         let messageID = "mock-msg-1"
-        context.privateChats[peerID] = [makePrivateMessage(id: messageID, status: .sent)]
+        context.store.append(makePrivateMessage(id: messageID, status: .sent), to: .directPeer(peerID))
 
         let didUpdate = coordinator.updateMessageDeliveryStatus(
             messageID,
@@ -457,7 +480,7 @@ struct ChatDeliveryCoordinatorContextTests {
         )
 
         #expect(didUpdate)
-        #expect(isDelivered(context.privateChats[peerID]?.first?.deliveryStatus))
+        #expect(isDelivered(context.store.conversation(for: .directPeer(peerID)).message(withID: messageID)?.deliveryStatus))
         #expect(context.notifyUIChangedCount == 1)
         #expect(context.markedDeliveredMessageIDs == [messageID])
     }
@@ -468,13 +491,16 @@ struct ChatDeliveryCoordinatorContextTests {
         let coordinator = ChatDeliveryCoordinator(context: context)
         let peerID = PeerID(str: "0102030405060708")
         let messageID = "mock-msg-2"
-        context.privateChats[peerID] = [makePrivateMessage(id: messageID, status: .delivered(to: "Peer", at: Date()))]
+        context.store.append(
+            makePrivateMessage(id: messageID, status: .delivered(to: "Peer", at: Date())),
+            to: .directPeer(peerID)
+        )
 
         coordinator.didReceiveReadReceipt(
             ReadReceipt(originalMessageID: messageID, readerID: peerID, readerNickname: "Peer")
         )
 
-        #expect(isRead(context.privateChats[peerID]?.first?.deliveryStatus))
+        #expect(isRead(coordinator.deliveryStatus(for: messageID)))
         #expect(context.notifyUIChangedCount == 1)
         #expect(context.markedDeliveredMessageIDs == [messageID])
     }
@@ -483,22 +509,12 @@ struct ChatDeliveryCoordinatorContextTests {
     func sentStatus_doesNotMarkDeliveredAndUnknownMessageDoesNotNotify() async {
         let context = MockChatDeliveryContext()
         let coordinator = ChatDeliveryCoordinator(context: context)
-        context.messages = [
-            BitchatMessage(
-                id: "public-mock-1",
-                sender: "me",
-                content: "Public message",
-                timestamp: Date(),
-                isRelay: false,
-                isPrivate: false,
-                deliveryStatus: .sending
-            )
-        ]
+        context.store.append(makePublicMessage(id: "public-mock-1", status: .sending), to: .mesh)
 
         // .sent is not a confirmed receipt — must not reach markMessageDelivered.
         let didUpdate = coordinator.updateMessageDeliveryStatus("public-mock-1", status: .sent)
         #expect(didUpdate)
-        #expect(isSent(context.messages.first?.deliveryStatus))
+        #expect(isSent(context.store.conversation(for: .mesh).message(withID: "public-mock-1")?.deliveryStatus))
         #expect(context.markedDeliveredMessageIDs.isEmpty)
         #expect(context.notifyUIChangedCount == 1)
 
@@ -508,57 +524,98 @@ struct ChatDeliveryCoordinatorContextTests {
         #expect(context.notifyUIChangedCount == 1)
     }
 
+    // The old positional `messageLocationIndex` could go stale when a late
+    // arrival was inserted mid-array (count grew but indexed locations
+    // shifted). The store's per-conversation ID index is reindexed inside the
+    // same mutation, so staleness is structurally impossible — these tests
+    // pin the equivalent behavior through the new path: after out-of-order
+    // insertion, updates keyed by ID still land on the right messages.
+
     @Test @MainActor
-    func middleInsertedMessage_isFoundAfterIndexWasBuilt() async {
+    func middleInsertedMessage_isStillUpdatableByID() async {
         let context = MockChatDeliveryContext()
         let coordinator = ChatDeliveryCoordinator(context: context)
-        let makePublic = { (id: String) in
-            BitchatMessage(
-                id: id,
-                sender: "me",
-                content: "Public message",
-                timestamp: Date(),
-                isRelay: false,
-                isPrivate: false,
-                deliveryStatus: .sending
-            )
-        }
-        context.messages = [makePublic("public-a"), makePublic("public-b")]
+        context.store.append(
+            makePublicMessage(id: "public-a", status: .sending, timestamp: Date(timeIntervalSince1970: 10)),
+            to: .mesh
+        )
+        context.store.append(
+            makePublicMessage(id: "public-b", status: .sending, timestamp: Date(timeIntervalSince1970: 30)),
+            to: .mesh
+        )
 
-        // Build the incremental index.
         #expect(coordinator.updateMessageDeliveryStatus("public-a", status: .sent))
 
-        // Out-of-order arrival: PublicMessagePipeline inserts by timestamp,
-        // so the count grows while the tail ID stays the same.
-        context.messages.insert(makePublic("public-mid"), at: 1)
+        // Out-of-order arrival: the store inserts by timestamp, shifting the
+        // tail's position.
+        context.store.append(
+            makePublicMessage(id: "public-mid", status: .sending, timestamp: Date(timeIntervalSince1970: 20)),
+            to: .mesh
+        )
+        let mesh = context.store.conversation(for: .mesh)
+        #expect(mesh.messages.map(\.id) == ["public-a", "public-mid", "public-b"])
 
-        // The inserted message must be locatable, and the shifted tail must
-        // not be updated through a stale index entry.
+        // Both the inserted message and the shifted tail stay updatable.
         #expect(coordinator.updateMessageDeliveryStatus("public-mid", status: .sent))
-        #expect(isSent(context.messages[1].deliveryStatus))
+        #expect(isSent(mesh.message(withID: "public-mid")?.deliveryStatus))
         #expect(coordinator.updateMessageDeliveryStatus("public-b", status: .sent))
-        #expect(isSent(context.messages[2].deliveryStatus))
+        #expect(isSent(mesh.message(withID: "public-b")?.deliveryStatus))
     }
 
     @Test @MainActor
-    func middleInsertedPrivateMessage_isFoundAfterIndexWasBuilt() async {
+    func middleInsertedPrivateMessage_isStillUpdatableByID() async {
         let context = MockChatDeliveryContext()
         let coordinator = ChatDeliveryCoordinator(context: context)
         let peerID = PeerID(str: "0102030405060708")
-        context.privateChats[peerID] = [
-            makePrivateMessage(id: "pm-a", status: .sending),
-            makePrivateMessage(id: "pm-b", status: .sending)
-        ]
+        let conversationID = ConversationID.directPeer(peerID)
+        context.store.append(
+            makePrivateMessage(id: "pm-a", status: .sending, timestamp: Date(timeIntervalSince1970: 10)),
+            to: conversationID
+        )
+        context.store.append(
+            makePrivateMessage(id: "pm-b", status: .sending, timestamp: Date(timeIntervalSince1970: 30)),
+            to: conversationID
+        )
 
         #expect(coordinator.updateMessageDeliveryStatus("pm-a", status: .sent))
 
-        // Timestamp re-sort (sanitizeChat) can place a late arrival mid-array.
-        context.privateChats[peerID]?.insert(makePrivateMessage(id: "pm-mid", status: .sending), at: 1)
+        // A late arrival with an older timestamp lands mid-array.
+        context.store.append(
+            makePrivateMessage(id: "pm-mid", status: .sending, timestamp: Date(timeIntervalSince1970: 20)),
+            to: conversationID
+        )
+        let chat = context.store.conversation(for: conversationID)
+        #expect(chat.messages.map(\.id) == ["pm-a", "pm-mid", "pm-b"])
 
         #expect(coordinator.updateMessageDeliveryStatus("pm-mid", status: .sent))
-        #expect(isSent(context.privateChats[peerID]?[1].deliveryStatus))
+        #expect(isSent(chat.message(withID: "pm-mid")?.deliveryStatus))
         #expect(coordinator.updateMessageDeliveryStatus("pm-b", status: .sent))
-        #expect(isSent(context.privateChats[peerID]?[2].deliveryStatus))
+        #expect(isSent(chat.message(withID: "pm-b")?.deliveryStatus))
+    }
+
+    @Test @MainActor
+    func mirroredPrivateCopies_bothReceiveDeliveryUpdate() async {
+        let context = MockChatDeliveryContext()
+        let coordinator = ChatDeliveryCoordinator(context: context)
+        let stablePeerID = PeerID(str: String(repeating: "ab", count: 32))
+        let ephemeralPeerID = PeerID(str: "0102030405060708")
+        let messageID = "mirrored-mock-1"
+
+        // Step 2's keying mirrors a private message into both the stable-key
+        // and ephemeral-peer conversations (distinct copies here to prove
+        // per-conversation application, not shared-reference aliasing).
+        context.store.append(makePrivateMessage(id: messageID, status: .sent), to: .directPeer(stablePeerID))
+        context.store.append(makePrivateMessage(id: messageID, status: .sent), to: .directPeer(ephemeralPeerID))
+
+        let didUpdate = coordinator.updateMessageDeliveryStatus(
+            messageID,
+            status: .delivered(to: "Peer", at: Date())
+        )
+
+        #expect(didUpdate)
+        #expect(isDelivered(context.store.conversation(for: .directPeer(stablePeerID)).message(withID: messageID)?.deliveryStatus))
+        #expect(isDelivered(context.store.conversation(for: .directPeer(ephemeralPeerID)).message(withID: messageID)?.deliveryStatus))
+        #expect(context.markedDeliveredMessageIDs == [messageID])
     }
 
     @Test @MainActor
@@ -566,7 +623,7 @@ struct ChatDeliveryCoordinatorContextTests {
         let context = MockChatDeliveryContext()
         let coordinator = ChatDeliveryCoordinator(context: context)
         let peerID = PeerID(str: "0102030405060708")
-        context.privateChats[peerID] = [makePrivateMessage(id: "keep-receipt", status: .sent)]
+        context.store.append(makePrivateMessage(id: "keep-receipt", status: .sent), to: .directPeer(peerID))
         context.sentReadReceipts = ["keep-receipt", "drop-receipt"]
 
         // Startup phase: cleanup must be a no-op.
