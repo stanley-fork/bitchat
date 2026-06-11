@@ -10,6 +10,9 @@ jobs:
   test:
     name: Run Swift Tests (${{ matrix.name }})
     runs-on: macos-latest
+    # A hung test must fail fast, not hold a runner for GitHub's 360-minute
+    # default (observed: intermittent app-suite hangs starving the queue).
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false # Don't cancel other matrix jobs when one fails
@@ -76,6 +79,7 @@ jobs:
   ios-build:
     name: Build iOS app (simulator)
     runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
