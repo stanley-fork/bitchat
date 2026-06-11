@@ -37,7 +37,7 @@ final class PeerListModel: ObservableObject {
     @Published private(set) var renderID = ""
 
     private let chatViewModel: ChatViewModel
-    private let conversationStore: ConversationStore
+    private let conversationStore: LegacyConversationStore
     private let locationChannelsModel: LocationChannelsModel
     private let peerIdentityStore: PeerIdentityStore
     private let locationPresenceStore: LocationPresenceStore
@@ -45,7 +45,7 @@ final class PeerListModel: ObservableObject {
 
     init(
         chatViewModel: ChatViewModel,
-        conversationStore: ConversationStore,
+        conversationStore: LegacyConversationStore,
         locationChannelsModel: LocationChannelsModel? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil

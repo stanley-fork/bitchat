@@ -197,7 +197,7 @@ final class IdentityResolver {
 }
 
 @MainActor
-final class ConversationStore: ObservableObject {
+final class LegacyConversationStore: ObservableObject {
     @Published private(set) var activeChannel: ChannelID = .mesh
     @Published private(set) var selectedPrivatePeerID: PeerID?
     @Published private(set) var selectedConversationID: ConversationID = .mesh

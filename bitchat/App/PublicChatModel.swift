@@ -7,10 +7,10 @@ final class PublicChatModel: ObservableObject {
     @Published private(set) var activeChannel: ChannelID
     @Published private(set) var messages: [BitchatMessage] = []
 
-    private let conversationStore: ConversationStore
+    private let conversationStore: LegacyConversationStore
     private var cancellables = Set<AnyCancellable>()
 
-    init(conversationStore: ConversationStore) {
+    init(conversationStore: LegacyConversationStore) {
         self.activeChannel = conversationStore.activeChannel
         self.conversationStore = conversationStore
 

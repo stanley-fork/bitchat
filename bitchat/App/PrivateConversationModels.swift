@@ -8,10 +8,10 @@ final class PrivateInboxModel: ObservableObject {
     @Published private(set) var unreadPeerIDs: Set<PeerID> = []
     @Published private(set) var messagesByPeerID: [PeerID: [BitchatMessage]] = [:]
 
-    private let conversationStore: ConversationStore
+    private let conversationStore: LegacyConversationStore
     private var cancellables = Set<AnyCancellable>()
 
-    init(conversationStore: ConversationStore) {
+    init(conversationStore: LegacyConversationStore) {
         self.conversationStore = conversationStore
 
         bind()
@@ -94,14 +94,14 @@ final class PrivateConversationModel: ObservableObject {
     @Published private(set) var selectedHeaderState: PrivateConversationHeaderState?
 
     private let chatViewModel: ChatViewModel
-    private let conversationStore: ConversationStore
+    private let conversationStore: LegacyConversationStore
     private let locationChannelsModel: LocationChannelsModel
     private let peerIdentityStore: PeerIdentityStore
     private var cancellables = Set<AnyCancellable>()
 
     init(
         chatViewModel: ChatViewModel,
-        conversationStore: ConversationStore,
+        conversationStore: LegacyConversationStore,
         locationChannelsModel: LocationChannelsModel? = nil,
         peerIdentityStore: PeerIdentityStore? = nil
     ) {

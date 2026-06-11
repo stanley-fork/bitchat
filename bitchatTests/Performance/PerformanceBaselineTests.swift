@@ -333,7 +333,7 @@ final class PerformanceBaselineTests: XCTestCase {
     /// Baseline for the full private-message ingest cycle through a real
     /// `ChatViewModel`: `handlePrivateMessage` → `privateChats` passthrough →
     /// `PrivateChatManager`'s `@Published` dict → bootstrapper Combine sink →
-    /// `Task.yield`-debounced `ConversationStore.synchronizePrivateChats`
+    /// `Task.yield`-debounced `LegacyConversationStore.synchronizePrivateChats`
     /// (full-dict replace) → `PrivateInboxModel.refreshMessages` (full
     /// rebuild). Measures wall time from first ingest until the store AND the
     /// feature model both reflect every message. The peer is not mesh-active
@@ -370,14 +370,14 @@ final class PerformanceBaselineTests: XCTestCase {
             for message in messages {
                 fixture.viewModel.handlePrivateMessage(message)
             }
-            // Drain the main queue until the debounced ConversationStore sync
+            // Drain the main queue until the debounced LegacyConversationStore sync
             // ran and the PrivateInboxModel mirror caught up.
             let consistent = spinMainRunLoop(timeout: 10) {
                 fixture.conversationStore.directMessagesByPeerID()[peerID]?.count == messageCount
                     && fixture.privateInbox.messagesByPeerID[peerID]?.count == messageCount
             }
             samples.append(Date().timeIntervalSince(start))
-            XCTAssertTrue(consistent, "ConversationStore/PrivateInboxModel never converged")
+            XCTAssertTrue(consistent, "LegacyConversationStore/PrivateInboxModel never converged")
             XCTAssertEqual(fixture.viewModel.privateChats[peerID]?.count, messageCount)
         }
 
@@ -390,7 +390,7 @@ final class PerformanceBaselineTests: XCTestCase {
     /// `ChatViewModel`: `didReceivePublicMessage` (transport delegate entry,
     /// main-actor Task hop per message) → `handlePublicMessage` (rate limit,
     /// `PublicTimelineStore` append, per-message full-array
-    /// `ConversationStore` sync) → `PublicMessagePipeline` timer-batched
+    /// `LegacyConversationStore` sync) → `PublicMessagePipeline` timer-batched
     /// flush into `ChatViewModel.messages` → `PublicChatModel` mirror.
     /// Measures until `messages` and the feature model reflect every message,
     /// so the pipeline's flush latency is part of the cycle. Senders are
@@ -448,6 +448,44 @@ final class PerformanceBaselineTests: XCTestCase {
         }
 
         reportThroughput("pipeline.publicIngest", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    // MARK: - 7. ConversationStore append (to-be architecture)
+
+    /// Core op of the new single-source-of-truth `ConversationStore`
+    /// (docs/CONVERSATION-STORE-DESIGN.md): 1000 appends into one
+    /// conversation, every 10th arriving out of order so the binary-search
+    /// insert path (plus suffix reindex) is part of the measured work.
+    /// Includes per-message ID-index dedup and the per-conversation
+    /// `@Published` array write.
+    func testConversationStoreAppend() {
+        let messageCount = 1000
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let messages: [BitchatMessage] = (0..<messageCount).map { i in
+            // Every 10th message is "late": its timestamp predates already
+            // appended messages, forcing the ordered-insert slow path.
+            let offset = (i % 10 == 9) ? Double(i) - 5.5 : Double(i)
+            return BitchatMessage(
+                id: "perf-store-\(i)",
+                sender: "perfsender",
+                content: "store append message \(i)",
+                timestamp: base.addingTimeInterval(offset),
+                isRelay: false
+            )
+        }
+        var samples: [TimeInterval] = []
+
+        measure {
+            let store = ConversationStore()
+            let start = Date()
+            for message in messages {
+                store.append(message, to: .mesh)
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertEqual(store.conversation(for: .mesh).messages.count, messageCount)
+        }
+
+        reportThroughput("store.append", samples: samples, operations: messageCount, unit: "messages")
     }
 
     /// Spins the main run loop in small slices (draining main-queue tasks and
@@ -654,14 +692,14 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
 
 /// A real `ChatViewModel` over `MockTransport` plus the AppRuntime-style
 /// feature models (`PrivateInboxModel` / `PublicChatModel`) bound to the same
-/// `ConversationStore`, so end-to-end ingest benchmarks cover the full
+/// `LegacyConversationStore`, so end-to-end ingest benchmarks cover the full
 /// current store-synchronization chain. Mirrors the construction used by
 /// `ChatViewModelExtensionsTests`.
 @MainActor
 private final class PerfPipelineFixture {
     let viewModel: ChatViewModel
     let transport: MockTransport
-    let conversationStore: ConversationStore
+    let conversationStore: LegacyConversationStore
     let privateInbox: PrivateInboxModel
     let publicChat: PublicChatModel
 
@@ -670,7 +708,7 @@ private final class PerfPipelineFixture {
         let idBridge = NostrIdentityBridge(keychain: MockKeychainHelper())
         let identityManager = MockIdentityManager(keychain)
         let transport = MockTransport()
-        let conversationStore = ConversationStore()
+        let conversationStore = LegacyConversationStore()
 
         self.transport = transport
         self.conversationStore = conversationStore

@@ -15,14 +15,14 @@ final class ConversationUIModel: ObservableObject {
 
     private let chatViewModel: ChatViewModel
     private let privateConversationModel: PrivateConversationModel
-    private let conversationStore: ConversationStore
+    private let conversationStore: LegacyConversationStore
     private var activeChannel: ChannelID
     private var cancellables = Set<AnyCancellable>()
 
     init(
         chatViewModel: ChatViewModel,
         privateConversationModel: PrivateConversationModel,
-        conversationStore: ConversationStore
+        conversationStore: LegacyConversationStore
     ) {
         self.chatViewModel = chatViewModel
         self.privateConversationModel = privateConversationModel

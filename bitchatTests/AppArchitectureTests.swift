@@ -146,10 +146,10 @@ struct AppArchitectureTests {
         #expect(Set([first, second]).count == 1)
     }
 
-    @Test("ConversationStore normalizes timeline ordering and duplicates")
+    @Test("LegacyConversationStore normalizes timeline ordering and duplicates")
     @MainActor
     func conversationStoreNormalizesMessages() {
-        let store = ConversationStore()
+        let store = LegacyConversationStore()
         let older = BitchatMessage(
             id: "m1",
             sender: "alice",
@@ -191,10 +191,10 @@ struct AppArchitectureTests {
         #expect(messages.last?.content == "second-updated")
     }
 
-    @Test("ConversationStore tracks unread direct conversations with canonical IDs")
+    @Test("LegacyConversationStore tracks unread direct conversations with canonical IDs")
     @MainActor
     func conversationStoreTracksUnreadDirectConversations() {
-        let store = ConversationStore()
+        let store = LegacyConversationStore()
         let resolver = IdentityResolver()
         let peerID = PeerID(str: "peer-1")
         let message = BitchatMessage(
@@ -226,10 +226,10 @@ struct AppArchitectureTests {
         #expect(!store.unreadConversations.contains(conversationID))
     }
 
-    @Test("ConversationStore tracks the selected app conversation context")
+    @Test("LegacyConversationStore tracks the selected app conversation context")
     @MainActor
     func conversationStoreTracksSelectedConversationContext() {
-        let store = ConversationStore()
+        let store = LegacyConversationStore()
         let resolver = IdentityResolver()
         let noiseKey = Data((0..<32).map(UInt8.init))
         let shortPeerID = PeerID(str: "0011223344556677")
@@ -268,10 +268,10 @@ struct AppArchitectureTests {
         #expect(store.selectedConversationID == ConversationID.mesh)
     }
 
-    @Test("ConversationStore exposes direct conversations by the latest routing peer ID")
+    @Test("LegacyConversationStore exposes direct conversations by the latest routing peer ID")
     @MainActor
     func conversationStoreExposesDirectConversationsByLatestRoutingPeerID() {
-        let store = ConversationStore()
+        let store = LegacyConversationStore()
         let resolver = IdentityResolver()
         let noiseKey = Data((0..<32).map(UInt8.init))
         let shortPeerID = PeerID(str: "0011223344556677")
@@ -334,10 +334,10 @@ struct AppArchitectureTests {
         #expect(store.unreadDirectPeerIDs() == Set([fullPeerID]))
     }
 
-    @Test("PrivateInboxModel mirrors direct message state from ConversationStore")
+    @Test("PrivateInboxModel mirrors direct message state from LegacyConversationStore")
     @MainActor
     func privateInboxModelMirrorsDirectMessageStateFromConversationStore() async {
-        let store = ConversationStore()
+        let store = LegacyConversationStore()
         let resolver = IdentityResolver()
         let inboxModel = PrivateInboxModel(conversationStore: store)
         let messagePeerID = PeerID(str: "peer-1")
@@ -383,7 +383,7 @@ struct AppArchitectureTests {
     @MainActor
     func appChromeModelMirrorsNicknameAndUnreadState() async {
         let viewModel = makeArchitectureViewModel()
-        let conversationStore = ConversationStore()
+        let conversationStore = LegacyConversationStore()
         let resolver = IdentityResolver()
         let privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
         let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
@@ -414,7 +414,7 @@ struct AppArchitectureTests {
     @MainActor
     func appChromeModelOwnsPresentationState() {
         let viewModel = makeArchitectureViewModel()
-        let conversationStore = ConversationStore()
+        let conversationStore = LegacyConversationStore()
         let privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
         let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
         let peerID = PeerID(str: "peer-2")

@@ -270,7 +270,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let meshService: Transport
     let idBridge: NostrIdentityBridge
     let identityManager: SecureIdentityStateManagerProtocol
-    let conversationStore: ConversationStore
+    let conversationStore: LegacyConversationStore
     let identityResolver: IdentityResolver
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
@@ -532,13 +532,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         keychain: KeychainManagerProtocol,
         idBridge: NostrIdentityBridge,
         identityManager: SecureIdentityStateManagerProtocol,
-        conversationStore: ConversationStore? = nil,
+        conversationStore: LegacyConversationStore? = nil,
         identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
         locationManager: LocationChannelManager = .shared
     ) {
-        let conversationStore = conversationStore ?? ConversationStore()
+        let conversationStore = conversationStore ?? LegacyConversationStore()
         let identityResolver = identityResolver ?? IdentityResolver()
         self.init(
             keychain: keychain,
@@ -561,13 +561,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         idBridge: NostrIdentityBridge,
         identityManager: SecureIdentityStateManagerProtocol,
         transport: Transport,
-        conversationStore: ConversationStore? = nil,
+        conversationStore: LegacyConversationStore? = nil,
         identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
         locationManager: LocationChannelManager = .shared
     ) {
-        let conversationStore = conversationStore ?? ConversationStore()
+        let conversationStore = conversationStore ?? LegacyConversationStore()
         let identityResolver = identityResolver ?? IdentityResolver()
         let peerIdentityStore = peerIdentityStore ?? PeerIdentityStore()
         let locationPresenceStore = locationPresenceStore ?? LocationPresenceStore()

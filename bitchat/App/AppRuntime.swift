@@ -14,7 +14,7 @@ import AppKit
 final class AppRuntime: ObservableObject {
     let chatViewModel: ChatViewModel
     let events = AppEventStream()
-    let conversationStore: ConversationStore
+    let conversationStore: LegacyConversationStore
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
     let publicChatModel: PublicChatModel
@@ -43,7 +43,7 @@ final class AppRuntime: ObservableObject {
     ) {
         self.idBridge = idBridge
         let identityResolver = IdentityResolver()
-        let conversationStore = ConversationStore()
+        let conversationStore = LegacyConversationStore()
         let peerIdentityStore = PeerIdentityStore()
         let locationPresenceStore = LocationPresenceStore()
         let locationManager = LocationChannelManager.shared
