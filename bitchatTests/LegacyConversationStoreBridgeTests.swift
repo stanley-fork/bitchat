@@ -174,4 +174,73 @@ struct LegacyConversationStoreBridgeTests {
         #expect(legacy.directMessagesByPeerID()[oldPeerID] ?? [] == [])
         #expect(legacy.directMessagesByPeerID()[newPeerID]?.map(\.id) == ["coord-mig-1"])
     }
+
+    // MARK: - Public mirroring (migration step 3)
+
+    @Test("public messages mirror into Legacy via the coalesced flush")
+    @MainActor
+    func publicMessagesMirrorIntoLegacy() async {
+        let (viewModel, store, legacy, _) = makeBridgedFixture()
+
+        viewModel.appendPublicMessage(
+            BitchatMessage(
+                id: "bridge-pub-1",
+                sender: "alice",
+                content: "hello mesh",
+                timestamp: Date(),
+                isRelay: false
+            ),
+            to: .mesh
+        )
+        viewModel.appendGeohashMessageIfAbsent(
+            BitchatMessage(
+                id: "bridge-geo-1",
+                sender: "bob#abcd",
+                content: "hello geohash",
+                timestamp: Date(),
+                isRelay: false
+            ),
+            toGeohash: "U4PRUYD"
+        )
+
+        // The new store is synchronously authoritative (geohash keys are
+        // normalized to lowercase).
+        #expect(store.conversation(for: .mesh).messages.map(\.id) == ["bridge-pub-1"])
+        #expect(store.conversation(for: .geohash("u4pruyd")).messages.map(\.id) == ["bridge-geo-1"])
+
+        // Legacy catches up within one coalesced flush.
+        let mirrored = await TestHelpers.waitUntil(
+            {
+                legacy.messages(for: .mesh).map(\.id) == ["bridge-pub-1"]
+                    && legacy.messages(for: .geohash("u4pruyd")).map(\.id) == ["bridge-geo-1"]
+            },
+            timeout: 1.0
+        )
+        #expect(mirrored)
+    }
+
+    @Test("removing a public conversation empties its Legacy mirror immediately")
+    @MainActor
+    func publicConversationRemovalClearsLegacy() async {
+        let (viewModel, store, legacy, _) = makeBridgedFixture()
+        viewModel.appendPublicMessage(
+            BitchatMessage(
+                id: "bridge-pub-2",
+                sender: "alice",
+                content: "soon gone",
+                timestamp: Date(),
+                isRelay: false
+            ),
+            to: .mesh
+        )
+        let mirrored = await TestHelpers.waitUntil(
+            { legacy.messages(for: .mesh).map(\.id) == ["bridge-pub-2"] },
+            timeout: 1.0
+        )
+        #expect(mirrored)
+
+        // Panic-style removal: Legacy must never show stale public messages.
+        store.removeConversation(.mesh)
+        #expect(legacy.messages(for: .mesh).isEmpty)
+    }
 }

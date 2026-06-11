@@ -12,7 +12,11 @@ import Foundation
 /// coordinators off their `unowned let viewModel: ChatViewModel` back-refs.
 @MainActor
 protocol ChatDeliveryContext: AnyObject {
-    var messages: [BitchatMessage] { get set }
+    /// Get-only derived views of the `ConversationStore`. `BitchatMessage`
+    /// is a reference type, so the public-timeline status patch below writes
+    /// through the shared message objects; step 4 replaces this with
+    /// `setDeliveryStatus(for:in:)` store intents.
+    var messages: [BitchatMessage] { get }
     var privateChats: [PeerID: [BitchatMessage]] { get }
     var isStartupPhase: Bool { get }
     /// Applies a delivery status to a private message by ID (single-writer

@@ -131,7 +131,6 @@ private extension ChatViewModelBootstrapper {
         viewModel.meshService.startServices()
 
         viewModel.publicMessagePipeline.delegate = viewModel.publicConversationCoordinator
-        viewModel.publicMessagePipeline.updateActiveChannel(viewModel.activeChannel)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak viewModel] in
             guard let viewModel,

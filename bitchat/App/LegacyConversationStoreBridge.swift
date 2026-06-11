@@ -5,18 +5,20 @@
 // Migration step 2 adapter (DELETE IN STEP 5, see
 // docs/CONVERSATION-STORE-DESIGN.md §4).
 //
-// The new `ConversationStore` is the single writer for private (direct)
-// message state; the feature models (`PrivateInboxModel`,
-// `PrivateConversationModel`, `ConversationUIModel`, `PeerListModel`) still
-// read the replace-based `LegacyConversationStore` until step 5. This bridge
-// keeps Legacy fed from the new store's `changes` subject: per-message
-// changes mark the affected conversation dirty and a `Task.yield`-coalesced
-// flush mirrors only the dirty conversations — a burst of N appends costs
-// ONE Legacy replace (like the old debounced sync) without the full-dict
-// pass. Structural changes (migration/removal) resynchronize immediately.
-// Legacy is therefore eventually consistent within one run-loop tick — the
-// same visibility the old `$privateChats` sink provided — while the new
-// store stays synchronously authoritative.
+// The new `ConversationStore` is the single writer for private (direct) AND
+// public (mesh/geohash) message state; the feature models
+// (`PrivateInboxModel`, `PrivateConversationModel`, `ConversationUIModel`,
+// `PeerListModel`, `PublicChatModel`) still read the replace-based
+// `LegacyConversationStore` until step 5. This bridge keeps Legacy fed from
+// the new store's `changes` subject: per-message changes mark the affected
+// conversation dirty and a `Task.yield`-coalesced flush mirrors only the
+// dirty conversations — a burst of N appends costs ONE Legacy replace (like
+// the old debounced sync) without the full-dict pass. Structural direct
+// changes (migration/removal) resynchronize immediately; public removals
+// mirror an empty timeline. Legacy is therefore eventually consistent within
+// one run-loop tick — the same visibility the old sinks and per-message
+// public syncs provided — while the new store stays synchronously
+// authoritative.
 //
 // This is free and unencumbered software released into the public domain.
 // For more information, see <https://unlicense.org>
@@ -58,9 +60,10 @@ final class LegacyConversationStoreBridge {
     /// `synchronizePrivateChats` full pass — acceptable because it only runs
     /// on peer-list changes and rare migrations, never per message.
     func resynchronizeAll() {
-        // The full pass covers every conversation; pending per-conversation
-        // work is redundant.
-        dirtyConversations.removeAll()
+        // The full pass covers every direct conversation; pending direct
+        // per-conversation work is redundant. Dirty public conversations
+        // keep their scheduled mirror.
+        dirtyConversations = dirtyConversations.filter { !isDirect($0) }
         legacyStore.synchronizePrivateChats(
             store.directMessagesByRoutingPeerID(),
             unreadPeerIDs: store.unreadDirectRoutingPeerIDs(),
@@ -92,13 +95,19 @@ private extension LegacyConversationStoreBridge {
             resynchronizeAll()
 
         case .removed(let id):
-            guard isDirect(id) else { return }
-            resynchronizeAll()
+            if isDirect(id) {
+                resynchronizeAll()
+            } else {
+                // Public conversation removed (panic clear): mirror an empty
+                // timeline immediately so Legacy readers never show stale
+                // messages.
+                dirtyConversations.remove(id)
+                legacyStore.replaceMessages([], for: id)
+            }
         }
     }
 
     func markDirty(_ id: ConversationID) {
-        guard isDirect(id) else { return }
         dirtyConversations.insert(id)
         scheduleFlush()
     }
@@ -127,16 +136,21 @@ private extension LegacyConversationStoreBridge {
     }
 
     func mirrorConversation(_ id: ConversationID) {
-        guard case .direct(let handle) = id,
-              let conversation = store.conversationsByID[id] else {
-            // Removed while dirty; the removal already resynchronized.
+        guard let conversation = store.conversationsByID[id] else {
+            // Removed while dirty; the removal already resynchronized
+            // (direct) or mirrored an empty timeline (public).
             return
         }
-        legacyStore.replaceDirectMessages(
-            conversation.messages,
-            for: handle.routingPeerID,
-            identityResolver: identityResolver
-        )
+        switch id {
+        case .direct(let handle):
+            legacyStore.replaceDirectMessages(
+                conversation.messages,
+                for: handle.routingPeerID,
+                identityResolver: identityResolver
+            )
+        case .mesh, .geohash:
+            legacyStore.replaceMessages(conversation.messages, for: id)
+        }
     }
 
     func isDirect(_ id: ConversationID) -> Bool {

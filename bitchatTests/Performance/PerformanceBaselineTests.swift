@@ -389,9 +389,9 @@ final class PerformanceBaselineTests: XCTestCase {
     /// Baseline for the full public-message ingest cycle through a real
     /// `ChatViewModel`: `didReceivePublicMessage` (transport delegate entry,
     /// main-actor Task hop per message) → `handlePublicMessage` (rate limit,
-    /// `PublicTimelineStore` append, per-message full-array
-    /// `LegacyConversationStore` sync) → `PublicMessagePipeline` timer-batched
-    /// flush into `ChatViewModel.messages` → `PublicChatModel` mirror.
+    /// pipeline enqueue) → `PublicMessagePipeline` timer-batched flush into
+    /// the `ConversationStore` (derived `ChatViewModel.messages` view) →
+    /// coalesced `LegacyConversationStoreBridge` mirror → `PublicChatModel`.
     /// Measures until `messages` and the feature model reflect every message,
     /// so the pipeline's flush latency is part of the cycle. Senders are
     /// spread 4-per-peer to stay under the 5-token sender rate bucket.
@@ -567,13 +567,11 @@ private final class PerfNostrContext: ChatNostrContext {
     }
 
     var messages: [BitchatMessage] = []
-    func resetPublicMessagePipeline() {}
-    func updatePublicMessagePipelineChannel(_ channel: ChannelID) {}
+    func flushPublicMessagePipeline() {}
     func refreshVisibleMessages(from channel: ChannelID?) {}
     func addPublicSystemMessage(_ content: String) {}
     func drainPendingGeohashSystemMessages() -> [String] { [] }
     func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool { true }
-    func synchronizePublicConversationStore(forGeohash geohash: String) {}
 
     private(set) var handledPublicMessageCount = 0
     func handlePublicMessage(_ message: BitchatMessage) { handledPublicMessageCount += 1 }

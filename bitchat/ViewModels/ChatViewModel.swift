@@ -119,9 +119,24 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // MARK: - Published Properties
 
-    @Published var messages: [BitchatMessage] = []
+    /// Read-only derived view of the ACTIVE public channel's conversation in
+    /// the single-writer `ConversationStore` (migration step 3 shim; views
+    /// observe `Conversation` objects directly in step 5). Hot for rendering,
+    /// so the array is cached and invalidated from the store's `changes`
+    /// subject (filtered to the active conversation) and on channel switches.
+    /// `objectWillChange` fires on every store change via the sink in `init`.
+    @MainActor
+    var messages: [BitchatMessage] {
+        if let cached = visibleMessagesCache { return cached }
+        // Read-only lookup (never creates the conversation): this getter
+        // runs during SwiftUI renders, where mutating the store's
+        // `@Published` collections would publish mid-view-update.
+        let current = conversations.conversationsByID[ConversationID(channelID: activeChannel)]?.messages ?? []
+        visibleMessagesCache = current
+        return current
+    }
+    private var visibleMessagesCache: [BitchatMessage]?
     @Published var currentColorScheme: ColorScheme = .light
-    private let maxMessages = TransportConfig.meshTimelineCap // Maximum messages before oldest are removed
     @Published var isConnected = false
     @Published var nickname: String = "" {
         didSet {
@@ -298,9 +313,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         get { conversationStore.activeChannel }
         set {
             guard conversationStore.activeChannel != newValue else { return }
-            publicMessagePipeline.updateActiveChannel(newValue)
             conversationStore.setActiveChannel(newValue)
-            synchronizePublicConversationStore(for: newValue)
+            visibleMessagesCache = nil
             synchronizeConversationSelectionStore()
             objectWillChange.send()
         }
@@ -351,11 +365,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @Published var showBluetoothAlert = false
     @Published var bluetoothAlertMessage = ""
     @Published var bluetoothState: CBManagerState = .unknown
-
-    var timelineStore = PublicTimelineStore(
-        meshCap: TransportConfig.meshTimelineCap,
-        geohashCap: TransportConfig.geoTimelineCap
-    )
 
     private func performDeliveryUpdate(_ update: @escaping @MainActor (ChatDeliveryCoordinator) -> Void) {
         if Thread.isMainThread {
@@ -631,6 +640,83 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         return removed
     }
 
+    // MARK: - Public Conversation Store Intents
+    // The sole mutation paths for public (mesh/geohash) message state,
+    // mirroring the private intents above. The store's per-conversation cap
+    // and timestamp-ordered insert replace `PublicTimelineStore`'s trim and
+    // the pipeline's late-insert positioning; the read-only `messages` shim
+    // above is derived from the same store.
+
+    /// Appends a public message in timestamp order. Returns `false` when a
+    /// message with the same ID is already in that conversation (O(1) dedup
+    /// via the conversation's ID index).
+    @MainActor
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool {
+        conversations.append(message, to: conversationID)
+    }
+
+    /// Appends a geohash message if absent. Returns `true` when stored
+    /// (the legacy `PublicTimelineStore.appendIfAbsent` contract).
+    @MainActor
+    @discardableResult
+    func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool {
+        conversations.append(message, to: .geohash(geohash.lowercased()))
+    }
+
+    /// A public (mesh/geohash) channel's full timeline.
+    @MainActor
+    func publicMessages(for channel: ChannelID) -> [BitchatMessage] {
+        conversations.conversation(for: ConversationID(channelID: channel)).messages
+    }
+
+    /// `true` when the conversation contains a message with `messageID`.
+    @MainActor
+    func publicConversationContainsMessage(withID messageID: String, in conversationID: ConversationID) -> Bool {
+        conversations.conversationsByID[conversationID]?.containsMessage(withID: messageID) ?? false
+    }
+
+    /// Removes a message by ID from whichever public conversation contains
+    /// it. Returns the removed message, if any.
+    @MainActor
+    @discardableResult
+    func removePublicMessage(withID messageID: String) -> BitchatMessage? {
+        conversations.removePublicMessage(withID: messageID)
+    }
+
+    /// Removes every message matching `predicate` from a geohash
+    /// conversation (block-user purge).
+    @MainActor
+    func removePublicMessages(fromGeohash geohash: String, where predicate: (BitchatMessage) -> Bool) {
+        conversations.removeMessages(from: .geohash(geohash.lowercased()), where: predicate)
+    }
+
+    /// Empties a public conversation's timeline (`/clear`).
+    @MainActor
+    func clearPublicConversation(_ conversationID: ConversationID) {
+        conversations.clear(conversationID)
+    }
+
+    /// Queues a system message for the next geohash channel visit. (Tiny
+    /// UI-flow queue formerly on `PublicTimelineStore`; it is notice text,
+    /// not conversation state, so it stays on the owner.)
+    @MainActor
+    func queueGeohashSystemMessage(_ content: String) {
+        pendingGeohashSystemMessages.append(content)
+    }
+
+    /// Drains the queued geohash system messages (single consumer:
+    /// `GeohashSubscriptionManager.switchLocationChannel`).
+    @MainActor
+    func drainPendingGeohashSystemMessages() -> [String] {
+        defer { pendingGeohashSystemMessages.removeAll(keepingCapacity: false) }
+        return pendingGeohashSystemMessages
+    }
+
+    // Single-writer: mutate only via `queueGeohashSystemMessage(_:)` /
+    // `drainPendingGeohashSystemMessages()` above.
+    private var pendingGeohashSystemMessages: [String] = []
+
     // MARK: - Initialization
 
     @MainActor
@@ -717,12 +803,18 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
         // Republish on every store change so SwiftUI observers of the
         // view model refresh. This replaces the UI-update role of the old
-        // `PrivateChatManager.@Published` dictionaries (their debounced
-        // Legacy synchronization sinks are gone; the bridge above feeds
-        // Legacy instead).
+        // `PrivateChatManager.@Published` dictionaries and the old
+        // `@Published var messages` (their debounced Legacy synchronization
+        // sinks are gone; the bridge above feeds Legacy instead). Changes
+        // touching the ACTIVE public conversation also invalidate the
+        // derived `messages` cache before observers re-read it.
         conversations.changes
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
+            .sink { [weak self] change in
+                guard let self else { return }
+                if self.changeAffectsActivePublicConversation(change) {
+                    self.visibleMessagesCache = nil
+                }
+                self.objectWillChange.send()
             }
             .store(in: &cancellables)
 
@@ -1008,13 +1100,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     func panicClearAllData() {
         // Messages are processed immediately - nothing to flush
 
-        // Clear all messages
-        messages.removeAll()
-        timelineStore = PublicTimelineStore(
-            meshCap: TransportConfig.meshTimelineCap,
-            geohashCap: TransportConfig.geoTimelineCap
-        )
-        conversations.removeAllDirectConversations()
+        // Clear all messages (public timelines and private chats live in the
+        // single-writer ConversationStore; the derived `messages` view and
+        // the legacy mirror empty with it)
+        conversations.clearAll()
+        pendingGeohashSystemMessages.removeAll()
 
         // Delete all keychain data (including Noise and Nostr keys)
         _ = keychain.deleteAllKeychainData()
@@ -1190,22 +1280,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     @MainActor
     func initializeConversationStore() {
-        publicConversationCoordinator.initializeConversationStore()
-    }
-
-    @MainActor
-    func synchronizePublicConversationStore(for channel: ChannelID) {
-        publicConversationCoordinator.synchronizePublicConversationStore(for: channel)
-    }
-
-    @MainActor
-    func synchronizePublicConversationStore(forGeohash geohash: String) {
-        publicConversationCoordinator.synchronizePublicConversationStore(forGeohash: geohash)
-    }
-
-    @MainActor
-    func synchronizeAllPublicConversationStores() {
-        publicConversationCoordinator.synchronizeAllPublicConversationStores()
+        conversationStore.setActiveChannel(activeChannel)
+        synchronizeConversationSelectionStore()
     }
 
     /// Full Legacy-store resynchronization from the new `ConversationStore`.
@@ -1226,15 +1302,34 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         )
     }
 
-    func trimMessagesIfNeeded() {
-        if messages.count > maxMessages {
-            messages = Array(messages.suffix(maxMessages))
-        }
-    }
-
+    /// Invalidates the derived `messages` cache and notifies observers.
+    /// (Formerly pulled the channel's timeline into a stored `messages`
+    /// array; `messages` is now derived from the `ConversationStore`, so
+    /// only the invalidation remains. The `channel` parameter is kept for
+    /// call-site compatibility — every caller passes the active channel.)
     @MainActor
     func refreshVisibleMessages(from channel: ChannelID? = nil) {
-        publicConversationCoordinator.refreshVisibleMessages(from: channel)
+        visibleMessagesCache = nil
+        objectWillChange.send()
+    }
+
+    /// `true` when a store change touches the active public conversation
+    /// (so the derived `messages` cache must be invalidated).
+    @MainActor
+    private func changeAffectsActivePublicConversation(_ change: ConversationChange) -> Bool {
+        let activeID = ConversationID(channelID: activeChannel)
+        switch change {
+        case .appended(let id, _),
+             .updated(let id, _),
+             .statusChanged(let id, _, _),
+             .messageRemoved(let id, _),
+             .cleared(let id),
+             .removed(let id),
+             .unreadChanged(let id, _):
+            return id == activeID
+        case .migrated(let source, let destination):
+            return source == activeID || destination == activeID
+        }
     }
 
     @MainActor
@@ -1274,15 +1369,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func clearCurrentPublicTimeline() {
         publicConversationCoordinator.clearCurrentPublicTimeline()
-    }
-
-    // MARK: - Message Management
-
-    private func addMessage(_ message: BitchatMessage) {
-        // Check for duplicates
-        guard !messages.contains(where: { $0.id == message.id }) else { return }
-        messages.append(message)
-        trimMessagesIfNeeded()
     }
 
     // MARK: - Peer Lookup Helpers

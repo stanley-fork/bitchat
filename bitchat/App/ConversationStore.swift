@@ -138,6 +138,23 @@ final class Conversation: ObservableObject, Identifiable {
         return removed
     }
 
+    /// Removes every message matching `predicate`. Returns the removed
+    /// message IDs (empty when nothing matched).
+    fileprivate func removeAll(where predicate: (BitchatMessage) -> Bool) -> [String] {
+        var removedIDs: [String] = []
+        messages.removeAll { message in
+            guard predicate(message) else { return false }
+            removedIDs.append(message.id)
+            return true
+        }
+        guard !removedIDs.isEmpty else { return [] }
+        for id in removedIDs {
+            indexByMessageID.removeValue(forKey: id)
+        }
+        reindex(from: 0)
+        return removedIDs
+    }
+
     fileprivate func clearMessages() {
         messages.removeAll()
         indexByMessageID.removeAll()
@@ -346,6 +363,16 @@ final class ConversationStore: ObservableObject {
         return removed
     }
 
+    /// Removes every message matching `predicate` from a conversation,
+    /// emitting one `.messageRemoved` per removed message after the
+    /// conversation is consistent. No-op for unknown conversations.
+    func removeMessages(from id: ConversationID, where predicate: (BitchatMessage) -> Bool) {
+        guard let conversation = conversationsByID[id] else { return }
+        for messageID in conversation.removeAll(where: predicate) {
+            changes.send(.messageRemoved(id, messageID: messageID))
+        }
+    }
+
     /// Empties a conversation's timeline but keeps the conversation (and
     /// its unread/selection state) alive.
     func clear(_ id: ConversationID) {
@@ -462,5 +489,28 @@ extension ConversationStore {
         for id in directIDs {
             removeConversation(id)
         }
+    }
+}
+
+// MARK: - Migration step 3 compatibility (public timeline derived views)
+
+extension ConversationStore {
+    /// Removes a message by ID from whichever public (mesh/geohash)
+    /// conversation contains it — the compat shape of the legacy
+    /// `PublicTimelineStore.removeMessage(withID:)`. Returns the removed
+    /// message, if any.
+    @discardableResult
+    func removePublicMessage(withID messageID: String) -> BitchatMessage? {
+        for (id, conversation) in conversationsByID {
+            switch id {
+            case .mesh, .geohash:
+                if conversation.containsMessage(withID: messageID) {
+                    return removeMessage(withID: messageID, from: id)
+                }
+            case .direct:
+                continue
+            }
+        }
+        return nil
     }
 }

@@ -29,9 +29,10 @@ protocol ChatMediaTransferContext: AnyObject {
     /// Appends a private message via the single-writer store intent.
     @discardableResult
     func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
-    func refreshVisibleMessages(from channel: ChannelID?)
-    func trimMessagesIfNeeded()
+    /// Appends a public message via the single-writer store intent
+    /// (immediate: outgoing media placeholders must render without batching).
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool
     func removeMessage(withID messageID: String, cleanupFile: Bool)
     func addSystemMessage(_ content: String)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
@@ -52,8 +53,7 @@ extension ChatViewModel: ChatMediaTransferContext {
     // `canSendMediaInCurrentContext`, `selectedPrivateChatPeer`, `nickname`,
     // `myPeerID`, `activeChannel`, `nicknameForPeer(_:)`,
     // `currentPublicSender()`, `privateChats`,
-    // `appendTimelineMessage(_:to:)`, `refreshVisibleMessages(from:)`,
-    // `trimMessagesIfNeeded()`, `removeMessage(withID:cleanupFile:)`,
+    // `appendPublicMessage(_:to:)`, `removeMessage(withID:cleanupFile:)`,
     // `addSystemMessage(_:)`, `notifyUIChanged()`,
     // `updateMessageDeliveryStatus(_:status:)`, `normalizedContentKey(_:)`,
     // and `recordContentKey(_:timestamp:)` are shared requirements with the
@@ -232,7 +232,6 @@ final class ChatMediaTransferCoordinator {
                 deliveryStatus: .sending
             )
             context.appendPrivateMessage(message, to: peerID)
-            context.trimMessagesIfNeeded()
         } else {
             let (displayName, senderPeerID) = context.currentPublicSender()
             message = BitchatMessage(
@@ -246,9 +245,7 @@ final class ChatMediaTransferCoordinator {
                 senderPeerID: senderPeerID,
                 deliveryStatus: .sending
             )
-            context.appendTimelineMessage(message, to: context.activeChannel)
-            context.refreshVisibleMessages(from: context.activeChannel)
-            context.trimMessagesIfNeeded()
+            context.appendPublicMessage(message, to: ConversationID(channelID: context.activeChannel))
         }
 
         let key = context.normalizedContentKey(message.content)

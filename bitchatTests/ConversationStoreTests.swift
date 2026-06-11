@@ -468,4 +468,98 @@ struct ConversationStoreTests {
         store.append(makeMessage(id: "m3", timestamp: 3), to: b)
         #expect(bWillChangeCount > 0)
     }
+
+    // MARK: - Public timelines (mesh/geohash, ex-PublicTimelineStore behavior)
+
+    @Test("geohash conversations are separated by geohash and from mesh")
+    @MainActor
+    func geohashConversationSeparation() {
+        let store = ConversationStore()
+        store.append(makeMessage(id: "mesh-1", timestamp: 1), to: .mesh)
+        store.append(makeMessage(id: "geo-a-1", timestamp: 2), to: .geohash("u4pruyd"))
+        store.append(makeMessage(id: "geo-b-1", timestamp: 3), to: .geohash("9q8yy"))
+
+        #expect(store.conversation(for: .mesh).messages.map(\.id) == ["mesh-1"])
+        #expect(store.conversation(for: .geohash("u4pruyd")).messages.map(\.id) == ["geo-a-1"])
+        #expect(store.conversation(for: .geohash("9q8yy")).messages.map(\.id) == ["geo-b-1"])
+    }
+
+    @Test("geohash append dedups by ID and reports duplicates")
+    @MainActor
+    func geohashAppendIfAbsentContract() {
+        let store = ConversationStore()
+        let message = makeMessage(id: "geo-1", timestamp: 1)
+
+        #expect(store.append(message, to: .geohash("u4pruyd")))
+        #expect(!store.append(message, to: .geohash("u4pruyd")))
+        // The same ID is still fresh in a different geohash.
+        #expect(store.append(message, to: .geohash("9q8yy")))
+    }
+
+    @Test("removePublicMessage searches mesh and geohash conversations only")
+    @MainActor
+    func removePublicMessageSearchesPublicConversations() {
+        let store = ConversationStore()
+        let direct = makeDirectConversationID("aa")
+        store.append(makeMessage(id: "mesh-1", timestamp: 1), to: .mesh)
+        store.append(makeMessage(id: "geo-1", timestamp: 2), to: .geohash("u4pruyd"))
+        store.append(makeMessage(id: "dm-1", timestamp: 3, isPrivate: true), to: direct)
+
+        #expect(store.removePublicMessage(withID: "geo-1")?.id == "geo-1")
+        #expect(store.conversation(for: .geohash("u4pruyd")).messages.isEmpty)
+
+        #expect(store.removePublicMessage(withID: "mesh-1")?.id == "mesh-1")
+        #expect(store.conversation(for: .mesh).messages.isEmpty)
+
+        // Direct conversations are never touched.
+        #expect(store.removePublicMessage(withID: "dm-1") == nil)
+        #expect(store.conversation(for: direct).messages.map(\.id) == ["dm-1"])
+    }
+
+    @Test("removeMessages(from:where:) purges matches and emits per removal")
+    @MainActor
+    func removeMessagesByPredicate() {
+        let store = ConversationStore()
+        let id = ConversationID.geohash("u4pruyd")
+        store.append(makeMessage(id: "keep-1", timestamp: 1), to: id)
+        store.append(makeMessage(id: "drop-1", timestamp: 2, content: "purge me"), to: id)
+        store.append(makeMessage(id: "drop-2", timestamp: 3, content: "purge me"), to: id)
+        store.append(makeMessage(id: "keep-2", timestamp: 4), to: id)
+
+        var removedIDs: [String] = []
+        var cancellables = Set<AnyCancellable>()
+        store.changes
+            .sink { change in
+                if case .messageRemoved(_, let messageID) = change {
+                    removedIDs.append(messageID)
+                }
+            }
+            .store(in: &cancellables)
+
+        store.removeMessages(from: id, where: { $0.content == "purge me" })
+
+        #expect(store.conversation(for: id).messages.map(\.id) == ["keep-1", "keep-2"])
+        #expect(removedIDs == ["drop-1", "drop-2"])
+        // The ID index survives the purge: dedup and removal still work.
+        #expect(!store.append(makeMessage(id: "keep-2", timestamp: 4), to: id))
+        #expect(store.removeMessage(withID: "keep-1", from: id) != nil)
+        #expect(store.conversation(for: id).messages.map(\.id) == ["keep-2"])
+    }
+
+    @Test("trimmed public message IDs can return after falling off the cap")
+    @MainActor
+    func trimmedMessageIDsCanReturn() {
+        let store = ConversationStore()
+        let id = ConversationID.geohash("u4pruyd")
+        let conversation = store.conversation(for: id)
+        let first = makeMessage(id: "one", timestamp: 1)
+
+        store.append(first, to: id)
+        for index in 0..<conversation.cap {
+            store.append(makeMessage(id: "filler-\(index)", timestamp: 2 + TimeInterval(index)), to: id)
+        }
+        // "one" was trimmed by the cap, so its ID is free again.
+        #expect(!conversation.containsMessage(withID: "one"))
+        #expect(store.append(makeMessage(id: "one", timestamp: 2000), to: id))
+    }
 }

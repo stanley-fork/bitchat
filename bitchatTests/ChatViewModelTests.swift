@@ -438,7 +438,7 @@ struct ChatViewModelReceivingTests {
         )
 
         let found = await TestHelpers.waitUntil({
-            viewModel.timelineStore.messages(for: .mesh).contains { $0.content == "Public hello from Bob" }
+            viewModel.publicMessages(for: .mesh).contains { $0.content == "Public hello from Bob" }
         }, timeout: TestConstants.defaultTimeout)
 
         #expect(found)
@@ -709,10 +709,12 @@ struct ChatViewModelPublicConversationTests {
         let (viewModel, _) = makeTestableViewModel()
 
         viewModel.addPublicSystemMessage("system refresh test")
-        viewModel.messages.removeAll()
         viewModel.refreshVisibleMessages(from: .mesh)
 
+        // The system message lives in the mesh conversation itself, so the
+        // derived `messages` view still surfaces it after a refresh.
         #expect(viewModel.messages.last?.content == "system refresh test")
+        #expect(viewModel.publicMessages(for: .mesh).last?.content == "system refresh test")
     }
 
     @Test @MainActor
@@ -726,6 +728,18 @@ struct ChatViewModelPublicConversationTests {
         viewModel.refreshVisibleMessages(from: .mesh)
 
         #expect(viewModel.messages.isEmpty)
+        #expect(viewModel.publicMessages(for: .mesh).isEmpty)
+    }
+
+    @Test @MainActor
+    func queuedGeohashSystemMessages_drainOnce() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        viewModel.queueGeohashSystemMessage("first")
+        viewModel.queueGeohashSystemMessage("second")
+
+        #expect(viewModel.drainPendingGeohashSystemMessages() == ["first", "second"])
+        #expect(viewModel.drainPendingGeohashSystemMessages().isEmpty)
     }
 }
 
@@ -999,7 +1013,7 @@ struct ChatViewModelPanicTests {
 
         // Set up some state
         transport.connectedPeers.insert(PeerID(str: "PEER1"))
-        viewModel.messages = [
+        viewModel.seedPublicMessages([
             BitchatMessage(
                 id: "panic-1",
                 sender: "Tester",
@@ -1007,7 +1021,7 @@ struct ChatViewModelPanicTests {
                 timestamp: Date(),
                 isRelay: false
             )
-        ]
+        ])
         viewModel.seedPrivateChat([
             BitchatMessage(
                 id: "pm-1",

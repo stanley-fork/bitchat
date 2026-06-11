@@ -233,7 +233,7 @@ struct ChatViewModelDeliveryStatusTests {
             isPrivate: false,
             deliveryStatus: .sending
         )
-        viewModel.messages.append(message)
+        viewModel.seedPublicMessages([message])
 
         // Action: update to .sent
         viewModel.didUpdateMessageDeliveryStatus(messageID, status: .sent)
@@ -253,7 +253,7 @@ struct ChatViewModelDeliveryStatusTests {
         let firstPeerID = PeerID(str: "0102030405060708")
         let secondPeerID = PeerID(str: "1112131415161718")
 
-        viewModel.messages = [
+        viewModel.seedPublicMessages([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -264,7 +264,7 @@ struct ChatViewModelDeliveryStatusTests {
                 senderPeerID: transport.myPeerID,
                 deliveryStatus: .sent
             )
-        ]
+        ])
         viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,

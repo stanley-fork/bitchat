@@ -1,8 +1,9 @@
 # Conversation Store: Single Source of Truth
 
-**Status:** Approved design, not yet implemented. Baselines recorded in
+**Status:** Steps 1–3 implemented (additive store, private cutover, public
+cutover; `PublicTimelineStore` deleted). Baselines recorded in
 `bitchatTests/Performance/PerformanceBaselineTests.swift` (`pipeline.privateIngest`,
-`pipeline.publicIngest`).
+`pipeline.publicIngest`, `store.append`).
 
 ---
 

@@ -153,6 +153,24 @@ extension ChatViewModel {
         }
     }
 
+    /// Test-only replacement for the deleted `messages` setter: seeds a
+    /// public channel's conversation through the single-writer
+    /// `ConversationStore` intents (upsert keeps re-seeding with updated
+    /// copies working the way the old array assignment did).
+    @MainActor
+    func seedPublicMessages(_ messages: [BitchatMessage], for channel: ChannelID = .mesh) {
+        for message in messages {
+            conversations.upsertByID(message, in: ConversationID(channelID: channel))
+        }
+    }
+
+    /// Test-only replacement for `messages.removeAll()`: empties a public
+    /// channel's conversation.
+    @MainActor
+    func clearPublicMessages(for channel: ChannelID = .mesh) {
+        conversations.clear(ConversationID(channelID: channel))
+    }
+
     /// Test-only: drops every private chat and unread flag.
     @MainActor
     func clearAllPrivateChats() {
