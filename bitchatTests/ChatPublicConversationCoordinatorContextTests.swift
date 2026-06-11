@@ -7,11 +7,11 @@
 // `ChatViewModel`, following the `ChatDeliveryCoordinatorContextTests` /
 // `ChatPrivateConversationCoordinatorContextTests` exemplars.
 //
-// Scope note: flows that hit process-wide singletons are intentionally not
-// exercised here — `checkForMentions` / haptics (NotificationService.shared,
-// UIApplication) and the geohash branch of `sendPublicRaw`
-// (NostrRelayManager.shared, GeoRelayDirectory.shared). The mesh branch of
-// `sendPublicRaw` and all timeline/store/blocking flows are covered.
+// Scope note: haptics (UIApplication) and the geohash branch of
+// `sendPublicRaw` (NostrRelayManager.shared, GeoRelayDirectory.shared) are
+// intentionally not exercised here. `checkForMentions` posts through the
+// injected context (`notifyMention(from:message:)`) and is covered, as are
+// the mesh branch of `sendPublicRaw` and all timeline/store/blocking flows.
 //
 
 import Testing
@@ -31,9 +31,13 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     var currentGeohash: String?
     var nickname = "me"
     var myPeerID = PeerID(str: "0011223344556677")
-    var isBatchingPublic = false
+    private(set) var isBatchingPublic = false
     private(set) var notifyUIChangedCount = 0
     private(set) var trimMessagesCount = 0
+
+    func setPublicBatching(_ isBatching: Bool) {
+        isBatchingPublic = isBatching
+    }
 
     func notifyUIChanged() {
         notifyUIChangedCount += 1
@@ -147,6 +151,12 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     var geoParticipantCounts: [String: Int] = [:]
     private(set) var removedGeoParticipants: [String] = []
 
+    func removeNostrKeyMappings(matchingPubkeyHexLowercased hex: String) {
+        for (key, value) in nostrKeyMapping where value.lowercased() == hex {
+            nostrKeyMapping.removeValue(forKey: key)
+        }
+    }
+
     func visibleGeoPeople() -> [GeoPerson] {
         geoPeople
     }
@@ -237,6 +247,13 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
 
     func prewarmMessageFormatting(_ message: BitchatMessage) {
         prewarmedMessageIDs.append(message.id)
+    }
+
+    // Notifications
+    private(set) var mentionNotifications: [(sender: String, message: String)] = []
+
+    func notifyMention(from sender: String, message: String) {
+        mentionNotifications.append((sender, message))
     }
 
     static let dummyIdentity = NostrIdentity(
@@ -492,4 +509,51 @@ struct ChatPublicConversationCoordinatorContextTests {
         let unknownHex = String(repeating: "12", count: 32)
         #expect(coordinator.displayNameForNostrPubkey(unknownHex) == "anon#" + unknownHex.suffix(4))
     }
+    @Test @MainActor
+    func checkForMentions_postsMentionNotificationOnlyForOthersMentioningMe() async {
+        let context = MockChatPublicConversationContext()
+        let coordinator = ChatPublicConversationCoordinator(context: context)
+
+        // A mention of my nickname from someone else notifies.
+        coordinator.checkForMentions(
+            BitchatMessage(
+                id: "mention-1",
+                sender: "alice",
+                content: "hey @me",
+                timestamp: Date(),
+                isRelay: false,
+                mentions: ["me"]
+            )
+        )
+        #expect(context.mentionNotifications.count == 1)
+        #expect(context.mentionNotifications.first?.sender == "alice")
+        #expect(context.mentionNotifications.first?.message == "hey @me")
+
+        // Mentioning someone else does not notify.
+        coordinator.checkForMentions(
+            BitchatMessage(
+                id: "mention-2",
+                sender: "alice",
+                content: "hey @bob",
+                timestamp: Date(),
+                isRelay: false,
+                mentions: ["bob"]
+            )
+        )
+        #expect(context.mentionNotifications.count == 1)
+
+        // My own message mentioning myself does not notify.
+        coordinator.checkForMentions(
+            BitchatMessage(
+                id: "mention-3",
+                sender: "me",
+                content: "talking about @me",
+                timestamp: Date(),
+                isRelay: false,
+                mentions: ["me"]
+            )
+        )
+        #expect(context.mentionNotifications.count == 1)
+    }
+
 }

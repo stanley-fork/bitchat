@@ -3,6 +3,123 @@ import BitLogger
 import Foundation
 import Security
 
+/// The narrow surface `ChatVerificationCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatVerificationCoordinatorContextTests`) and makes its true
+/// dependencies explicit.
+@MainActor
+protocol ChatVerificationContext: AnyObject {
+    // MARK: Fingerprints & verification state
+    func getFingerprint(for peerID: PeerID) -> String?
+    /// The UI-facing verified-fingerprint set (peer identity store backed).
+    var verifiedFingerprints: Set<String> { get set }
+    /// The persisted verified-fingerprint set from the identity manager.
+    func persistedVerifiedFingerprints() -> Set<String>
+    /// Persists the verified flag in the identity manager.
+    func setIdentityVerified(fingerprint: String, verified: Bool)
+    /// Updates the UI-facing verified flag in the peer identity store.
+    func setStoredVerified(_ fingerprint: String, verified: Bool)
+    func isVerifiedFingerprint(_ fingerprint: String) -> Bool
+    func saveIdentityState()
+
+    // MARK: Encryption status
+    func setEncryptionStatus(_ status: EncryptionStatus?, for peerID: PeerID)
+    func updateEncryptionStatus(for peerID: PeerID)
+    func invalidateEncryptionCache(for peerID: PeerID?)
+    /// Signals that verification state changed so observers refresh (e.g. `objectWillChange.send()`).
+    func notifyUIChanged()
+
+    // MARK: Peers
+    var unifiedPeers: [BitchatPeer] { get }
+    var unifiedFavorites: [BitchatPeer] { get }
+    /// The peer's current entry in the unified peer service, if known.
+    func unifiedPeer(for peerID: PeerID) -> BitchatPeer?
+    func unifiedFingerprint(for peerID: PeerID) -> String?
+    func resolveNickname(for peerID: PeerID) -> String
+    func cachedStablePeerID(for shortPeerID: PeerID) -> PeerID?
+    func cacheStablePeerID(_ stablePeerID: PeerID, for shortPeerID: PeerID)
+
+    // MARK: Noise sessions & verification transport
+    /// Installs the Noise service's session callbacks (single registration point).
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    )
+    /// Resolves the peer's Noise static key from the active Noise session, if any.
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data?
+    /// Our own Noise static public key.
+    func noiseStaticPublicKeyData() -> Data
+    func hasEstablishedNoiseSession(with peerID: PeerID) -> Bool
+    func triggerHandshake(with peerID: PeerID)
+    func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
+    func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
+
+    // MARK: Notifications (shared with `ChatNostrContext`)
+    /// Posts a generic local user notification.
+    func postLocalNotification(title: String, body: String, identifier: String)
+}
+
+extension ChatViewModel: ChatVerificationContext {
+    // `getFingerprint(for:)`, `verifiedFingerprints`, `saveIdentityState()`,
+    // `updateEncryptionStatus(for:)`, `invalidateEncryptionCache(for:)`,
+    // `notifyUIChanged()`, `unifiedPeer(for:)`, `unifiedFingerprint(for:)`,
+    // `isVerifiedFingerprint(_:)`, `setEncryptionStatus(_:for:)`,
+    // `resolveNickname(for:)`, `cachedStablePeerID(for:)`,
+    // `cacheStablePeerID(_:for:)`, `noiseSessionPublicKeyData(for:)`,
+    // `hasEstablishedNoiseSession(with:)`, and `triggerHandshake(with:)` are
+    // shared requirements with the other contexts or satisfied by existing
+    // `ChatViewModel` members. The members below flatten nested service
+    // accesses into intent-named calls.
+
+    func persistedVerifiedFingerprints() -> Set<String> {
+        identityManager.getVerifiedFingerprints()
+    }
+
+    func setIdentityVerified(fingerprint: String, verified: Bool) {
+        identityManager.setVerified(fingerprint: fingerprint, verified: verified)
+    }
+
+    func setStoredVerified(_ fingerprint: String, verified: Bool) {
+        peerIdentityStore.setVerified(fingerprint, verified: verified)
+    }
+
+    var unifiedPeers: [BitchatPeer] {
+        unifiedPeerService.peers
+    }
+
+    var unifiedFavorites: [BitchatPeer] {
+        unifiedPeerService.favorites
+    }
+
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    ) {
+        let noiseService = meshService.getNoiseService()
+        noiseService.onPeerAuthenticated = onPeerAuthenticated
+        noiseService.onHandshakeRequired = onHandshakeRequired
+    }
+
+    func noiseStaticPublicKeyData() -> Data {
+        meshService.getNoiseService().getStaticPublicKeyData()
+    }
+
+    func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {
+        meshService.sendVerifyChallenge(to: peerID, noiseKeyHex: noiseKeyHex, nonceA: nonceA)
+    }
+
+    func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {
+        meshService.sendVerifyResponse(to: peerID, noiseKeyHex: noiseKeyHex, nonceA: nonceA)
+    }
+
+    func postLocalNotification(title: String, body: String, identifier: String) {
+        NotificationService.shared.sendLocalNotification(title: title, body: body, identifier: identifier)
+    }
+}
+
 @MainActor
 final class ChatVerificationCoordinator {
     struct PendingVerification {
@@ -13,44 +130,44 @@ final class ChatVerificationCoordinator {
         var sent: Bool
     }
 
-    private unowned let viewModel: ChatViewModel
+    private unowned let context: any ChatVerificationContext
     private var pendingQRVerifications: [PeerID: PendingVerification] = [:]
     private var lastVerifyNonceByPeer: [PeerID: Data] = [:]
     private var lastInboundVerifyChallengeAt: [String: Date] = [:]
     private var lastMutualToastAt: [String: Date] = [:]
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    init(context: any ChatVerificationContext) {
+        self.context = context
     }
 
     func verifyFingerprint(for peerID: PeerID) {
-        guard let fingerprint = viewModel.getFingerprint(for: peerID) else { return }
+        guard let fingerprint = context.getFingerprint(for: peerID) else { return }
 
-        viewModel.identityManager.setVerified(fingerprint: fingerprint, verified: true)
-        viewModel.saveIdentityState()
-        viewModel.peerIdentityStore.setVerified(fingerprint, verified: true)
-        viewModel.updateEncryptionStatus(for: peerID)
+        context.setIdentityVerified(fingerprint: fingerprint, verified: true)
+        context.saveIdentityState()
+        context.setStoredVerified(fingerprint, verified: true)
+        context.updateEncryptionStatus(for: peerID)
     }
 
     func unverifyFingerprint(for peerID: PeerID) {
-        guard let fingerprint = viewModel.getFingerprint(for: peerID) else { return }
-        viewModel.identityManager.setVerified(fingerprint: fingerprint, verified: false)
-        viewModel.saveIdentityState()
-        viewModel.peerIdentityStore.setVerified(fingerprint, verified: false)
-        viewModel.updateEncryptionStatus(for: peerID)
+        guard let fingerprint = context.getFingerprint(for: peerID) else { return }
+        context.setIdentityVerified(fingerprint: fingerprint, verified: false)
+        context.saveIdentityState()
+        context.setStoredVerified(fingerprint, verified: false)
+        context.updateEncryptionStatus(for: peerID)
     }
 
     func loadVerifiedFingerprints() {
-        viewModel.peerIdentityStore.setVerifiedFingerprints(viewModel.identityManager.getVerifiedFingerprints())
-        let sample = Array(viewModel.peerIdentityStore.verifiedFingerprints.prefix(TransportConfig.uiFingerprintSampleCount))
+        context.verifiedFingerprints = context.persistedVerifiedFingerprints()
+        let sample = Array(context.verifiedFingerprints.prefix(TransportConfig.uiFingerprintSampleCount))
             .map { $0.prefix(8) }
             .joined(separator: ", ")
-        SecureLogger.info("🔐 Verified loaded: \(viewModel.peerIdentityStore.verifiedFingerprints.count) [\(sample)]", category: .security)
+        SecureLogger.info("🔐 Verified loaded: \(context.verifiedFingerprints.count) [\(sample)]", category: .security)
 
-        let offlineFavorites = viewModel.unifiedPeerService.favorites.filter { !$0.isConnected }
+        let offlineFavorites = context.unifiedFavorites.filter { !$0.isConnected }
         for favorite in offlineFavorites {
-            let fingerprint = viewModel.unifiedPeerService.getFingerprint(for: favorite.peerID)
-            let isVerified = fingerprint.flatMap { viewModel.peerIdentityStore.isVerified($0) } ?? false
+            let fingerprint = context.unifiedFingerprint(for: favorite.peerID)
+            let isVerified = fingerprint.flatMap { context.isVerifiedFingerprint($0) } ?? false
             let shortFingerprint = fingerprint?.prefix(8) ?? "nil"
             SecureLogger.info(
                 "⭐️ Favorite offline: \(favorite.nickname) fp=\(shortFingerprint) verified=\(isVerified)",
@@ -58,62 +175,61 @@ final class ChatVerificationCoordinator {
             )
         }
 
-        viewModel.invalidateEncryptionCache()
-        viewModel.objectWillChange.send()
+        context.invalidateEncryptionCache(for: nil)
+        context.notifyUIChanged()
     }
 
     func setupNoiseCallbacks() {
-        let noiseService = viewModel.meshService.getNoiseService()
+        context.installNoiseSessionCallbacks(
+            onPeerAuthenticated: { [weak self] peerID, fingerprint in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
 
-        noiseService.onPeerAuthenticated = { [weak self] peerID, fingerprint in
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                    SecureLogger.debug("🔐 Authenticated: \(peerID)", category: .security)
 
-                SecureLogger.debug("🔐 Authenticated: \(peerID)", category: .security)
+                    if self.context.isVerifiedFingerprint(fingerprint) {
+                        self.context.setEncryptionStatus(.noiseVerified, for: peerID)
+                    } else {
+                        self.context.setEncryptionStatus(.noiseSecured, for: peerID)
+                    }
 
-                if self.viewModel.peerIdentityStore.isVerified(fingerprint) {
-                    self.viewModel.peerIdentityStore.setEncryptionStatus(.noiseVerified, for: peerID)
-                } else {
-                    self.viewModel.peerIdentityStore.setEncryptionStatus(.noiseSecured, for: peerID)
+                    self.context.invalidateEncryptionCache(for: peerID)
+
+                    if self.context.cachedStablePeerID(for: peerID) == nil,
+                       let keyData = self.context.noiseSessionPublicKeyData(for: peerID) {
+                        let stablePeerID = PeerID(hexData: keyData)
+                        self.context.cacheStablePeerID(stablePeerID, for: peerID)
+                        SecureLogger.debug(
+                            "🗺️ Mapped short peerID to Noise key for header continuity: \(peerID) -> \(stablePeerID.id.prefix(8))…",
+                            category: .session
+                        )
+                    }
+
+                    if var pending = self.pendingQRVerifications[peerID], pending.sent == false {
+                        self.context.sendVerifyChallenge(
+                            to: peerID,
+                            noiseKeyHex: pending.noiseKeyHex,
+                            nonceA: pending.nonceA
+                        )
+                        pending.sent = true
+                        self.pendingQRVerifications[peerID] = pending
+                        SecureLogger.debug("📤 Sent deferred verify challenge to \(peerID) after handshake", category: .security)
+                    }
                 }
-
-                self.viewModel.invalidateEncryptionCache(for: peerID)
-
-                if self.viewModel.cachedStablePeerID(for: peerID) == nil,
-                   let keyData = self.viewModel.meshService.getNoiseService().getPeerPublicKeyData(peerID) {
-                    let stablePeerID = PeerID(hexData: keyData)
-                    self.viewModel.cacheStablePeerID(stablePeerID, for: peerID)
-                    SecureLogger.debug(
-                        "🗺️ Mapped short peerID to Noise key for header continuity: \(peerID) -> \(stablePeerID.id.prefix(8))…",
-                        category: .session
-                    )
-                }
-
-                if var pending = self.pendingQRVerifications[peerID], pending.sent == false {
-                    self.viewModel.meshService.sendVerifyChallenge(
-                        to: peerID,
-                        noiseKeyHex: pending.noiseKeyHex,
-                        nonceA: pending.nonceA
-                    )
-                    pending.sent = true
-                    self.pendingQRVerifications[peerID] = pending
-                    SecureLogger.debug("📤 Sent deferred verify challenge to \(peerID) after handshake", category: .security)
+            },
+            onHandshakeRequired: { [weak self] peerID in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.context.setEncryptionStatus(.noiseHandshaking, for: peerID)
+                    self.context.invalidateEncryptionCache(for: peerID)
                 }
             }
-        }
-
-        noiseService.onHandshakeRequired = { [weak self] peerID in
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.viewModel.peerIdentityStore.setEncryptionStatus(.noiseHandshaking, for: peerID)
-                self.viewModel.invalidateEncryptionCache(for: peerID)
-            }
-        }
+        )
     }
 
     func beginQRVerification(with qr: VerificationService.VerificationQR) -> Bool {
         let targetNoise = qr.noiseKeyHex.lowercased()
-        guard let peer = viewModel.unifiedPeerService.peers.first(where: {
+        guard let peer = context.unifiedPeers.first(where: {
             $0.noisePublicKey.hexEncodedString().lowercased() == targetNoise
         }) else {
             return false
@@ -135,13 +251,12 @@ final class ChatVerificationCoordinator {
         )
         pendingQRVerifications[peerID] = pending
 
-        let noise = viewModel.meshService.getNoiseService()
-        if noise.hasEstablishedSession(with: peerID) {
-            viewModel.meshService.sendVerifyChallenge(to: peerID, noiseKeyHex: qr.noiseKeyHex, nonceA: nonce)
+        if context.hasEstablishedNoiseSession(with: peerID) {
+            context.sendVerifyChallenge(to: peerID, noiseKeyHex: qr.noiseKeyHex, nonceA: nonce)
             pending.sent = true
             pendingQRVerifications[peerID] = pending
         } else {
-            viewModel.meshService.triggerHandshake(with: peerID)
+            context.triggerHandshake(with: peerID)
         }
 
         return true
@@ -150,9 +265,7 @@ final class ChatVerificationCoordinator {
     func handleVerifyChallengePayload(from peerID: PeerID, payload: Data) {
         guard let challenge = VerificationService.shared.parseVerifyChallenge(payload) else { return }
 
-        let myNoiseHex = viewModel.meshService
-            .getNoiseService()
-            .getStaticPublicKeyData()
+        let myNoiseHex = context.noiseStaticPublicKeyData()
             .hexEncodedString()
             .lowercased()
         guard challenge.noiseKeyHex.lowercased() == myNoiseHex else { return }
@@ -160,22 +273,22 @@ final class ChatVerificationCoordinator {
 
         lastVerifyNonceByPeer[peerID] = challenge.nonceA
 
-        if let fingerprint = viewModel.getFingerprint(for: peerID) {
+        if let fingerprint = context.getFingerprint(for: peerID) {
             lastInboundVerifyChallengeAt[fingerprint] = Date()
 
-            if viewModel.peerIdentityStore.isVerified(fingerprint) {
+            if context.isVerifiedFingerprint(fingerprint) {
                 maybeSendMutualVerificationNotification(
                     fingerprint: fingerprint,
                     peerID: peerID,
                     title: "Mutual verification",
-                    bodyName: viewModel.unifiedPeerService.getPeer(by: peerID)?.nickname
-                        ?? viewModel.resolveNickname(for: peerID),
+                    bodyName: context.unifiedPeer(for: peerID)?.nickname
+                        ?? context.resolveNickname(for: peerID),
                     notificationPrefix: "verify-mutual"
                 )
             }
         }
 
-        viewModel.meshService.sendVerifyResponse(
+        context.sendVerifyResponse(
             to: peerID,
             noiseKeyHex: challenge.noiseKeyHex,
             nonceA: challenge.nonceA
@@ -198,17 +311,17 @@ final class ChatVerificationCoordinator {
 
         pendingQRVerifications.removeValue(forKey: peerID)
 
-        guard let fingerprint = viewModel.getFingerprint(for: peerID) else { return }
+        guard let fingerprint = context.getFingerprint(for: peerID) else { return }
 
         let shortFingerprint = fingerprint.prefix(8)
         SecureLogger.info("🔐 Marking verified fingerprint: \(shortFingerprint)", category: .security)
-        viewModel.identityManager.setVerified(fingerprint: fingerprint, verified: true)
-        viewModel.saveIdentityState()
-        viewModel.peerIdentityStore.setVerified(fingerprint, verified: true)
+        context.setIdentityVerified(fingerprint: fingerprint, verified: true)
+        context.saveIdentityState()
+        context.setStoredVerified(fingerprint, verified: true)
 
-        let peerName = viewModel.unifiedPeerService.getPeer(by: peerID)?.nickname
-            ?? viewModel.resolveNickname(for: peerID)
-        NotificationService.shared.sendLocalNotification(
+        let peerName = context.unifiedPeer(for: peerID)?.nickname
+            ?? context.resolveNickname(for: peerID)
+        context.postLocalNotification(
             title: "Verified",
             body: "You verified \(peerName)",
             identifier: "verify-success-\(peerID)-\(UUID().uuidString)"
@@ -225,7 +338,7 @@ final class ChatVerificationCoordinator {
             )
         }
 
-        viewModel.updateEncryptionStatus(for: peerID)
+        context.updateEncryptionStatus(for: peerID)
     }
 }
 
@@ -242,7 +355,7 @@ private extension ChatVerificationCoordinator {
         guard now.timeIntervalSince(lastToast) > 60 else { return }
 
         lastMutualToastAt[fingerprint] = now
-        NotificationService.shared.sendLocalNotification(
+        context.postLocalNotification(
             title: title,
             body: "You and \(bodyName) verified each other",
             identifier: "\(notificationPrefix)-\(peerID)-\(UUID().uuidString)"

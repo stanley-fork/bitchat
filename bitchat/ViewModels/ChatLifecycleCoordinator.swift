@@ -2,36 +2,143 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+/// The narrow surface `ChatLifecycleCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatLifecycleCoordinatorContextTests`) and makes its true
+/// dependencies explicit.
 @MainActor
-final class ChatLifecycleCoordinator {
-    private unowned let viewModel: ChatViewModel
+protocol ChatLifecycleContext: AnyObject {
+    // MARK: Chat & receipt state
+    var messages: [BitchatMessage] { get }
+    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    var unreadPrivateMessages: Set<PeerID> { get set }
+    var selectedPrivateChatPeer: PeerID? { get }
+    var sentReadReceipts: Set<String> { get }
+    var nickname: String { get }
+    var myPeerID: PeerID { get }
+    var activeChannel: ChannelID { get }
+    var nostrKeyMapping: [PeerID: String] { get }
+    /// Records that a read receipt is being sent for `messageID`.
+    /// Returns `false` when one was already recorded — the caller must skip sending.
+    @discardableResult
+    func markReadReceiptSent(_ messageID: String) -> Bool
+    /// The owner-level read pass (chat manager + receipts); used for the
+    /// delayed re-run after the app becomes active.
+    func markPrivateMessagesAsRead(from peerID: PeerID)
+    /// Marks the chat read in the private chat manager (sends pending mesh READ acks).
+    func markChatAsRead(from peerID: PeerID)
+    /// Schedules main-actor work after a UI-timing delay. Injected so tests
+    /// can run the work synchronously instead of polling wall-clock queues.
+    func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void)
+    func synchronizePrivateConversationStore()
+    func addSystemMessage(_ content: String)
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    // MARK: Peers & sessions
+    func peerNickname(for peerID: PeerID) -> String?
+    /// The peer's current entry in the unified peer service, if known.
+    func unifiedPeer(for peerID: PeerID) -> BitchatPeer?
+    func noiseSessionState(for peerID: PeerID) -> LazyHandshakeState
+    func stopMeshServices()
+    /// Re-reads the transport's current Bluetooth state and updates the alert UI.
+    func refreshBluetoothState()
+
+    // MARK: Routing & receipts
+    func routePrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String)
+    func routeReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID)
+    func sendMeshMessage(_ content: String, mentions: [String], messageID: String, timestamp: Date)
+    func sendGeohashReadReceipt(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity)
+
+    // MARK: Nostr & geohash
+    var isTeleported: Bool { get }
+    func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity
+    func recordGeoParticipant(pubkeyHex: String)
+
+    // MARK: Favorites (shared with `ChatPrivateConversationContext`)
+    /// The persisted favorite relationship for the peer's Noise static key, if any.
+    func favoriteRelationship(forNoiseKey noiseKey: Data) -> FavoritesPersistenceService.FavoriteRelationship?
+
+    // MARK: Identity persistence
+    /// Forces the identity manager to persist its state now.
+    func forceSaveIdentity()
+    /// Confirms the Noise identity key is still present in the keychain.
+    @discardableResult
+    func verifyIdentityKeyExists() -> Bool
+}
+
+extension ChatViewModel: ChatLifecycleContext {
+    // `messages`, `privateChats`, `unreadPrivateMessages`,
+    // `selectedPrivateChatPeer`, `sentReadReceipts`, `nickname`, `myPeerID`,
+    // `activeChannel`, `nostrKeyMapping`, `markReadReceiptSent(_:)`,
+    // `markPrivateMessagesAsRead(from:)`,
+    // `synchronizePrivateConversationStore()`, `addSystemMessage(_:)`,
+    // `peerNickname(for:)`, `unifiedPeer(for:)`, `noiseSessionState(for:)`,
+    // the routing/ack members, `isTeleported`,
+    // `deriveNostrIdentity(forGeohash:)`, `recordGeoParticipant(pubkeyHex:)`,
+    // and `favoriteRelationship(forNoiseKey:)`
+    // are shared requirements with the other contexts or satisfied by
+    // existing `ChatViewModel` members. The members below flatten nested
+    // service accesses into intent-named calls.
+
+    func markChatAsRead(from peerID: PeerID) {
+        privateChatManager.markAsRead(from: peerID)
     }
 
-    func handleDidBecomeActive() {
-        if let bleService = viewModel.meshService as? BLEService {
-            let currentState = bleService.getCurrentBluetoothState()
-            viewModel.updateBluetoothState(currentState)
-        }
-
-        guard let peerID = viewModel.selectedPrivateChatPeer else { return }
-
-        markPrivateMessagesAsRead(from: peerID)
-
-        let viewModel = self.viewModel
-        DispatchQueue.main.asyncAfter(deadline: .now() + TransportConfig.uiAnimationMediumSeconds) { [weak viewModel] in
+    func scheduleOnMainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             Task { @MainActor in
-                viewModel?.markPrivateMessagesAsRead(from: peerID)
+                work()
             }
         }
     }
 
-    func handleScreenshotCaptured() {
-        let screenshotMessage = "* \(viewModel.nickname) took a screenshot *"
+    func stopMeshServices() {
+        meshService.stopServices()
+    }
 
-        if let peerID = viewModel.selectedPrivateChatPeer {
+    func refreshBluetoothState() {
+        if let bleService = meshService as? BLEService {
+            updateBluetoothState(bleService.getCurrentBluetoothState())
+        }
+    }
+
+    func forceSaveIdentity() {
+        identityManager.forceSave()
+    }
+
+    @discardableResult
+    func verifyIdentityKeyExists() -> Bool {
+        keychain.verifyIdentityKeyExists()
+    }
+}
+
+@MainActor
+final class ChatLifecycleCoordinator {
+    private unowned let context: any ChatLifecycleContext
+
+    init(context: any ChatLifecycleContext) {
+        self.context = context
+    }
+
+    func handleDidBecomeActive() {
+        context.refreshBluetoothState()
+
+        guard let peerID = context.selectedPrivateChatPeer else { return }
+
+        markPrivateMessagesAsRead(from: peerID)
+
+        let context = self.context
+        context.scheduleOnMainAfter(TransportConfig.uiAnimationMediumSeconds) { [weak context] in
+            context?.markPrivateMessagesAsRead(from: peerID)
+        }
+    }
+
+    func handleScreenshotCaptured() {
+        let screenshotMessage = "* \(context.nickname) took a screenshot *"
+
+        if let peerID = context.selectedPrivateChatPeer {
             sendPrivateScreenshotNotificationIfPossible(
                 screenshotMessage,
                 to: peerID
@@ -40,9 +147,9 @@ final class ChatLifecycleCoordinator {
             return
         }
 
-        switch viewModel.activeChannel {
+        switch context.activeChannel {
         case .mesh:
-            viewModel.meshService.sendMessage(
+            context.sendMeshMessage(
                 screenshotMessage,
                 mentions: [],
                 messageID: UUID().uuidString,
@@ -56,43 +163,41 @@ final class ChatLifecycleCoordinator {
             )
         }
 
-        viewModel.addSystemMessage("you took a screenshot")
+        context.addSystemMessage("you took a screenshot")
     }
 
     func saveIdentityState() {
-        viewModel.identityManager.forceSave()
-        _ = viewModel.keychain.verifyIdentityKeyExists()
+        context.forceSaveIdentity()
+        context.verifyIdentityKeyExists()
     }
 
     func applicationWillTerminate() {
-        viewModel.meshService.stopServices()
+        context.stopMeshServices()
         saveIdentityState()
     }
 
     func markPrivateMessagesAsRead(from peerID: PeerID) {
-        viewModel.privateChatManager.markAsRead(from: peerID)
-        viewModel.synchronizePrivateConversationStore()
+        context.markChatAsRead(from: peerID)
+        context.synchronizePrivateConversationStore()
 
         if peerID.isGeoDM,
-           let recipientHex = viewModel.nostrKeyMapping[peerID],
-           case .location(let channel) = viewModel.activeChannel,
-           let identity = try? viewModel.idBridge.deriveIdentity(forGeohash: channel.geohash) {
-            let messages = viewModel.privateChats[peerID] ?? []
+           let recipientHex = context.nostrKeyMapping[peerID],
+           case .location(let channel) = context.activeChannel,
+           let identity = try? context.deriveNostrIdentity(forGeohash: channel.geohash) {
+            let messages = context.privateChats[peerID] ?? []
             for message in messages where message.senderPeerID == peerID && !message.isRelay {
-                guard !viewModel.sentReadReceipts.contains(message.id) else { continue }
+                guard !context.sentReadReceipts.contains(message.id) else { continue }
 
                 SecureLogger.debug(
                     "GeoDM: sending READ for mid=\(message.id.prefix(8))… to=\(recipientHex.prefix(8))…",
                     category: .session
                 )
-                let nostrTransport = NostrTransport(keychain: viewModel.keychain, idBridge: viewModel.idBridge)
-                nostrTransport.senderPeerID = viewModel.meshService.myPeerID
-                nostrTransport.sendReadReceiptGeohash(
+                context.sendGeohashReadReceipt(
                     message.id,
                     toRecipientHex: recipientHex,
                     from: identity
                 )
-                viewModel.sentReadReceipts.insert(message.id)
+                context.markReadReceiptSent(message.id)
             }
             return
         }
@@ -101,16 +206,16 @@ final class ChatLifecycleCoordinator {
         var peerNostrPubkey: String?
 
         if let noiseKey = Data(hexString: peerID.id),
-           let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey) {
+           let favoriteStatus = context.favoriteRelationship(forNoiseKey: noiseKey) {
             noiseKeyHex = peerID
             peerNostrPubkey = favoriteStatus.peerNostrPublicKey
-        } else if let peer = viewModel.unifiedPeerService.getPeer(by: peerID) {
+        } else if let peer = context.unifiedPeer(for: peerID) {
             noiseKeyHex = PeerID(hexData: peer.noisePublicKey)
-            let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: peer.noisePublicKey)
+            let favoriteStatus = context.favoriteRelationship(forNoiseKey: peer.noisePublicKey)
             peerNostrPubkey = favoriteStatus?.peerNostrPublicKey
 
-            if let noiseKeyHex, viewModel.unreadPrivateMessages.contains(noiseKeyHex) {
-                viewModel.unreadPrivateMessages.remove(noiseKeyHex)
+            if let noiseKeyHex, context.unreadPrivateMessages.contains(noiseKeyHex) {
+                context.unreadPrivateMessages.remove(noiseKeyHex)
             }
         }
 
@@ -121,37 +226,37 @@ final class ChatLifecycleCoordinator {
                 continue
             }
 
-            guard !viewModel.sentReadReceipts.contains(message.id) else { continue }
+            guard !context.sentReadReceipts.contains(message.id) else { continue }
 
             let receipt = ReadReceipt(
                 originalMessageID: message.id,
-                readerID: viewModel.meshService.myPeerID,
-                readerNickname: viewModel.nickname
+                readerID: context.myPeerID,
+                readerNickname: context.nickname
             )
             let recipientPeerID = peerID.isHex
                 ? peerID
-                : (viewModel.unifiedPeerService.getPeer(by: peerID)?.peerID ?? peerID)
+                : (context.unifiedPeer(for: peerID)?.peerID ?? peerID)
 
-            viewModel.messageRouter.sendReadReceipt(receipt, to: recipientPeerID)
-            viewModel.sentReadReceipts.insert(message.id)
+            context.routeReadReceipt(receipt, to: recipientPeerID)
+            context.markReadReceiptSent(message.id)
         }
     }
 
     func getMessages(for peerID: PeerID?) -> [BitchatMessage] {
-        guard let peerID else { return viewModel.messages }
+        guard let peerID else { return context.messages }
         return getPrivateChatMessages(for: peerID)
     }
 
     func getPrivateChatMessages(for peerID: PeerID) -> [BitchatMessage] {
         var combined: [BitchatMessage] = []
 
-        if let ephemeralMessages = viewModel.privateChats[peerID] {
+        if let ephemeralMessages = context.privateChats[peerID] {
             combined.append(contentsOf: ephemeralMessages)
         }
 
-        if let peer = viewModel.unifiedPeerService.getPeer(by: peerID) {
+        if let peer = context.unifiedPeer(for: peerID) {
             let noiseKeyHex = PeerID(hexData: peer.noisePublicKey)
-            if noiseKeyHex != peerID, let stableMessages = viewModel.privateChats[noiseKeyHex] {
+            if noiseKeyHex != peerID, let stableMessages = context.privateChats[noiseKeyHex] {
                 combined.append(contentsOf: stableMessages)
             }
         }
@@ -175,12 +280,12 @@ final class ChatLifecycleCoordinator {
 
 private extension ChatLifecycleCoordinator {
     func sendPrivateScreenshotNotificationIfPossible(_ message: String, to peerID: PeerID) {
-        guard let peerNickname = viewModel.meshService.peerNickname(peerID: peerID) else { return }
+        guard let peerNickname = context.peerNickname(for: peerID) else { return }
 
-        let sessionState = viewModel.meshService.getNoiseSessionState(for: peerID)
+        let sessionState = context.noiseSessionState(for: peerID)
         switch sessionState {
         case .established:
-            viewModel.messageRouter.sendPrivate(
+            context.routePrivateMessage(
                 message,
                 to: peerID,
                 recipientNickname: peerNickname,
@@ -203,30 +308,30 @@ private extension ChatLifecycleCoordinator {
             isRelay: false,
             originalSender: nil,
             isPrivate: true,
-            recipientNickname: viewModel.meshService.peerNickname(peerID: peerID),
-            senderPeerID: viewModel.meshService.myPeerID
+            recipientNickname: context.peerNickname(for: peerID),
+            senderPeerID: context.myPeerID
         )
 
-        var chats = viewModel.privateChats
+        var chats = context.privateChats
         if chats[peerID] == nil {
             chats[peerID] = []
         }
         chats[peerID]?.append(notice)
-        viewModel.privateChats = chats
+        context.privateChats = chats
     }
 
     func sendPublicGeohashScreenshotMessage(_ message: String, channel: GeohashChannel) {
-        Task { @MainActor [weak viewModel] in
-            guard let viewModel else { return }
+        Task { @MainActor [weak context = self.context] in
+            guard let context else { return }
 
             do {
-                let identity = try viewModel.idBridge.deriveIdentity(forGeohash: channel.geohash)
+                let identity = try context.deriveNostrIdentity(forGeohash: channel.geohash)
                 let event = try NostrProtocol.createEphemeralGeohashEvent(
                     content: message,
                     geohash: channel.geohash,
                     senderIdentity: identity,
-                    nickname: viewModel.nickname,
-                    teleported: viewModel.locationManager.teleported
+                    nickname: context.nickname,
+                    teleported: context.isTeleported
                 )
 
                 let targetRelays = GeoRelayDirectory.shared.closestRelays(toGeohash: channel.geohash, count: 5)
@@ -236,10 +341,10 @@ private extension ChatLifecycleCoordinator {
                     NostrRelayManager.shared.sendEvent(event, to: targetRelays)
                 }
 
-                viewModel.participantTracker.recordParticipant(pubkeyHex: identity.publicKeyHex)
+                context.recordGeoParticipant(pubkeyHex: identity.publicKeyHex)
             } catch {
                 SecureLogger.error("❌ Failed to send geohash screenshot message: \(error)", category: .session)
-                viewModel.addSystemMessage(
+                context.addSystemMessage(
                     String(localized: "system.location.send_failed", comment: "System message when a location channel send fails")
                 )
             }

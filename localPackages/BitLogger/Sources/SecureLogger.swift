@@ -101,7 +101,8 @@ public final class SecureLogger {
     // MARK: - Global Threshold
 
     /// Minimum level that will be logged. Defaults to .info. Override via env BITCHAT_LOG_LEVEL.
-    private static let minimumLevel: LogLevel = {
+    /// Internal-settable so tests can verify level filtering; app code should not mutate it.
+    internal static var minimumLevel: LogLevel = {
         let env = ProcessInfo.processInfo.environment["BITCHAT_LOG_LEVEL"]?.lowercased()
         switch env {
         case "debug": return .debug
@@ -121,23 +122,33 @@ public final class SecureLogger {
 
 public extension SecureLogger {
     
+    // Each wrapper checks the level BEFORE evaluating the autoclosure so
+    // filtered messages never pay for string interpolation — this matters on
+    // hot paths that log per packet/event. Debug compiles out of release
+    // builds entirely (the core log() drops .debug there anyway).
     static func debug(_ message: @autoclosure () -> String, category: OSLog = .noise,
                       file: String = #file, line: Int = #line, function: String = #function) {
+        #if DEBUG
+        guard shouldLog(.debug) else { return }
         log(message(), category: category, level: .debug, file: file, line: line, function: function)
+        #endif
     }
-    
+
     static func info(_ message: @autoclosure () -> String, category: OSLog = .noise,
                      file: String = #file, line: Int = #line, function: String = #function) {
+        guard shouldLog(.info) else { return }
         log(message(), category: category, level: .info, file: file, line: line, function: function)
     }
-    
+
     static func warning(_ message: @autoclosure () -> String, category: OSLog = .noise,
                         file: String = #file, line: Int = #line, function: String = #function) {
+        guard shouldLog(.warning) else { return }
         log(message(), category: category, level: .warning, file: file, line: line, function: function)
     }
-    
+
     static func error(_ message: @autoclosure () -> String, category: OSLog = .noise,
                       file: String = #file, line: Int = #line, function: String = #function) {
+        guard shouldLog(.error) else { return }
         log(message(), category: category, level: .error, file: file, line: line, function: function)
     }
     

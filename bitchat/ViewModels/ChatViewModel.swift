@@ -146,19 +146,19 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let unifiedPeerService: UnifiedPeerService
     let autocompleteService: AutocompleteService
     let deduplicationService: MessageDeduplicationService  // internal for test access
-    private lazy var outgoingCoordinator = ChatOutgoingCoordinator(viewModel: self)
-    private lazy var lifecycleCoordinator = ChatLifecycleCoordinator(viewModel: self)
-    private lazy var transportEventCoordinator = ChatTransportEventCoordinator(viewModel: self)
-    private lazy var peerListCoordinator = ChatPeerListCoordinator(viewModel: self)
+    private lazy var outgoingCoordinator = ChatOutgoingCoordinator(context: self)
+    private lazy var lifecycleCoordinator = ChatLifecycleCoordinator(context: self)
+    private lazy var transportEventCoordinator = ChatTransportEventCoordinator(context: self)
+    private lazy var peerListCoordinator = ChatPeerListCoordinator(context: self)
     private lazy var messageFormatter = ChatMessageFormatter(viewModel: self)
-    lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(viewModel: self)
+    lazy var peerIdentityCoordinator = ChatPeerIdentityCoordinator(context: self)
     lazy var deliveryCoordinator = ChatDeliveryCoordinator(context: self)
-    lazy var composerCoordinator = ChatComposerCoordinator(viewModel: self)
+    lazy var composerCoordinator = ChatComposerCoordinator(context: self)
     lazy var publicConversationCoordinator = ChatPublicConversationCoordinator(context: self)
     lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(context: self)
     lazy var nostrCoordinator = ChatNostrCoordinator(context: self)
-    lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(viewModel: self)
-    lazy var verificationCoordinator = ChatVerificationCoordinator(viewModel: self)
+    lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(context: self)
+    lazy var verificationCoordinator = ChatVerificationCoordinator(context: self)
 
     // Computed properties for compatibility
     @MainActor
@@ -292,8 +292,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             objectWillChange.send()
         }
     }
-    var geoSubscriptionID: String? = nil
-    var geoDmSubscriptionID: String? = nil
+    // Single-writer: mutate only via `setGeoChatSubscriptionID(_:)` / `setGeoDmSubscriptionID(_:)` below.
+    private(set) var geoSubscriptionID: String? = nil
+    private(set) var geoDmSubscriptionID: String? = nil
     var currentGeohash: String? {
         get { locationPresenceStore.currentGeohash }
         set { locationPresenceStore.setCurrentGeohash(newValue) }
@@ -366,7 +367,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         set { locationPresenceStore.replaceTeleportedGeo(newValue) }
     }  // lowercased pubkey hex
     // Sampling subscriptions for multiple geohashes (when channel sheet is open)
-    var geoSamplingSubs: [String: String] = [:] // subID -> geohash
+    // Single-writer: mutate only via `addGeoSamplingSub` / `removeGeoSamplingSub` / `clearGeoSamplingSubs` below.
+    private(set) var geoSamplingSubs: [String: String] = [:] // subID -> geohash
     var lastGeoNotificationAt: [String: Date] = [:] // geohash -> last notify time
 
     // MARK: - Message Delivery Tracking
@@ -384,7 +386,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // MARK: - Public message batching (UI perf)
     let publicMessagePipeline: PublicMessagePipeline
-    @Published var isBatchingPublic: Bool = false
+    // Single-writer: mutate only via `setPublicBatching(_:)` below.
+    @Published private(set) var isBatchingPublic: Bool = false
 
     // Track sent read receipts to avoid duplicates (persisted across launches)
     // Note: Persistence happens automatically in didSet, no lifecycle observers needed
@@ -403,7 +406,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     }
 
     // Track which GeoDM messages we've already sent a delivery ACK for (by messageID)
-    var sentGeoDeliveryAcks: Set<String> = []
+    // Single-writer: mutate only via `markGeoDeliveryAckSent(_:)` below.
+    private(set) var sentGeoDeliveryAcks: Set<String> = []
 
     // Track app startup phase to prevent marking old messages as unread
     var isStartupPhase = true
@@ -411,7 +415,115 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     var torInitialReadyAnnounced: Bool = false
 
     // Track Nostr pubkey mappings for unknown senders
-    var nostrKeyMapping: [PeerID: String] = [:]  // senderPeerID -> nostrPubkey
+    // Single-writer: mutate only via `registerNostrKeyMapping` / `removeNostrKeyMappings` below.
+    private(set) var nostrKeyMapping: [PeerID: String] = [:]  // senderPeerID -> nostrPubkey
+
+    // MARK: - Single-Writer Intent Operations
+    // Owner-side mutation paths for state the coordinator contexts may read
+    // but not write directly. Each op is the sole way to mutate its backing
+    // state, so check-then-mutate races between coordinators cannot occur.
+
+    /// Records the Nostr pubkey behind a (possibly virtual) peer ID.
+    @MainActor
+    func registerNostrKeyMapping(_ pubkey: String, for peerID: PeerID) {
+        nostrKeyMapping[peerID] = pubkey
+    }
+
+    /// Drops every key mapping that resolves to the given (lowercased) Nostr pubkey.
+    @MainActor
+    func removeNostrKeyMappings(matchingPubkeyHexLowercased hex: String) {
+        for (key, value) in nostrKeyMapping where value.lowercased() == hex {
+            nostrKeyMapping.removeValue(forKey: key)
+        }
+    }
+
+    /// Records that a read receipt is being sent for `messageID`.
+    /// Returns `false` when one was already recorded — the caller must skip sending.
+    @MainActor
+    @discardableResult
+    func markReadReceiptSent(_ messageID: String) -> Bool {
+        sentReadReceipts.insert(messageID).inserted
+    }
+
+    /// Records that a GeoDM delivery ACK is being sent for `messageID`.
+    /// Returns `false` when one was already recorded — the caller must skip sending.
+    @MainActor
+    @discardableResult
+    func markGeoDeliveryAckSent(_ messageID: String) -> Bool {
+        sentGeoDeliveryAcks.insert(messageID).inserted
+    }
+
+    /// Forgets that read receipts were sent for `ids` so READ acks can be
+    /// re-sent after the peer reconnects.
+    @MainActor
+    func unmarkReadReceiptsSent(_ ids: [String]) {
+        sentReadReceipts.subtract(ids)
+    }
+
+    /// Marks read receipts as sent for own messages already delivered/read in
+    /// `peerID`'s chat, syncing the chat manager's tracking with the persisted
+    /// set. (Wraps the manager's `inout` sync so the raw set never leaks.)
+    @MainActor
+    func syncReadReceiptsForSentMessages(for peerID: PeerID) {
+        privateChatManager.syncReadReceiptsForSentMessages(
+            peerID: peerID,
+            nickname: nickname,
+            externalReceipts: &sentReadReceipts
+        )
+    }
+
+    /// Drops every recorded read receipt whose message ID is no longer valid.
+    /// Returns the number of receipts removed.
+    @MainActor
+    func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
+        let oldCount = sentReadReceipts.count
+        sentReadReceipts = sentReadReceipts.intersection(validMessageIDs)
+        return oldCount - sentReadReceipts.count
+    }
+
+    /// Publishes the public-timeline batching state (UI animation suppression).
+    @MainActor
+    func setPublicBatching(_ isBatching: Bool) {
+        isBatchingPublic = isBatching
+    }
+
+    @MainActor
+    func setGeoChatSubscriptionID(_ id: String?) {
+        geoSubscriptionID = id
+    }
+
+    @MainActor
+    func setGeoDmSubscriptionID(_ id: String?) {
+        geoDmSubscriptionID = id
+    }
+
+    @MainActor
+    func addGeoSamplingSub(_ subID: String, forGeohash geohash: String) {
+        geoSamplingSubs[subID] = geohash
+    }
+
+    @MainActor
+    func removeGeoSamplingSub(_ subID: String) {
+        geoSamplingSubs.removeValue(forKey: subID)
+    }
+
+    /// Clears all sampling subscriptions and returns the removed subscription IDs
+    /// so the caller can unsubscribe them from the relay manager.
+    @MainActor
+    func clearGeoSamplingSubs() -> [String] {
+        let subIDs = Array(geoSamplingSubs.keys)
+        geoSamplingSubs.removeAll()
+        return subIDs
+    }
+
+    /// Moves the open private chat to `newPeerID` when the current selection is
+    /// one of the peer IDs being migrated away (side-effectful: re-targets the
+    /// private chat session and resyncs the conversation stores).
+    @MainActor
+    func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID) {
+        guard oldPeerIDs.contains(where: { selectedPrivateChatPeer == $0 }) else { return }
+        selectedPrivateChatPeer = newPeerID
+    }
 
     // MARK: - Initialization
 

@@ -6,26 +6,90 @@ import Foundation
 import UIKit
 #endif
 
+/// The narrow surface `ChatMediaTransferCoordinator` needs from its owner.
+///
+/// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
+/// minimal context it actually uses instead of holding an `unowned` back-ref
+/// to the whole `ChatViewModel`. This keeps the coordinator independently
+/// testable (see `ChatMediaTransferCoordinatorContextTests`) and makes its
+/// true dependencies explicit.
+@MainActor
+protocol ChatMediaTransferContext: AnyObject {
+    // MARK: Composition state
+    var canSendMediaInCurrentContext: Bool { get }
+    var selectedPrivateChatPeer: PeerID? { get }
+    var nickname: String { get }
+    var myPeerID: PeerID { get }
+    var activeChannel: ChannelID { get }
+    func nicknameForPeer(_ peerID: PeerID) -> String
+    func currentPublicSender() -> (name: String, peerID: PeerID)
+
+    // MARK: Message state
+    var privateChats: [PeerID: [BitchatMessage]] { get set }
+    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
+    func refreshVisibleMessages(from channel: ChannelID?)
+    func trimMessagesIfNeeded()
+    func removeMessage(withID messageID: String, cleanupFile: Bool)
+    func addSystemMessage(_ content: String)
+    /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
+    func notifyUIChanged()
+
+    // MARK: Delivery status & dedup
+    func updateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus)
+    func normalizedContentKey(_ content: String) -> String
+    func recordContentKey(_ key: String, timestamp: Date)
+
+    // MARK: Mesh file transfer
+    func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String)
+    func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String)
+    func cancelTransfer(_ transferId: String)
+}
+
+extension ChatViewModel: ChatMediaTransferContext {
+    // `canSendMediaInCurrentContext`, `selectedPrivateChatPeer`, `nickname`,
+    // `myPeerID`, `activeChannel`, `nicknameForPeer(_:)`,
+    // `currentPublicSender()`, `privateChats`,
+    // `appendTimelineMessage(_:to:)`, `refreshVisibleMessages(from:)`,
+    // `trimMessagesIfNeeded()`, `removeMessage(withID:cleanupFile:)`,
+    // `addSystemMessage(_:)`, `notifyUIChanged()`,
+    // `updateMessageDeliveryStatus(_:status:)`, `normalizedContentKey(_:)`,
+    // and `recordContentKey(_:timestamp:)` are shared requirements with the
+    // other contexts or satisfied by existing `ChatViewModel` members. The
+    // members below flatten mesh service accesses.
+
+    func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String) {
+        meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
+    }
+
+    func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {
+        meshService.sendFileBroadcast(packet, transferId: transferId)
+    }
+
+    func cancelTransfer(_ transferId: String) {
+        meshService.cancelTransfer(transferId)
+    }
+}
+
 @MainActor
 final class ChatMediaTransferCoordinator {
-    private unowned let viewModel: ChatViewModel
+    private unowned let context: any ChatMediaTransferContext
 
     private(set) var transferIdToMessageIDs: [String: [String]] = [:]
     private(set) var messageIDToTransferId: [String: String] = [:]
 
-    init(viewModel: ChatViewModel) {
-        self.viewModel = viewModel
+    init(context: any ChatMediaTransferContext) {
+        self.context = context
     }
 
     func sendVoiceNote(at url: URL) {
-        guard viewModel.canSendMediaInCurrentContext else {
+        guard context.canSendMediaInCurrentContext else {
             SecureLogger.info("Voice note blocked outside mesh/private context", category: .session)
             try? FileManager.default.removeItem(at: url)
-            viewModel.addSystemMessage("Voice notes are only available in mesh chats.")
+            context.addSystemMessage("Voice notes are only available in mesh chats.")
             return
         }
 
-        let targetPeer = viewModel.selectedPrivateChatPeer
+        let targetPeer = context.selectedPrivateChatPeer
         let message = enqueueMediaMessage(
             content: "\(MimeType.Category.audio.messagePrefix)\(url.lastPathComponent)",
             targetPeer: targetPeer
@@ -41,9 +105,9 @@ final class ChatMediaTransferCoordinator {
                     guard let self else { return }
                     self.registerTransfer(transferId: transferId, messageID: messageID)
                     if let peerID = targetPeer {
-                        self.viewModel.meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
+                        self.context.sendFilePrivate(packet, to: peerID, transferId: transferId)
                     } else {
-                        self.viewModel.meshService.sendFileBroadcast(packet, transferId: transferId)
+                        self.context.sendFileBroadcast(packet, transferId: transferId)
                     }
                 }
             } catch ChatMediaPreparationError.voiceNoteTooLarge(let size) {
@@ -96,20 +160,20 @@ final class ChatMediaTransferCoordinator {
     #endif
 
     func sendImage(from sourceURL: URL, cleanup: (() -> Void)? = nil) {
-        guard viewModel.canSendMediaInCurrentContext else {
+        guard context.canSendMediaInCurrentContext else {
             SecureLogger.info("Image send blocked outside mesh/private context", category: .session)
             cleanup?()
-            viewModel.addSystemMessage("Images are only available in mesh chats.")
+            context.addSystemMessage("Images are only available in mesh chats.")
             return
         }
 
-        let targetPeer = viewModel.selectedPrivateChatPeer
+        let targetPeer = context.selectedPrivateChatPeer
 
         do {
             try ImageUtils.validateImageSource(at: sourceURL)
         } catch {
             SecureLogger.error("Image send preparation failed: \(error)", category: .session)
-            viewModel.addSystemMessage("Failed to prepare image for sending.")
+            context.addSystemMessage("Failed to prepare image for sending.")
             return
         }
 
@@ -127,22 +191,22 @@ final class ChatMediaTransferCoordinator {
                     let transferId = self.makeTransferID(messageID: messageID)
                     self.registerTransfer(transferId: transferId, messageID: messageID)
                     if let peerID = targetPeer {
-                        self.viewModel.meshService.sendFilePrivate(prepared.packet, to: peerID, transferId: transferId)
+                        self.context.sendFilePrivate(prepared.packet, to: peerID, transferId: transferId)
                     } else {
-                        self.viewModel.meshService.sendFileBroadcast(prepared.packet, transferId: transferId)
+                        self.context.sendFileBroadcast(prepared.packet, transferId: transferId)
                     }
                 }
             } catch ChatMediaPreparationError.imageTooLarge(let size) {
                 SecureLogger.warning("Processed image exceeds size limit (\(size) bytes)", category: .session)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.viewModel.addSystemMessage("Image is too large to send.")
+                    self.context.addSystemMessage("Image is too large to send.")
                 }
             } catch {
                 SecureLogger.error("Image send preparation failed: \(error)", category: .session)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.viewModel.addSystemMessage("Failed to prepare image for sending.")
+                    self.context.addSystemMessage("Failed to prepare image for sending.")
                 }
             }
         }
@@ -154,22 +218,22 @@ final class ChatMediaTransferCoordinator {
 
         if let peerID = targetPeer {
             message = BitchatMessage(
-                sender: viewModel.nickname,
+                sender: context.nickname,
                 content: content,
                 timestamp: timestamp,
                 isRelay: false,
                 originalSender: nil,
                 isPrivate: true,
-                recipientNickname: viewModel.nicknameForPeer(peerID),
-                senderPeerID: viewModel.meshService.myPeerID,
+                recipientNickname: context.nicknameForPeer(peerID),
+                senderPeerID: context.myPeerID,
                 deliveryStatus: .sending
             )
-            var chats = viewModel.privateChats
+            var chats = context.privateChats
             chats[peerID, default: []].append(message)
-            viewModel.privateChats = chats
-            viewModel.trimMessagesIfNeeded()
+            context.privateChats = chats
+            context.trimMessagesIfNeeded()
         } else {
-            let (displayName, senderPeerID) = viewModel.currentPublicSender()
+            let (displayName, senderPeerID) = context.currentPublicSender()
             message = BitchatMessage(
                 sender: displayName,
                 content: content,
@@ -181,14 +245,14 @@ final class ChatMediaTransferCoordinator {
                 senderPeerID: senderPeerID,
                 deliveryStatus: .sending
             )
-            viewModel.timelineStore.append(message, to: viewModel.activeChannel)
-            viewModel.refreshVisibleMessages(from: viewModel.activeChannel)
-            viewModel.trimMessagesIfNeeded()
+            context.appendTimelineMessage(message, to: context.activeChannel)
+            context.refreshVisibleMessages(from: context.activeChannel)
+            context.trimMessagesIfNeeded()
         }
 
-        let key = viewModel.deduplicationService.normalizedContentKey(message.content)
-        viewModel.deduplicationService.recordContentKey(key, timestamp: timestamp)
-        viewModel.objectWillChange.send()
+        let key = context.normalizedContentKey(message.content)
+        context.recordContentKey(key, timestamp: timestamp)
+        context.notifyUIChanged()
         return message
     }
 
@@ -217,7 +281,7 @@ final class ChatMediaTransferCoordinator {
     }
 
     func handleMediaSendFailure(messageID: String, reason: String) {
-        viewModel.updateMessageDeliveryStatus(messageID, status: .failed(reason: reason))
+        context.updateMessageDeliveryStatus(messageID, status: .failed(reason: reason))
         clearTransferMapping(for: messageID)
     }
 
@@ -225,18 +289,18 @@ final class ChatMediaTransferCoordinator {
         switch event {
         case .started(let id, let total):
             guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            viewModel.updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: 0, total: total))
+            context.updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: 0, total: total))
         case .updated(let id, let sent, let total):
             guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            viewModel.updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: sent, total: total))
+            context.updateMessageDeliveryStatus(messageID, status: .partiallyDelivered(reached: sent, total: total))
         case .completed(let id, _):
             guard let messageID = transferIdToMessageIDs[id]?.first else { return }
-            viewModel.updateMessageDeliveryStatus(messageID, status: .sent)
+            context.updateMessageDeliveryStatus(messageID, status: .sent)
             clearTransferMapping(for: messageID)
         case .cancelled(let id, _, _):
             guard let messageID = transferIdToMessageIDs[id]?.first else { return }
             clearTransferMapping(for: messageID)
-            viewModel.removeMessage(withID: messageID, cleanupFile: true)
+            context.removeMessage(withID: messageID, cleanupFile: true)
         }
     }
 
@@ -270,15 +334,15 @@ final class ChatMediaTransferCoordinator {
         if let transferId = messageIDToTransferId[messageID],
            let active = transferIdToMessageIDs[transferId]?.first,
            active == messageID {
-            viewModel.meshService.cancelTransfer(transferId)
+            context.cancelTransfer(transferId)
         }
         clearTransferMapping(for: messageID)
-        viewModel.removeMessage(withID: messageID, cleanupFile: true)
+        context.removeMessage(withID: messageID, cleanupFile: true)
     }
 
     func deleteMediaMessage(messageID: String) {
         clearTransferMapping(for: messageID)
-        viewModel.removeMessage(withID: messageID, cleanupFile: true)
+        context.removeMessage(withID: messageID, cleanupFile: true)
     }
 }
 
