@@ -1,0 +1,43 @@
+{
+  "_philosophy": [
+    "Floor throughputs for the PERF[...] lines printed by PerformanceBaselineTests.",
+    "Floors catch algorithmic regressions (O(n) -> O(n^2), accidental sync I/O,",
+    "quadratic re-scans), NOT tuning noise: each floor is deliberately set at",
+    "~25% of the throughput measured on a local dev machine (2026-06, Apple",
+    "Silicon), leaving ~4x headroom for CI runner variance so the gate never",
+    "flakes on a slow runner while still failing loudly on order-of-magnitude",
+    "regressions.",
+    "Raise floors deliberately after intentional performance improvements;",
+    "lower them only with a written justification in the PR. If a benchmark is",
+    "renamed or removed, update this file in the same change - the gate fails",
+    "when a floored benchmark stops reporting.",
+    "Checked by scripts/check-perf-floors.sh against captured swift-test output."
+  ],
+  "_units": "operations per second, matching each benchmark's PERF line",
+  "_reference_local_numbers_2026_06": {
+    "nostrInbound.fresh": 2132,
+    "nostrInbound.duplicate": 2558907,
+    "bleInbound.roundTripAndDedup": 38063,
+    "gcs.buildAndDecode": 776,
+    "delivery.incrementalUpdate": 172615,
+    "delivery.storeUpdate": 158862,
+    "formatting.formatMessage": 12261,
+    "pipeline.privateIngest": 24848,
+    "pipeline.publicIngest": 13102,
+    "store.append": 213201,
+    "store.audit": 362
+  },
+  "floors": {
+    "nostrInbound.fresh": 530,
+    "nostrInbound.duplicate": 600000,
+    "bleInbound.roundTripAndDedup": 9500,
+    "gcs.buildAndDecode": 190,
+    "delivery.incrementalUpdate": 43000,
+    "delivery.storeUpdate": 39000,
+    "formatting.formatMessage": 3000,
+    "pipeline.privateIngest": 6000,
+    "pipeline.publicIngest": 3200,
+    "store.append": 53000,
+    "store.audit": 90
+  }
+}

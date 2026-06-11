@@ -105,7 +105,7 @@ final class AppRuntime: ObservableObject {
 
         started = true
         NotificationDelegate.shared.runtime = self
-        VerificationService.shared.configure(with: chatViewModel.meshService.getNoiseService())
+        VerificationService.shared.configure(with: chatViewModel.meshService)
         announceInitialTorStatusIfNeeded()
 
         Task(priority: .utility) { [weak self] in

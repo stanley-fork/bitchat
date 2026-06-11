@@ -754,4 +754,180 @@ struct ConversationStoreTests {
         #expect(publishedIDs.isEmpty)
         #expect(statusChangedIDs.isEmpty)
     }
+
+    // MARK: - Invariant audit (field observability)
+
+    /// A store exercised through every intent family: public + geohash +
+    /// mirrored direct conversations, out-of-order and equal-timestamp
+    /// appends, upserts, delivery updates, removal, migration, unread, and
+    /// selection. Used as the healthy baseline for audit tests.
+    @MainActor
+    private static func makeExercisedStore() -> ConversationStore {
+        let store = ConversationStore()
+        let stable = makeDirectConversationID("stable")
+        let ephemeral = makeDirectConversationID("ephemeral")
+
+        store.append(makeMessage(id: "m1", timestamp: 10), to: .mesh)
+        store.append(makeMessage(id: "m3", timestamp: 30), to: .mesh)
+        store.append(makeMessage(id: "m2", timestamp: 20), to: .mesh) // out of order
+        store.append(makeMessage(id: "m2b", timestamp: 20), to: .mesh) // equal timestamp
+        store.append(makeMessage(id: "g1", timestamp: 5), to: .geohash("u4pruyd"))
+        store.upsertByID(makeMessage(id: "g1", timestamp: 5, content: "edited"), in: .geohash("u4pruyd"))
+
+        // Mirrored private copy (shared instance) across two direct chats.
+        let mirrored = makeMessage(id: "dm-1", timestamp: 1, isPrivate: true, deliveryStatus: .sent)
+        store.upsertByID(mirrored, in: stable)
+        store.upsertByID(mirrored, in: ephemeral)
+        store.setDeliveryStatus(.delivered(to: "bob", at: Date(timeIntervalSince1970: 2)), forMessageID: "dm-1")
+
+        store.append(makeMessage(id: "dm-2", timestamp: 3, isPrivate: true), to: ephemeral)
+        store.migrateConversation(from: ephemeral, to: stable)
+        store.append(makeMessage(id: "dm-gone", timestamp: 4, isPrivate: true), to: stable)
+        store.removeMessage(withID: "dm-gone", from: stable)
+
+        store.markUnread(stable)
+        store.setActiveChannel(.mesh)
+        return store
+    }
+
+    @Test("audit reports no violations for a healthy, well-exercised store")
+    @MainActor
+    func auditHealthyStoreIsClean() {
+        let store = Self.makeExercisedStore()
+        #expect(store.auditInvariants().isEmpty)
+
+        // Selection through both axes stays healthy.
+        store.setSelectedPrivatePeer(PeerID(str: "peer-stable"))
+        #expect(store.auditInvariants().isEmpty)
+        store.setSelectedPrivatePeer(nil)
+        #expect(store.auditInvariants().isEmpty)
+    }
+
+    @Test("audit flags index entries pointing at the wrong position")
+    @MainActor
+    func auditFlagsCorruptIndexEntries() {
+        let store = Self.makeExercisedStore()
+        store.conversation(for: .mesh)._testCorruptIndexEntries()
+
+        let violations = store.auditInvariants()
+        #expect(!violations.isEmpty)
+        #expect(violations.contains { $0.contains("mesh") && $0.contains("indexed at") })
+    }
+
+    @Test("audit flags a message missing from the per-conversation index")
+    @MainActor
+    func auditFlagsMissingIndexEntry() {
+        let store = Self.makeExercisedStore()
+        store.conversation(for: .mesh)._testRemoveIndexEntry(forMessageID: "m1")
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("missing from index") })
+        #expect(violations.contains { $0.contains("index has") }) // count mismatch
+    }
+
+    @Test("audit flags timestamp-order violations")
+    @MainActor
+    func auditFlagsOrderingViolation() {
+        let store = Self.makeExercisedStore()
+        store.conversation(for: .mesh)._testCorruptOrderingPreservingIndex()
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("timestamp order violated") })
+        // The hook keeps the index consistent: no index violations leak in.
+        #expect(!violations.contains { $0.contains("indexed at") || $0.contains("missing from index") })
+    }
+
+    @Test("audit flags map memberships the conversation does not hold")
+    @MainActor
+    func auditFlagsPhantomMapMembership() {
+        let store = Self.makeExercisedStore()
+        store._testRegisterPhantomMessageID("ghost", in: .mesh)
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("not present in claimed conversation") })
+        #expect(violations.contains { $0.contains("memberships but conversations hold") })
+    }
+
+    @Test("audit flags map memberships claiming unknown conversations")
+    @MainActor
+    func auditFlagsUnknownConversationMembership() {
+        let store = Self.makeExercisedStore()
+        store._testRegisterPhantomMessageID("ghost", in: makeDirectConversationID("nope"))
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("claims unknown conversation") })
+    }
+
+    @Test("audit flags conversation messages missing from the map")
+    @MainActor
+    func auditFlagsMissingMapMembership() {
+        let store = Self.makeExercisedStore()
+        store._testUnregisterMessageID("m1", from: .mesh)
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("memberships but conversations hold") })
+    }
+
+    @Test("audit flags a conversation exceeding its cap")
+    @MainActor
+    func auditFlagsCapViolation() {
+        let store = ConversationStore()
+        let conversation = store.conversation(for: .mesh)
+        for index in 0..<conversation.cap {
+            store.append(makeMessage(id: "m\(index)", timestamp: TimeInterval(index)), to: .mesh)
+        }
+        #expect(store.auditInvariants().isEmpty)
+
+        store._testAppendBypassingCap(
+            makeMessage(id: "over-cap", timestamp: TimeInterval(conversation.cap)),
+            to: .mesh
+        )
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("exceeds cap") })
+        // The hook keeps the map exact: only the cap invariant fires.
+        #expect(violations.count == 1)
+    }
+
+    @Test("audit flags unread entries for nonexistent conversations")
+    @MainActor
+    func auditFlagsStaleUnreadEntry() {
+        let store = Self.makeExercisedStore()
+        store._testInsertUnreadConversationID(makeDirectConversationID("gone"))
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("unreadConversations contains unknown conversation") })
+    }
+
+    @Test("audit flags a selection pointing at a nonexistent conversation")
+    @MainActor
+    func auditFlagsDanglingSelection() {
+        let store = Self.makeExercisedStore()
+        store._testSetSelectedConversationID(makeDirectConversationID("gone"))
+
+        let violations = store.auditInvariants()
+        #expect(violations.contains { $0.contains("selectedConversationID") && $0.contains("has no conversation") })
+    }
+
+    @Test("appendCount counts every insertion, not duplicates or updates")
+    @MainActor
+    func appendCountTracksInsertions() {
+        let store = ConversationStore()
+        let source = makeDirectConversationID("ephemeral")
+        let destination = makeDirectConversationID("stable")
+
+        store.append(makeMessage(id: "m1", timestamp: 1), to: .mesh)
+        store.append(makeMessage(id: "m1", timestamp: 1), to: .mesh) // duplicate: not counted
+        store.upsertByID(makeMessage(id: "m2", timestamp: 2), in: .mesh) // upsert-append: counted
+        store.upsertByID(makeMessage(id: "m2", timestamp: 2, content: "edit"), in: .mesh) // in-place: not counted
+        #expect(store.appendCount == 2)
+
+        store.append(makeMessage(id: "dm-1", timestamp: 1, isPrivate: true), to: source)
+        store.migrateConversation(from: source, to: destination) // migration insert: counted
+        #expect(store.appendCount == 4)
+
+        // Removal does not decrement: the counter is a throughput odometer.
+        store.removeMessage(withID: "dm-1", from: destination)
+        #expect(store.appendCount == 4)
+    }
 }

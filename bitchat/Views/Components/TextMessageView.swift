@@ -12,10 +12,23 @@ import BitFoundation
 struct TextMessageView: View {
     @Environment(\.colorScheme) private var colorScheme: ColorScheme
     @EnvironmentObject private var conversationUIModel: ConversationUIModel
-    
+
     let message: BitchatMessage
+    /// Value snapshot of the message's mutable delivery status, captured at
+    /// construction. `BitchatMessage` is a reference type mutated in place by
+    /// `ConversationStore`, and SwiftUI compares reference-typed view fields
+    /// by identity — so a status-only change (e.g. delivered → read) on the
+    /// SAME instance would otherwise compare "unchanged" and this row's body
+    /// would be skipped even though the parent list re-rendered. Snapshotting
+    /// the enum makes the change visible to SwiftUI's structural diff.
+    private let deliveryStatus: DeliveryStatus?
     @State private var expandedMessageIDs: Set<String> = []
-    
+
+    init(message: BitchatMessage) {
+        self.message = message
+        self.deliveryStatus = message.deliveryStatus
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Precompute heavy token scans once per row
@@ -31,7 +44,7 @@ struct TextMessageView: View {
                 
                 // Delivery status indicator for private messages
                 if message.isPrivate && conversationUIModel.isSentByCurrentUser(message),
-                   let status = message.deliveryStatus {
+                   let status = deliveryStatus {
                     DeliveryStatusView(status: status)
                         .padding(.leading, 4)
                 }

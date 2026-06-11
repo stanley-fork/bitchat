@@ -98,13 +98,14 @@ extension ChatViewModel: ChatVerificationContext {
         onPeerAuthenticated: @escaping (PeerID, String) -> Void,
         onHandshakeRequired: @escaping (PeerID) -> Void
     ) {
-        let noiseService = meshService.getNoiseService()
-        noiseService.onPeerAuthenticated = onPeerAuthenticated
-        noiseService.onHandshakeRequired = onHandshakeRequired
+        meshService.installNoiseSessionCallbacks(
+            onPeerAuthenticated: onPeerAuthenticated,
+            onHandshakeRequired: onHandshakeRequired
+        )
     }
 
     func noiseStaticPublicKeyData() -> Data {
-        meshService.getNoiseService().getStaticPublicKeyData()
+        meshService.noiseStaticPublicKeyData()
     }
 
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {

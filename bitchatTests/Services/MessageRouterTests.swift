@@ -110,6 +110,98 @@ struct MessageRouterTests {
         #expect(transport.sentPrivateMessages.count == 8)
     }
 
+    // MARK: - Drop visibility (onMessageDropped)
+
+    @Test @MainActor
+    func flushOutbox_attemptCapDropInvokesOnMessageDropped() async {
+        let peerID = PeerID(str: "0000000000000009")
+        let transport = MockTransport()
+        transport.reachablePeers.insert(peerID)
+
+        let router = MessageRouter(transports: [transport])
+        var dropped: [(messageID: String, peerID: PeerID)] = []
+        router.onMessageDropped = { dropped.append(($0, $1)) }
+
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m9")
+        for _ in 0..<10 {
+            router.flushOutbox(for: peerID)
+        }
+
+        #expect(dropped.count == 1)
+        #expect(dropped.first?.messageID == "m9")
+        #expect(dropped.first?.peerID == peerID)
+    }
+
+    @Test @MainActor
+    func flushOutbox_ttlExpiryInvokesOnMessageDroppedAndDoesNotResend() async {
+        let peerID = PeerID(str: "000000000000000a")
+        let transport = MockTransport()
+        let clock = MutableTestClock()
+
+        let router = MessageRouter(transports: [transport], now: { clock.now })
+        var dropped: [String] = []
+        router.onMessageDropped = { messageID, _ in dropped.append(messageID) }
+
+        // No reachable transport: the message is queued, never sent.
+        router.sendPrivate("Hello", to: peerID, recipientNickname: "Peer", messageID: "m10")
+        #expect(transport.sentPrivateMessages.isEmpty)
+
+        // Past the 24h TTL the flush must drop it (visibly), not send it.
+        clock.now = clock.now.addingTimeInterval(24 * 60 * 60 + 1)
+        transport.reachablePeers.insert(peerID)
+        router.flushOutbox(for: peerID)
+
+        #expect(dropped == ["m10"])
+        #expect(transport.sentPrivateMessages.isEmpty)
+
+        // The drop is final: nothing is retained for later flushes.
+        router.flushOutbox(for: peerID)
+        #expect(dropped == ["m10"])
+    }
+
+    @Test @MainActor
+    func cleanupExpiredMessages_invokesOnMessageDroppedForExpiredOnly() async {
+        let peerID = PeerID(str: "000000000000000b")
+        let transport = MockTransport()
+        let clock = MutableTestClock()
+
+        let router = MessageRouter(transports: [transport], now: { clock.now })
+        var dropped: [String] = []
+        router.onMessageDropped = { messageID, _ in dropped.append(messageID) }
+
+        router.sendPrivate("Old", to: peerID, recipientNickname: "Peer", messageID: "m11-old")
+        clock.now = clock.now.addingTimeInterval(24 * 60 * 60 - 60)
+        router.sendPrivate("Fresh", to: peerID, recipientNickname: "Peer", messageID: "m11-fresh")
+        clock.now = clock.now.addingTimeInterval(120)
+
+        router.cleanupExpiredMessages()
+
+        #expect(dropped == ["m11-old"])
+
+        // The fresh message survived and still flushes once reachable.
+        transport.reachablePeers.insert(peerID)
+        router.flushOutbox(for: peerID)
+        #expect(transport.sentPrivateMessages.map(\.messageID) == ["m11-fresh"])
+    }
+
+    @Test @MainActor
+    func enqueue_perPeerOverflowEvictionInvokesOnMessageDropped() async {
+        let peerID = PeerID(str: "000000000000000c")
+        let transport = MockTransport()
+
+        let router = MessageRouter(transports: [transport])
+        var dropped: [String] = []
+        router.onMessageDropped = { messageID, _ in dropped.append(messageID) }
+
+        // No reachable transport: everything queues. The cap is 100 per peer,
+        // so the 101st enqueue evicts the oldest.
+        for i in 0...100 {
+            router.sendPrivate("Hello \(i)", to: peerID, recipientNickname: "Peer", messageID: "q\(i)")
+        }
+
+        #expect(dropped == ["q0"])
+    }
+
     @Test @MainActor
     func sendReadReceipt_usesReachableTransport() async {
         let peerID = PeerID(str: "0000000000000003")
@@ -134,4 +226,10 @@ struct MessageRouterTests {
 
         #expect(transport.sentFavoriteNotifications.count == 1)
     }
+}
+
+/// Mutable wall clock injected into `MessageRouter` so TTL expiry is testable
+/// without real waiting.
+private final class MutableTestClock {
+    var now = Date(timeIntervalSince1970: 1_700_000_000)
 }

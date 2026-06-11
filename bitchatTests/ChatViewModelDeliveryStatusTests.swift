@@ -349,6 +349,80 @@ struct ChatViewModelDeliveryStatusTests {
         #expect(isRead(viewModel.privateChats[peerID]?.last?.deliveryStatus))
     }
 
+    // MARK: - MessageRouter Drop Wiring Tests
+
+    /// Drives a real outbox drop (per-peer overflow eviction with no
+    /// reachable transport) and proves the bootstrapper wiring marks the
+    /// dropped message `.failed` in the conversation store.
+    @Test @MainActor
+    func messageRouterDrop_marksMessageFailedInStore() async {
+        let (viewModel, transport) = makeTestableViewModel()
+        let peerID = PeerID(str: "0102030405060708")
+        let droppedID = "router-drop-0"
+
+        let message = BitchatMessage(
+            id: droppedID,
+            sender: viewModel.nickname,
+            content: "Will be dropped",
+            timestamp: Date(),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Peer",
+            senderPeerID: transport.myPeerID,
+            deliveryStatus: .sent
+        )
+        viewModel.seedPrivateChat([message], for: peerID)
+
+        // No transport is reachable, so every send is queued; the 101st
+        // enqueue for this peer evicts the oldest queued message.
+        viewModel.messageRouter.sendPrivate("Will be dropped", to: peerID, recipientNickname: "Peer", messageID: droppedID)
+        for i in 1...100 {
+            viewModel.messageRouter.sendPrivate("Filler \(i)", to: peerID, recipientNickname: "Peer", messageID: "router-drop-\(i)")
+        }
+
+        let status = viewModel.conversations.deliveryStatus(forMessageID: droppedID)
+        #expect({
+            if case .failed = status { return true }
+            return false
+        }())
+    }
+
+    /// The store's no-downgrade rule does not cover `.failed` over confirmed
+    /// receipts, so the wiring guards it: a drop of an already-delivered
+    /// message must not downgrade its status.
+    @Test @MainActor
+    func messageRouterDrop_doesNotDowngradeDeliveredStatus() async {
+        let (viewModel, transport) = makeTestableViewModel()
+        let peerID = PeerID(str: "0102030405060708")
+        let droppedID = "router-drop-delivered"
+
+        let message = BitchatMessage(
+            id: droppedID,
+            sender: viewModel.nickname,
+            content: "Already delivered",
+            timestamp: Date(),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Peer",
+            senderPeerID: transport.myPeerID,
+            deliveryStatus: .delivered(to: "Peer", at: Date())
+        )
+        viewModel.seedPrivateChat([message], for: peerID)
+
+        // Same eviction-driven drop as above, but the store already recorded
+        // a delivery confirmation for the message.
+        viewModel.messageRouter.sendPrivate("Already delivered", to: peerID, recipientNickname: "Peer", messageID: droppedID)
+        for i in 1...100 {
+            viewModel.messageRouter.sendPrivate("Filler \(i)", to: peerID, recipientNickname: "Peer", messageID: "router-keep-\(i)")
+        }
+
+        let status = viewModel.conversations.deliveryStatus(forMessageID: droppedID)
+        #expect({
+            if case .delivered = status { return true }
+            return false
+        }())
+    }
+
     // MARK: - Status Rank Tests (for deduplication)
 
     @Test @MainActor

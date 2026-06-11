@@ -38,15 +38,40 @@ final class PerformanceBaselineTests: XCTestCase {
     }
 
     /// Reports one human-readable throughput line per benchmark so CI logs
-    /// are readable without parsing XCTest's measure output.
+    /// are readable without parsing XCTest's measure output. The same line is
+    /// appended to the file named by `BITCHAT_PERF_LOG` (if set): under
+    /// `swift test --parallel` the runner swallows stdout of passing tests,
+    /// so the CI floor gate (scripts/check-perf-floors.sh) reads the file.
     private func reportThroughput(_ name: String, samples: [TimeInterval], operations: Int, unit: String) {
         guard !samples.isEmpty else { return }
         let avg = samples.reduce(0, +) / Double(samples.count)
         let opsPerSec = avg > 0 ? Double(operations) / avg : .infinity
-        print(String(
+        let line = String(
             format: "PERF[%@]: %.0f %@/sec (avg %.3f ms per pass of %d, %d passes)",
             name, opsPerSec, unit, avg * 1000, operations, samples.count
-        ))
+        )
+        print(line)
+        Self.appendToPerfLog(line)
+    }
+
+    private static var perfLogPath: String? {
+        let path = ProcessInfo.processInfo.environment["BITCHAT_PERF_LOG"]
+        return (path?.isEmpty ?? true) ? nil : path
+    }
+
+    /// Appends with `O_APPEND` because `swift test --parallel` may split this
+    /// class across worker processes that write concurrently. The file is
+    /// append-only (CI workspaces start fresh); delete it between local runs
+    /// if you reuse a path.
+    private static func appendToPerfLog(_ line: String) {
+        guard let path = perfLogPath else { return }
+        let fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        let bytes = Array((line + "\n").utf8)
+        bytes.withUnsafeBufferPointer { buffer in
+            _ = write(fd, buffer.baseAddress, buffer.count)
+        }
     }
 
     // MARK: - 1a. Nostr inbound event handling (fresh events)
@@ -469,6 +494,34 @@ final class PerformanceBaselineTests: XCTestCase {
         }
 
         reportThroughput("store.append", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    // MARK: - 8. ConversationStore invariant audit (field observability)
+
+    /// `ConversationStore.auditInvariants()` over a realistic 5k-message
+    /// corpus (mesh + geohash + 75 private chats). The audit runs in the
+    /// field on the read-receipt cleanup cadence
+    /// (`ChatViewModel.auditConversationStore`), so this measures the
+    /// per-audit cost that piggybacks on peer-list updates — it must stay
+    /// trivially cheap relative to that cadence.
+    func testConversationStoreAudit() {
+        let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 75, messagesPerPeer: 40)
+        let store = context.store
+        XCTAssertEqual(store.totalMessageCount, 5000)
+        let repsPerPass = 20
+        var samples: [TimeInterval] = []
+
+        measure {
+            let start = Date()
+            var violationCount = 0
+            for _ in 0..<repsPerPass {
+                violationCount += store.auditInvariants().count
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertEqual(violationCount, 0, "healthy corpus must audit clean")
+        }
+
+        reportThroughput("store.audit", samples: samples, operations: repsPerPass, unit: "audits")
     }
 
     /// Spins the main run loop in small slices (draining main-queue tasks and

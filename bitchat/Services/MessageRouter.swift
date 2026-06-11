@@ -6,6 +6,13 @@ import Foundation
 @MainActor
 final class MessageRouter {
     private let transports: [Transport]
+    private let now: () -> Date
+
+    /// Invoked whenever a retained private message is dropped without a
+    /// delivery ack (attempt cap, TTL expiry, or per-peer overflow eviction)
+    /// so the UI can surface the failure instead of leaving the message in a
+    /// stale "sending/sent" state forever.
+    var onMessageDropped: ((_ messageID: String, _ peerID: PeerID) -> Void)?
 
     // Outbox entry with timestamp for TTL-based eviction
     private struct QueuedMessage {
@@ -25,8 +32,9 @@ final class MessageRouter {
     // get a delivery ack (e.g. peer on an old client that doesn't ack).
     private static let maxSendAttempts = 8
 
-    init(transports: [Transport]) {
+    init(transports: [Transport], now: @escaping () -> Date = Date.init) {
         self.transports = transports
+        self.now = now
 
         // Observe favorites changes to learn Nostr mapping and flush queued messages
         NotificationCenter.default.addObserver(
@@ -72,7 +80,7 @@ final class MessageRouter {
             return
         }
 
-        let message = QueuedMessage(content: content, nickname: recipientNickname, messageID: messageID, timestamp: Date(), sendAttempts: 1)
+        let message = QueuedMessage(content: content, nickname: recipientNickname, messageID: messageID, timestamp: now(), sendAttempts: 1)
         if let transport = reachableTransport(for: peerID) {
             // Reachability without a connection is a freshness heuristic (e.g.
             // the mesh retention window), so the send can silently go nowhere.
@@ -108,6 +116,7 @@ final class MessageRouter {
         if queue.count > Self.maxMessagesPerPeer {
             let evicted = queue.removeFirst()
             SecureLogger.warning("📤 Outbox overflow for \(peerID.id.prefix(8))… - evicted oldest message: \(evicted.messageID.prefix(8))…", category: .session)
+            onMessageDropped?(evicted.messageID, peerID)
         }
         outbox[peerID] = queue
     }
@@ -142,13 +151,14 @@ final class MessageRouter {
         guard let queued = outbox[peerID], !queued.isEmpty else { return }
         SecureLogger.debug("Flushing outbox for \(peerID.id.prefix(8))… count=\(queued.count)", category: .session)
 
-        let now = Date()
+        let now = now()
         var remaining: [QueuedMessage] = []
 
         for message in queued {
             // Skip expired messages (TTL exceeded)
             if now.timeIntervalSince(message.timestamp) > Self.messageTTLSeconds {
                 SecureLogger.debug("⏰ Expired queued message for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))… (age: \(Int(now.timeIntervalSince(message.timestamp)))s)", category: .session)
+                onMessageDropped?(message.messageID, peerID)
                 continue
             }
 
@@ -161,6 +171,7 @@ final class MessageRouter {
                 // bounded by attempt count for peers that never ack.
                 guard message.sendAttempts < Self.maxSendAttempts else {
                     SecureLogger.warning("📤 Dropping unacked PM for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))… after \(message.sendAttempts) attempts", category: .session)
+                    onMessageDropped?(message.messageID, peerID)
                     continue
                 }
                 SecureLogger.debug("Outbox -> \(type(of: transport)) (reachable) for \(peerID.id.prefix(8))… id=\(message.messageID.prefix(8))…", category: .session)
@@ -186,11 +197,20 @@ final class MessageRouter {
 
     /// Periodically clean up expired messages from all outboxes
     func cleanupExpiredMessages() {
-        let now = Date()
+        let now = now()
         for peerID in Array(outbox.keys) {
-            outbox[peerID]?.removeAll { now.timeIntervalSince($0.timestamp) > Self.messageTTLSeconds }
+            var expiredMessageIDs: [String] = []
+            outbox[peerID]?.removeAll { message in
+                guard now.timeIntervalSince(message.timestamp) > Self.messageTTLSeconds else { return false }
+                expiredMessageIDs.append(message.messageID)
+                return true
+            }
             if outbox[peerID]?.isEmpty == true {
                 outbox.removeValue(forKey: peerID)
+            }
+            for messageID in expiredMessageIDs {
+                SecureLogger.debug("⏰ Expired queued message for \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
+                onMessageDropped?(messageID, peerID)
             }
         }
     }

@@ -16,6 +16,7 @@
 //
 
 import BitFoundation
+import BitLogger
 import Combine
 import Foundation
 
@@ -185,6 +186,39 @@ final class Conversation: ObservableObject, Identifiable {
         indexByMessageID.removeAll()
     }
 
+    // MARK: Diagnostics
+
+    /// Appends human-readable invariant violations for this conversation
+    /// (empty when healthy): the ID index must be the exact inverse of the
+    /// messages array, the cap must hold, and timestamps must be
+    /// non-decreasing (equal timestamps keep arrival order, so only strict
+    /// inversions are violations). O(messages); allocates only on violation.
+    fileprivate func collectInvariantViolations(into violations: inout [String], label: String) {
+        if indexByMessageID.count != messages.count {
+            violations.append("\(label): index has \(indexByMessageID.count) entries for \(messages.count) messages")
+        }
+        if messages.count > cap {
+            violations.append("\(label): \(messages.count) messages exceeds cap \(cap)")
+        }
+        var previousTimestamp: Date?
+        for position in messages.indices {
+            let message = messages[position]
+            // Count equality + every message resolving to its own position
+            // proves the index is exactly the inverse map (no stale extras).
+            if let index = indexByMessageID[message.id] {
+                if index != position {
+                    violations.append("\(label): message \(message.id.prefix(8))… at \(position) indexed at \(index)")
+                }
+            } else {
+                violations.append("\(label): message \(message.id.prefix(8))… at \(position) missing from index")
+            }
+            if let previousTimestamp, message.timestamp < previousTimestamp {
+                violations.append("\(label): timestamp order violated at \(position)")
+            }
+            previousTimestamp = message.timestamp
+        }
+    }
+
     // MARK: Internals
 
     static func shouldSkipStatusUpdate(current: DeliveryStatus?, new: DeliveryStatus) -> Bool {
@@ -293,6 +327,16 @@ final class ConversationStore: ObservableObject {
     /// copies.
     private var conversationIDsByMessageID: [String: Set<ConversationID>] = [:]
 
+    /// Monotonic count of messages inserted into any conversation (appends,
+    /// upsert-appends, migration inserts). Field-observability only: the
+    /// periodic store audit folds the delta into its heartbeat line so logs
+    /// carry throughput context. Never read on a hot path.
+    private(set) var appendCount: Int = 0
+
+    /// Sample counter for the mirrored-republish debug log in the ID-only
+    /// `setDeliveryStatus` fan-out (first + every Nth occurrence).
+    private var mirroredRepublishLogCount = 0
+
     let changes = PassthroughSubject<ConversationChange, Never>()
 
     // MARK: Intent API
@@ -379,6 +423,16 @@ final class ConversationStore: ObservableObject {
             guard let conversation = conversationsByID[id],
                   conversation.message(withID: messageID)?.deliveryStatus == status,
                   conversation.republishMessage(withID: messageID) else { continue }
+            // Field proof the mirrored-copy republish path actually fires;
+            // sampled (first + every Nth) so mirrored chats can't spam logs.
+            mirroredRepublishLogCount += 1
+            if mirroredRepublishLogCount == 1
+                || mirroredRepublishLogCount.isMultiple(of: TransportConfig.conversationStoreMirroredRepublishLogInterval) {
+                SecureLogger.debug(
+                    "mirrored republish #\(mirroredRepublishLogCount) for \(messageID.prefix(8))… in \(id.auditDescription)",
+                    category: .session
+                )
+            }
             changes.send(.statusChanged(id, messageID: messageID, status))
         }
         return true
@@ -567,10 +621,89 @@ final class ConversationStore: ObservableObject {
         }
     }
 
+    // MARK: Diagnostics
+
+    /// Total messages across all conversations. O(#conversations) — heartbeat
+    /// logging only, never a hot path.
+    var totalMessageCount: Int {
+        conversationsByID.values.reduce(0) { $0 + $1.messages.count }
+    }
+
+    /// Number of distinct message IDs in the store-level membership map.
+    var messageIDMapCount: Int {
+        conversationIDsByMessageID.count
+    }
+
+    /// Verifies the store's correctness invariants and returns human-readable
+    /// violations (empty = healthy). Intended for a periodic field audit:
+    /// O(total messages) and allocation-free while healthy. Checks:
+    /// - the `conversationIDs` ordering array matches `conversationsByID`
+    /// - per conversation: ID index exact, cap held, timestamp order
+    ///   (see `Conversation.collectInvariantViolations`)
+    /// - the message-ID → conversation map matches reality exactly: every
+    ///   mapped membership points at a live conversation actually holding
+    ///   the message, and total memberships equal total messages (with the
+    ///   forward check, equality proves no conversation message is missing
+    ///   from the map)
+    /// - `unreadConversations` only references existing conversations
+    /// - `selectedConversationID`, when set, references an existing
+    ///   conversation (`select(_:)` creates on selection and
+    ///   `removeConversation`/`clearAll` clear it, so existence is the
+    ///   invariant for both the channel-derived and direct-peer cases)
+    func auditInvariants() -> [String] {
+        var violations: [String] = []
+
+        if conversationIDs.count != conversationsByID.count {
+            violations.append("conversationIDs lists \(conversationIDs.count) conversations but dictionary holds \(conversationsByID.count)")
+        }
+        for id in conversationIDs where conversationsByID[id] == nil {
+            violations.append("conversationIDs lists \(id.auditDescription) but no conversation exists")
+        }
+
+        var totalMessages = 0
+        for (id, conversation) in conversationsByID {
+            totalMessages += conversation.messages.count
+            conversation.collectInvariantViolations(into: &violations, label: id.auditDescription)
+        }
+
+        var totalMappedMemberships = 0
+        for (messageID, ids) in conversationIDsByMessageID {
+            totalMappedMemberships += ids.count
+            if ids.isEmpty {
+                violations.append("message map: \(messageID.prefix(8))… has an empty membership set")
+            }
+            for id in ids {
+                guard let conversation = conversationsByID[id] else {
+                    violations.append("message map: \(messageID.prefix(8))… claims unknown conversation \(id.auditDescription)")
+                    continue
+                }
+                if !conversation.containsMessage(withID: messageID) {
+                    violations.append("message map: \(messageID.prefix(8))… not present in claimed conversation \(id.auditDescription)")
+                }
+            }
+        }
+        if totalMappedMemberships != totalMessages {
+            violations.append("message map holds \(totalMappedMemberships) memberships but conversations hold \(totalMessages) messages")
+        }
+
+        for id in unreadConversations where conversationsByID[id] == nil {
+            violations.append("unreadConversations contains unknown conversation \(id.auditDescription)")
+        }
+
+        if let selected = selectedConversationID, conversationsByID[selected] == nil {
+            violations.append("selectedConversationID \(selected.auditDescription) has no conversation")
+        }
+
+        return violations
+    }
+
     // MARK: Internals
 
     private func registerMessageID(_ messageID: String, in id: ConversationID) {
         conversationIDsByMessageID[messageID, default: []].insert(id)
+        // Single choke point for every successful insertion (append, upsert
+        // append, migration insert) — the audit heartbeat's throughput delta.
+        appendCount += 1
     }
 
     private func unregisterMessageID(_ messageID: String, from id: ConversationID) {
@@ -674,6 +807,96 @@ extension ConversationStore {
         }
     }
 }
+
+// MARK: - Diagnostics support
+
+extension ConversationID {
+    /// Short, log-safe description for audit/diagnostic lines. Direct
+    /// conversations truncate the handle so full peer keys never hit logs.
+    fileprivate var auditDescription: String {
+        switch self {
+        case .mesh:
+            return "mesh"
+        case .geohash(let geohash):
+            return "geo:\(geohash)"
+        case .direct(let handle):
+            return "direct:\(handle.id.prefix(13))…"
+        }
+    }
+}
+
+#if DEBUG
+// Test-only corruption hooks for `auditInvariants()` tests. The store is the
+// sole writer by design — `Conversation`'s mutators are fileprivate and the
+// store's backing collections are private — so the inconsistent states the
+// audit exists to catch CANNOT be manufactured through the intent API. These
+// DEBUG-only hooks deliberately bypass that lockdown to inject exactly those
+// impossible states. Never call them outside tests.
+extension Conversation {
+    /// Points an existing message's index entry at the wrong position
+    /// (positions 0 and 1 swap their index entries). Requires >= 2 messages.
+    func _testCorruptIndexEntries() {
+        guard messages.count >= 2 else { return }
+        indexByMessageID[messages[0].id] = 1
+        indexByMessageID[messages[1].id] = 0
+    }
+
+    /// Drops a message's index entry entirely (count mismatch + missing).
+    func _testRemoveIndexEntry(forMessageID messageID: String) {
+        indexByMessageID.removeValue(forKey: messageID)
+    }
+
+    /// Swaps the first and last messages while keeping the index consistent,
+    /// so ONLY the timestamp-order invariant is violated (requires the two
+    /// messages to have distinct timestamps).
+    func _testCorruptOrderingPreservingIndex() {
+        guard messages.count >= 2 else { return }
+        messages.swapAt(0, messages.count - 1)
+        indexByMessageID[messages[0].id] = 0
+        indexByMessageID[messages[messages.count - 1].id] = messages.count - 1
+    }
+}
+
+extension ConversationStore {
+    /// Adds a map membership that the conversation does not actually hold.
+    func _testRegisterPhantomMessageID(_ messageID: String, in id: ConversationID) {
+        conversationIDsByMessageID[messageID, default: []].insert(id)
+    }
+
+    /// Drops a real map membership (conversation message missing from map).
+    func _testUnregisterMessageID(_ messageID: String, from id: ConversationID) {
+        conversationIDsByMessageID[messageID]?.remove(id)
+        if conversationIDsByMessageID[messageID]?.isEmpty == true {
+            conversationIDsByMessageID.removeValue(forKey: messageID)
+        }
+    }
+
+    /// Appends past the conversation cap, bypassing trim (map kept exact so
+    /// only the cap invariant is violated).
+    func _testAppendBypassingCap(_ message: BitchatMessage, to id: ConversationID) {
+        let conversation = conversation(for: id)
+        conversation._testAppendBypassingTrim(message)
+        conversationIDsByMessageID[message.id, default: []].insert(id)
+    }
+
+    /// Marks a nonexistent conversation unread without creating it.
+    func _testInsertUnreadConversationID(_ id: ConversationID) {
+        unreadConversations.insert(id)
+    }
+
+    /// Sets the selection directly, without `select(_:)`'s create-on-select.
+    func _testSetSelectedConversationID(_ id: ConversationID?) {
+        selectedConversationID = id
+    }
+}
+
+extension Conversation {
+    fileprivate func _testAppendBypassingTrim(_ message: BitchatMessage) {
+        messages.append(message)
+        indexByMessageID[message.id] = messages.count - 1
+    }
+}
+#endif
 
 // MARK: - Public timeline derived views
 

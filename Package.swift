@@ -53,11 +53,17 @@ let package = Package(
             path: "bitchatTests",
             exclude: [
                 "Info.plist",
-                "README.md"
+                "README.md",
+                // CI perf gate data (read by scripts/check-perf-floors.sh),
+                // not a test resource.
+                "Performance/perf-floors.json"
             ],
             resources: [
                 .process("Localization"),
-                .process("Noise")
+                // Only the vector fixture: declaring the whole "Noise"
+                // directory would claim its .swift test files as resources
+                // and silently drop them from compilation.
+                .process("Noise/NoiseTestVectors.json")
             ]
         )
     ]
