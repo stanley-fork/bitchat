@@ -406,6 +406,23 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // Single-writer: mutate only via `setPublicBatching(_:)` below.
     @Published private(set) var isBatchingPublic: Bool = false
 
+    // Backing store for `sentReadReceipts` persistence. `.standard` in
+    // production; injectable so tests can use a scratch suite that does not
+    // leak state between runs.
+    let readReceiptsDefaults: UserDefaults
+
+    /// Default read-receipt persistence store. Production uses `.standard`.
+    /// Under test, a dedicated scratch suite is used instead — wiped at first
+    /// use per process — so back-to-back local test runs never see each
+    /// other's persisted receipts (and tests never pollute `.standard`).
+    static let defaultReadReceiptsDefaults: UserDefaults = {
+        guard TestEnvironment.isRunningTests else { return .standard }
+        let suiteName = "chat.bitchat.tests.readReceipts"
+        guard let scratch = UserDefaults(suiteName: suiteName) else { return .standard }
+        scratch.removePersistentDomain(forName: suiteName)
+        return scratch
+    }()
+
     // Track sent read receipts to avoid duplicates (persisted across launches)
     // Note: Persistence happens automatically in didSet, no lifecycle observers needed
     var sentReadReceipts: Set<String> = [] {  // messageID set
@@ -413,9 +430,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             // Only persist if there are changes
             guard oldValue != sentReadReceipts else { return }
 
-            // Persist to UserDefaults whenever it changes (no manual synchronize/verify re-read)
+            // Persist whenever it changes (no manual synchronize/verify re-read)
             if let data = try? JSONEncoder().encode(Array(sentReadReceipts)) {
-                UserDefaults.standard.set(data, forKey: "sentReadReceipts")
+                readReceiptsDefaults.set(data, forKey: "sentReadReceipts")
             } else {
                 SecureLogger.error("❌ Failed to encode read receipts for persistence", category: .session)
             }
@@ -763,7 +780,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         conversations: ConversationStore? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
-        locationManager: LocationChannelManager = .shared
+        locationManager: LocationChannelManager = .shared,
+        readReceiptsDefaults: UserDefaults? = nil
     ) {
         let conversations = conversations ?? ConversationStore()
         let peerIdentityStore = peerIdentityStore ?? PeerIdentityStore()
@@ -790,7 +808,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.autocompleteService = services.autocompleteService
         self.deduplicationService = services.deduplicationService
         self.publicMessagePipeline = services.publicMessagePipeline
-        self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts()
+        let readReceiptsDefaults = readReceiptsDefaults ?? Self.defaultReadReceiptsDefaults
+        self.readReceiptsDefaults = readReceiptsDefaults
+        self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts(userDefaults: readReceiptsDefaults)
 
         // Republish on every store change so SwiftUI observers of the
         // view model refresh. This replaces the UI-update role of the old
