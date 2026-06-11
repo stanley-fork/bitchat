@@ -496,6 +496,34 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("store.append", samples: samples, operations: messageCount, unit: "messages")
     }
 
+    // MARK: - 8. ConversationStore invariant audit (field observability)
+
+    /// `ConversationStore.auditInvariants()` over a realistic 5k-message
+    /// corpus (mesh + geohash + 75 private chats). The audit runs in the
+    /// field on the read-receipt cleanup cadence
+    /// (`ChatViewModel.auditConversationStore`), so this measures the
+    /// per-audit cost that piggybacks on peer-list updates — it must stay
+    /// trivially cheap relative to that cadence.
+    func testConversationStoreAudit() {
+        let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 75, messagesPerPeer: 40)
+        let store = context.store
+        XCTAssertEqual(store.totalMessageCount, 5000)
+        let repsPerPass = 20
+        var samples: [TimeInterval] = []
+
+        measure {
+            let start = Date()
+            var violationCount = 0
+            for _ in 0..<repsPerPass {
+                violationCount += store.auditInvariants().count
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertEqual(violationCount, 0, "healthy corpus must audit clean")
+        }
+
+        reportThroughput("store.audit", samples: samples, operations: repsPerPass, unit: "audits")
+    }
+
     /// Spins the main run loop in small slices (draining main-queue tasks and
     /// timers) until `condition` holds or `timeout` elapses.
     private func spinMainRunLoop(timeout: TimeInterval, until condition: () -> Bool) -> Bool {

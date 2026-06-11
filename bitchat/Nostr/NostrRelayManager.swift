@@ -656,11 +656,16 @@ final class NostrRelayManager: ObservableObject {
         // durable intent stays in subscriptionRequestState, so an evicted REQ
         // is still replayed if its subscription is active when the relay
         // (re)connects.
+        var evictedCount = 0
         while map.count > TransportConfig.nostrPendingSubscriptionsPerRelayCap,
               let oldest = map.min(by: { $0.value.sequence < $1.value.sequence }) {
             map.removeValue(forKey: oldest.key)
+            evictedCount += 1
+        }
+        if evictedCount > 0 {
+            // Bounds proof: the cap eviction actually removed entries.
             SecureLogger.warning(
-                "📋 Pending subscription overflow for \(url) - evicted oldest id=\(oldest.key)",
+                "📋 Evicted \(evictedCount) pending sub(s) over cap for \(url)",
                 category: .session
             )
         }
@@ -678,8 +683,10 @@ final class NostrRelayManager: ObservableObject {
                 now.timeIntervalSince($0.value.queuedAt) <= TransportConfig.nostrPendingSubscriptionTTLSeconds
             }
             guard fresh.count != map.count else { continue }
-            SecureLogger.debug(
-                "📋 Swept \(map.count - fresh.count) stale pending subscription(s) for \(url)",
+            // Bounds proof: the age sweep actually removed entries. Warning
+            // (not debug) — stale pending REQs mean a relay never came up.
+            SecureLogger.warning(
+                "📋 Swept \(map.count - fresh.count) stale pending sub(s) for \(url)",
                 category: .session
             )
             pendingSubscriptions[url] = fresh.isEmpty ? nil : fresh
@@ -1053,8 +1060,14 @@ final class NostrRelayManager: ObservableObject {
 
         let nextReconnectTime = dependencies.now().addingTimeInterval(backoffInterval)
         relays[index].nextReconnectTime = nextReconnectTime
-        
-        
+
+        // Reconnects are bounded by maxReconnectAttempts and exponentially
+        // backed off, so this is low-frequency: plain debug, no sampling.
+        SecureLogger.debug(
+            "🔄 Reconnect \(relayUrl) in \(String(format: "%.1f", backoffInterval))s (base \(String(format: "%.1f", baseBackoffInterval))s, attempt \(relays[index].reconnectAttempts)/\(maxReconnectAttempts))",
+            category: .session
+        )
+
         // Schedule reconnection with exponential backoff
         let gen = connectionGeneration
         dependencies.scheduleAfter(backoffInterval) { [weak self] in

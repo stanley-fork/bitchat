@@ -50,6 +50,14 @@ enum TransportConfig {
     // Sample interval for per-event debug logs on the inbound hot path.
     static let nostrInboundEventLogInterval: Int = 100
 
+    // Conversation store diagnostics (field observability)
+    // Sample interval for the periodic store-audit "OK" heartbeat line
+    // (first + every Nth audit); violations always log at error level.
+    static let conversationStoreAuditLogInterval: Int = 10
+    // Sample interval for the mirrored-republish debug line in the ID-only
+    // delivery fan-out (first + every Nth republish).
+    static let conversationStoreMirroredRepublishLogInterval: Int = 25
+
     // UI thresholds
     static let uiProcessedNostrEventsCap: Int = 2000
     static let uiChannelInactivityThresholdSeconds: TimeInterval = 9 * 60

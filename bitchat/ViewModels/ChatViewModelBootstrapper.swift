@@ -83,12 +83,22 @@ private extension ChatViewModelBootstrapper {
         // not cover `.failed` over confirmed receipts, so guard here: a drop
         // of an already-delivered/read message (e.g. a stale retained copy)
         // must not downgrade its status.
-        viewModel.messageRouter.onMessageDropped = { [weak viewModel] messageID, _ in
+        viewModel.messageRouter.onMessageDropped = { [weak viewModel] messageID, peerID in
             guard let viewModel else { return }
             switch viewModel.conversations.deliveryStatus(forMessageID: messageID) {
             case .delivered, .read:
-                return
+                // Field proof of the no-downgrade guard: the drop arrived
+                // after a confirmed receipt, so the `.failed` write is
+                // deliberately skipped.
+                SecureLogger.warning(
+                    "📤 Router dropped message \(messageID.prefix(8))… for \(peerID.id.prefix(8))… → .failed skipped (already delivered/read)",
+                    category: .session
+                )
             default:
+                SecureLogger.warning(
+                    "📤 Router dropped message \(messageID.prefix(8))… for \(peerID.id.prefix(8))… → marked failed",
+                    category: .session
+                )
                 viewModel.conversations.setDeliveryStatus(
                     .failed(reason: "Not delivered"),
                     forMessageID: messageID

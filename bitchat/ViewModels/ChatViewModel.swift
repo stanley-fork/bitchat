@@ -445,6 +445,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // Track app startup phase to prevent marking old messages as unread
     var isStartupPhase = true
+
+    // ConversationStore field audit bookkeeping (see auditConversationStore()):
+    // runs on the read-receipt cleanup cadence, heartbeat sampled first +
+    // every `TransportConfig.conversationStoreAuditLogInterval`th audit.
+    private var storeAuditCount = 0
+    private var storeAuditLastAppendCount = 0
     // Announce Tor initial readiness once per launch to avoid duplicates
     var torInitialReadyAnnounced: Bool = false
 
@@ -1482,6 +1488,35 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func cleanupOldReadReceipts() {
         deliveryCoordinator.cleanupOldReadReceipts()
+        auditConversationStore()
+    }
+
+    /// Periodic on-device verification of the `ConversationStore`'s
+    /// correctness invariants, piggybacked on the read-receipt cleanup
+    /// cadence (peer-list updates) so no extra timer exists. Loud on
+    /// violation (one error line each), near-silent when healthy (sampled
+    /// heartbeat: first + every Nth audit). The audit is O(total messages)
+    /// and allocation-free while healthy — measured ~0.5 ms at 5k messages
+    /// (see `PerformanceBaselineTests.testConversationStoreAudit`), cheap
+    /// relative to its cadence, so it always runs.
+    @MainActor
+    private func auditConversationStore() {
+        storeAuditCount += 1
+        let violations = conversations.auditInvariants()
+        guard violations.isEmpty else {
+            for violation in violations {
+                SecureLogger.error("🚨 ConversationStore invariant violated: \(violation)", category: .session)
+            }
+            return
+        }
+        let appendCount = conversations.appendCount
+        if storeAuditCount == 1 || storeAuditCount.isMultiple(of: TransportConfig.conversationStoreAuditLogInterval) {
+            SecureLogger.debug(
+                "Store audit OK: \(conversations.conversationsByID.count) conversations, \(conversations.totalMessageCount) messages, map=\(conversations.messageIDMapCount), appends since last audit=\(appendCount - storeAuditLastAppendCount)",
+                category: .session
+            )
+        }
+        storeAuditLastAppendCount = appendCount
     }
 
     func parseMentions(from content: String) -> [String] {

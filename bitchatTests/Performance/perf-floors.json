@@ -24,7 +24,8 @@
     "formatting.formatMessage": 12261,
     "pipeline.privateIngest": 24848,
     "pipeline.publicIngest": 13102,
-    "store.append": 213201
+    "store.append": 213201,
+    "store.audit": 362
   },
   "floors": {
     "nostrInbound.fresh": 530,
@@ -36,6 +37,7 @@
     "formatting.formatMessage": 3000,
     "pipeline.privateIngest": 6000,
     "pipeline.publicIngest": 3200,
-    "store.append": 53000
+    "store.append": 53000,
+    "store.audit": 90
   }
 }
