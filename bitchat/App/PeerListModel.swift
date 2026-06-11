@@ -37,7 +37,7 @@ final class PeerListModel: ObservableObject {
     @Published private(set) var renderID = ""
 
     private let chatViewModel: ChatViewModel
-    private let conversationStore: ConversationStore
+    private let conversations: ConversationStore
     private let locationChannelsModel: LocationChannelsModel
     private let peerIdentityStore: PeerIdentityStore
     private let locationPresenceStore: LocationPresenceStore
@@ -45,13 +45,13 @@ final class PeerListModel: ObservableObject {
 
     init(
         chatViewModel: ChatViewModel,
-        conversationStore: ConversationStore,
+        conversations: ConversationStore,
         locationChannelsModel: LocationChannelsModel? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil
     ) {
         self.chatViewModel = chatViewModel
-        self.conversationStore = conversationStore
+        self.conversations = conversations
         self.locationChannelsModel = locationChannelsModel ?? LocationChannelsModel()
         self.peerIdentityStore = peerIdentityStore ?? chatViewModel.peerIdentityStore
         self.locationPresenceStore = locationPresenceStore ?? chatViewModel.locationPresenceStore
@@ -122,7 +122,7 @@ final class PeerListModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        conversationStore.$unreadConversations
+        conversations.$unreadConversations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refresh()

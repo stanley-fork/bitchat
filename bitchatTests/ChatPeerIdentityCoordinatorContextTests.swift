@@ -38,11 +38,34 @@ private final class MockChatPeerIdentityContext: ChatPeerIdentityContext {
     func notifyUIChanged() { notifyUIChangedCount += 1 }
     func addSystemMessage(_ content: String) { systemMessages.append(content) }
 
+    // Conversation store intents (mirror `ConversationStore` migrate
+    // semantics: dedup by ID, timestamp order, unread carried, old chat
+    // removed) while recording calls for assertions.
+    private(set) var migratedChats: [(from: PeerID, to: PeerID)] = []
+
+    func markPrivateChatRead(_ peerID: PeerID) {
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID) {
+        migratedChats.append((oldPeerID, newPeerID))
+        guard oldPeerID != newPeerID, let source = privateChats[oldPeerID] else { return }
+        var destination = privateChats[newPeerID] ?? []
+        for message in source where !destination.contains(where: { $0.id == message.id }) {
+            let index = destination.firstIndex(where: { $0.timestamp > message.timestamp }) ?? destination.count
+            destination.insert(message, at: index)
+        }
+        privateChats[newPeerID] = destination
+        privateChats.removeValue(forKey: oldPeerID)
+        if unreadPrivateMessages.remove(oldPeerID) != nil {
+            unreadPrivateMessages.insert(newPeerID)
+        }
+    }
+
     // Private chat session lifecycle
     private(set) var consolidatedPeers: [(peerID: PeerID, peerNickname: String)] = []
     private(set) var syncedReadReceiptPeers: [PeerID] = []
     private(set) var begunChatSessions: [PeerID] = []
-    private(set) var privateStoreSyncCount = 0
     private(set) var selectionStoreSyncCount = 0
     private(set) var markedReadPeers: [PeerID] = []
 
@@ -60,7 +83,6 @@ private final class MockChatPeerIdentityContext: ChatPeerIdentityContext {
         begunChatSessions.append(peerID)
     }
 
-    func synchronizePrivateConversationStore() { privateStoreSyncCount += 1 }
     func synchronizeConversationSelectionStore() { selectionStoreSyncCount += 1 }
     func markPrivateMessagesAsRead(from peerID: PeerID) { markedReadPeers.append(peerID) }
 
@@ -261,7 +283,6 @@ struct ChatPeerIdentityCoordinatorContextTests {
         #expect(context.storedFingerprints.map(\.fingerprint) == ["fp-alice"])
         #expect(context.selectedPrivateChatFingerprint == "fp-alice")
         #expect(context.begunChatSessions == [peerID])
-        #expect(context.privateStoreSyncCount == 1)
         #expect(context.selectionStoreSyncCount == 1)
         #expect(context.markedReadPeers == [peerID])
 

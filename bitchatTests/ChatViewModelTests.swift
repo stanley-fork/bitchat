@@ -136,7 +136,7 @@ struct ChatViewModelIdentityTests {
             senderPeerID: oldPeerID,
             mentions: nil
         )
-        viewModel.privateChats[oldPeerID] = [existingMessage]
+        viewModel.seedPrivateChat([existingMessage], for: oldPeerID)
         viewModel.startPrivateChat(with: oldPeerID)
 
         #expect(viewModel.selectedPrivateChatPeer == oldPeerID)
@@ -345,8 +345,8 @@ struct ChatViewModelServiceLifecycleTests {
             mentions: nil
         )
 
-        viewModel.privateChats[peerID] = [message]
-        viewModel.unreadPrivateMessages.insert(peerID)
+        viewModel.seedPrivateChat([message], for: peerID)
+        viewModel.markPrivateChatUnread(peerID)
         viewModel.selectedPrivateChatPeer = peerID
 
         viewModel.handleDidBecomeActive()
@@ -438,7 +438,7 @@ struct ChatViewModelReceivingTests {
         )
 
         let found = await TestHelpers.waitUntil({
-            viewModel.timelineStore.messages(for: .mesh).contains { $0.content == "Public hello from Bob" }
+            viewModel.publicMessages(for: .mesh).contains { $0.content == "Public hello from Bob" }
         }, timeout: TestConstants.defaultTimeout)
 
         #expect(found)
@@ -497,7 +497,7 @@ struct ChatViewModelNoisePayloadTests {
             mentions: nil,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         viewModel.didReceiveNoisePayload(
             from: peerID,
@@ -535,7 +535,7 @@ struct ChatViewModelNoisePayloadTests {
             mentions: nil,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
 
         viewModel.didReceiveNoisePayload(
             from: peerID,
@@ -553,10 +553,7 @@ struct ChatViewModelNoisePayloadTests {
         }, timeout: TestConstants.defaultTimeout)
 
         let conversationStoreUpdated = await TestHelpers.waitUntil({
-            let messages = viewModel.conversationStore.directMessages(
-                for: peerID,
-                identityResolver: viewModel.identityResolver
-            )
+            let messages = viewModel.conversations.conversationsByID[.directPeer(peerID)]?.messages ?? []
             guard let status = messages.first?.deliveryStatus else { return false }
             if case .read = status {
                 return true
@@ -709,10 +706,12 @@ struct ChatViewModelPublicConversationTests {
         let (viewModel, _) = makeTestableViewModel()
 
         viewModel.addPublicSystemMessage("system refresh test")
-        viewModel.messages.removeAll()
         viewModel.refreshVisibleMessages(from: .mesh)
 
+        // The system message lives in the mesh conversation itself, so the
+        // derived `messages` view still surfaces it after a refresh.
         #expect(viewModel.messages.last?.content == "system refresh test")
+        #expect(viewModel.publicMessages(for: .mesh).last?.content == "system refresh test")
     }
 
     @Test @MainActor
@@ -726,6 +725,18 @@ struct ChatViewModelPublicConversationTests {
         viewModel.refreshVisibleMessages(from: .mesh)
 
         #expect(viewModel.messages.isEmpty)
+        #expect(viewModel.publicMessages(for: .mesh).isEmpty)
+    }
+
+    @Test @MainActor
+    func queuedGeohashSystemMessages_drainOnce() async {
+        let (viewModel, _) = makeTestableViewModel()
+
+        viewModel.queueGeohashSystemMessage("first")
+        viewModel.queueGeohashSystemMessage("second")
+
+        #expect(viewModel.drainPendingGeohashSystemMessages() == ["first", "second"])
+        #expect(viewModel.drainPendingGeohashSystemMessages().isEmpty)
     }
 }
 
@@ -771,7 +782,7 @@ struct ChatViewModelPeerTests {
     func didUpdatePeerList_removesStaleUnreadPeerWithoutMessages() async {
         let (viewModel, _) = makeTestableViewModel()
         let stalePeer = PeerID(str: "00000000000000a2")
-        viewModel.unreadPrivateMessages = [stalePeer]
+        viewModel.markPrivateChatUnread(stalePeer)
 
         viewModel.didUpdatePeerList([])
 
@@ -798,8 +809,8 @@ struct ChatViewModelPeerTests {
             senderPeerID: stablePeer,
             mentions: nil
         )
-        viewModel.privateChats[stablePeer] = [message]
-        viewModel.unreadPrivateMessages = [stablePeer]
+        viewModel.seedPrivateChat([message], for: stablePeer)
+        viewModel.markPrivateChatUnread(stablePeer)
 
         viewModel.didUpdatePeerList([])
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -876,33 +887,32 @@ struct ChatViewModelPrivateChatSelectionTests {
         let older = Date().addingTimeInterval(-120)
         let newer = Date().addingTimeInterval(-30)
 
-        viewModel.privateChats = [
-            peerA: [
-                BitchatMessage(
-                    id: "a-1",
-                    sender: "A",
-                    content: "Old",
-                    timestamp: older,
-                    isRelay: false,
-                    isPrivate: true,
-                    recipientNickname: "Me",
-                    senderPeerID: peerA
-                )
-            ],
-            peerB: [
-                BitchatMessage(
-                    id: "b-1",
-                    sender: "B",
-                    content: "New",
-                    timestamp: newer,
-                    isRelay: false,
-                    isPrivate: true,
-                    recipientNickname: "Me",
-                    senderPeerID: peerB
-                )
-            ]
-        ]
-        viewModel.unreadPrivateMessages = [peerA, peerB]
+        viewModel.seedPrivateChat([
+            BitchatMessage(
+                id: "a-1",
+                sender: "A",
+                content: "Old",
+                timestamp: older,
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Me",
+                senderPeerID: peerA
+            )
+        ], for: peerA)
+        viewModel.seedPrivateChat([
+            BitchatMessage(
+                id: "b-1",
+                sender: "B",
+                content: "New",
+                timestamp: newer,
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Me",
+                senderPeerID: peerB
+            )
+        ], for: peerB)
+        viewModel.markPrivateChatUnread(peerA)
+        viewModel.markPrivateChatUnread(peerB)
 
         viewModel.openMostRelevantPrivateChat()
 
@@ -918,32 +928,30 @@ struct ChatViewModelPrivateChatSelectionTests {
         let older = Date().addingTimeInterval(-200)
         let newer = Date().addingTimeInterval(-20)
 
-        viewModel.privateChats = [
-            peerA: [
-                BitchatMessage(
-                    id: "a-1",
-                    sender: "A",
-                    content: "Old",
-                    timestamp: older,
-                    isRelay: false,
-                    isPrivate: true,
-                    recipientNickname: "Me",
-                    senderPeerID: peerA
-                )
-            ],
-            peerB: [
-                BitchatMessage(
-                    id: "b-1",
-                    sender: "B",
-                    content: "New",
-                    timestamp: newer,
-                    isRelay: false,
-                    isPrivate: true,
-                    recipientNickname: "Me",
-                    senderPeerID: peerB
-                )
-            ]
-        ]
+        viewModel.seedPrivateChat([
+            BitchatMessage(
+                id: "a-1",
+                sender: "A",
+                content: "Old",
+                timestamp: older,
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Me",
+                senderPeerID: peerA
+            )
+        ], for: peerA)
+        viewModel.seedPrivateChat([
+            BitchatMessage(
+                id: "b-1",
+                sender: "B",
+                content: "New",
+                timestamp: newer,
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "Me",
+                senderPeerID: peerB
+            )
+        ], for: peerB)
 
         viewModel.openMostRelevantPrivateChat()
 
@@ -1002,7 +1010,7 @@ struct ChatViewModelPanicTests {
 
         // Set up some state
         transport.connectedPeers.insert(PeerID(str: "PEER1"))
-        viewModel.messages = [
+        viewModel.seedPublicMessages([
             BitchatMessage(
                 id: "panic-1",
                 sender: "Tester",
@@ -1010,8 +1018,8 @@ struct ChatViewModelPanicTests {
                 timestamp: Date(),
                 isRelay: false
             )
-        ]
-        viewModel.privateChats[PeerID(str: "PEER1")] = [
+        ])
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: "pm-1",
                 sender: "Peer",
@@ -1022,8 +1030,8 @@ struct ChatViewModelPanicTests {
                 recipientNickname: "Me",
                 senderPeerID: PeerID(str: "PEER1")
             )
-        ]
-        viewModel.unreadPrivateMessages.insert(PeerID(str: "PEER1"))
+        ], for: PeerID(str: "PEER1"))
+        viewModel.markPrivateChatUnread(PeerID(str: "PEER1"))
 
         viewModel.panicClearAllData()
 

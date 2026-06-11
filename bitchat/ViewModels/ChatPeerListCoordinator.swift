@@ -13,8 +13,12 @@ import Foundation
 protocol ChatPeerListContext: AnyObject {
     // MARK: Connection & chat state
     var isConnected: Bool { get set }
-    var privateChats: [PeerID: [BitchatMessage]] { get }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    /// A single private chat's timeline (store-direct lookup on
+    /// `ChatViewModel`; no `privateChats` dictionary build).
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage]
+    var unreadPrivateMessages: Set<PeerID> { get }
+    /// Clears the peer's unread flag (single-writer store intent).
+    func markPrivateChatRead(_ peerID: PeerID)
     var hasTrackedPrivateChatSelection: Bool { get }
     func updatePrivateChatPeerIfNeeded()
     func cleanupOldReadReceipts()
@@ -35,7 +39,7 @@ protocol ChatPeerListContext: AnyObject {
 }
 
 extension ChatViewModel: ChatPeerListContext {
-    // `isConnected`, `privateChats`, `unreadPrivateMessages`,
+    // `isConnected`, `privateMessages(for:)`, `unreadPrivateMessages`,
     // `hasTrackedPrivateChatSelection`, `updatePrivateChatPeerIfNeeded()`,
     // `cleanupOldReadReceipts()`, `unifiedPeers`, `isPeerConnected(_:)`,
     // `isPeerReachable(_:)`, `registerEphemeralSession(peerID:)`, and
@@ -146,16 +150,16 @@ private extension ChatPeerListCoordinator {
         var idsToRemove: [PeerID] = []
 
         for staleID in staleIDs {
-            if staleID.isGeoDM, let messages = context.privateChats[staleID], !messages.isEmpty {
+            if staleID.isGeoDM, !context.privateMessages(for: staleID).isEmpty {
                 continue
             }
 
-            if staleID.isNoiseKeyHex, let messages = context.privateChats[staleID], !messages.isEmpty {
+            if staleID.isNoiseKeyHex, !context.privateMessages(for: staleID).isEmpty {
                 continue
             }
 
             idsToRemove.append(staleID)
-            context.unreadPrivateMessages.remove(staleID)
+            context.markPrivateChatRead(staleID)
         }
 
         if !idsToRemove.isEmpty {

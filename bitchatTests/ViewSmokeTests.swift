@@ -52,17 +52,17 @@ private func makeSmokeLocationManager() -> LocationChannelManager {
 @MainActor
 private func makeSmokeFeatureModels(for viewModel: ChatViewModel) -> SmokeFeatureModels {
     let locationManager = makeSmokeLocationManager()
-    let conversationStore = viewModel.conversationStore
-    let publicChatModel = PublicChatModel(conversationStore: conversationStore)
+    let conversations = viewModel.conversations
+    let publicChatModel = PublicChatModel(conversations: conversations)
     let locationChannelsModel = LocationChannelsModel(manager: locationManager)
-    let privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
+    let privateInboxModel = PrivateInboxModel(conversations: conversations)
     let appChromeModel = AppChromeModel(
         chatViewModel: viewModel,
         privateInboxModel: privateInboxModel
     )
     let privateConversationModel = PrivateConversationModel(
         chatViewModel: viewModel,
-        conversationStore: conversationStore,
+        conversations: conversations,
         locationChannelsModel: locationChannelsModel
     )
     let verificationModel = VerificationModel(
@@ -72,11 +72,11 @@ private func makeSmokeFeatureModels(for viewModel: ChatViewModel) -> SmokeFeatur
     let conversationUIModel = ConversationUIModel(
         chatViewModel: viewModel,
         privateConversationModel: privateConversationModel,
-        conversationStore: conversationStore
+        conversations: conversations
     )
     let peerListModel = PeerListModel(
         chatViewModel: viewModel,
-        conversationStore: conversationStore,
+        conversations: conversations,
         locationChannelsModel: locationChannelsModel
     )
 
@@ -359,7 +359,7 @@ struct ViewSmokeTests {
             makeSnapshot(peerID: blockedPeer, nickname: "Mallory", noiseByte: 0x55)
         ])
         try? await Task.sleep(nanoseconds: 50_000_000)
-        viewModel.unreadPrivateMessages.insert(blockedPeer)
+        viewModel.markPrivateChatUnread(blockedPeer)
 
         _ = mount(
             MeshPeerList(

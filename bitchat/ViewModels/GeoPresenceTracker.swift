@@ -23,8 +23,10 @@ protocol GeoPresenceContext: AnyObject {
     func geoParticipantCount(for geohash: String) -> Int
     func markGeoTeleported(_ pubkeyHexLowercased: String)
 
+    /// Appends a geohash message if absent (single-writer store intent).
+    /// Returns `true` when stored.
+    @discardableResult
     func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool
-    func synchronizePublicConversationStore(forGeohash geohash: String)
 
     /// Posts the sampled-geohash-activity local notification.
     func notifyGeohashActivity(geohash: String, bodyPreview: String)
@@ -32,13 +34,10 @@ protocol GeoPresenceContext: AnyObject {
 
 extension ChatViewModel: GeoPresenceContext {
     // `activeChannel`, `lastGeoNotificationAt`, `geoNicknames`, the Nostr
-    // identity/blocking members, and `synchronizePublicConversationStore`
-    // already have witnesses on `ChatViewModel`. The members below flatten
-    // nested service accesses into intent-named calls.
-
-    func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool {
-        timelineStore.appendIfAbsent(message, toGeohash: geohash)
-    }
+    // identity/blocking members, and the
+    // `appendGeohashMessageIfAbsent(_:toGeohash:)` store intent already have
+    // witnesses on `ChatViewModel`. The members below flatten nested service
+    // accesses into intent-named calls.
 
     var teleportedGeoCount: Int {
         locationPresenceStore.teleportedGeo.count
@@ -166,7 +165,6 @@ final class GeoPresenceTracker {
                 mentions: mentions.isEmpty ? nil : mentions
             )
             if context.appendGeohashMessageIfAbsent(message, toGeohash: gh) {
-                context.synchronizePublicConversationStore(forGeohash: gh)
                 context.notifyGeohashActivity(geohash: gh, bodyPreview: preview)
             }
         }

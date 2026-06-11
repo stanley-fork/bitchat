@@ -25,10 +25,13 @@ protocol ChatMediaTransferContext: AnyObject {
     func currentPublicSender() -> (name: String, peerID: PeerID)
 
     // MARK: Message state
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
-    func refreshVisibleMessages(from channel: ChannelID?)
-    func trimMessagesIfNeeded()
+    /// Appends a private message via the single-writer store intent.
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
+    /// Appends a public message via the single-writer store intent
+    /// (immediate: outgoing media placeholders must render without batching).
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool
     func removeMessage(withID messageID: String, cleanupFile: Bool)
     func addSystemMessage(_ content: String)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
@@ -48,9 +51,8 @@ protocol ChatMediaTransferContext: AnyObject {
 extension ChatViewModel: ChatMediaTransferContext {
     // `canSendMediaInCurrentContext`, `selectedPrivateChatPeer`, `nickname`,
     // `myPeerID`, `activeChannel`, `nicknameForPeer(_:)`,
-    // `currentPublicSender()`, `privateChats`,
-    // `appendTimelineMessage(_:to:)`, `refreshVisibleMessages(from:)`,
-    // `trimMessagesIfNeeded()`, `removeMessage(withID:cleanupFile:)`,
+    // `currentPublicSender()`,
+    // `appendPublicMessage(_:to:)`, `removeMessage(withID:cleanupFile:)`,
     // `addSystemMessage(_:)`, `notifyUIChanged()`,
     // `updateMessageDeliveryStatus(_:status:)`, `normalizedContentKey(_:)`,
     // and `recordContentKey(_:timestamp:)` are shared requirements with the
@@ -228,10 +230,7 @@ final class ChatMediaTransferCoordinator {
                 senderPeerID: context.myPeerID,
                 deliveryStatus: .sending
             )
-            var chats = context.privateChats
-            chats[peerID, default: []].append(message)
-            context.privateChats = chats
-            context.trimMessagesIfNeeded()
+            context.appendPrivateMessage(message, to: peerID)
         } else {
             let (displayName, senderPeerID) = context.currentPublicSender()
             message = BitchatMessage(
@@ -245,9 +244,7 @@ final class ChatMediaTransferCoordinator {
                 senderPeerID: senderPeerID,
                 deliveryStatus: .sending
             )
-            context.appendTimelineMessage(message, to: context.activeChannel)
-            context.refreshVisibleMessages(from: context.activeChannel)
-            context.trimMessagesIfNeeded()
+            context.appendPublicMessage(message, to: ConversationID(channelID: context.activeChannel))
         }
 
         let key = context.normalizedContentKey(message.content)

@@ -76,12 +76,12 @@ struct TextMessageView: View {
     )
     let privateConversationModel = PrivateConversationModel(
         chatViewModel: viewModel,
-        conversationStore: viewModel.conversationStore
+        conversations: viewModel.conversations
     )
     let conversationUIModel = ConversationUIModel(
         chatViewModel: viewModel,
         privateConversationModel: privateConversationModel,
-        conversationStore: viewModel.conversationStore
+        conversations: viewModel.conversations
     )
     
     Group {

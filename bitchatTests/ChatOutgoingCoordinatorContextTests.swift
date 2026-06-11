@@ -49,21 +49,19 @@ private final class MockChatOutgoingContext: ChatOutgoingContext {
     }
 
     // Public timeline (local echo)
-    private(set) var appendedTimelineMessages: [(message: BitchatMessage, channel: ChannelID)] = []
-    private(set) var refreshedChannels: [ChannelID?] = []
-    private(set) var trimMessagesIfNeededCount = 0
+    private(set) var appendedPublicMessages: [(message: BitchatMessage, conversationID: ConversationID)] = []
     private(set) var systemMessages: [String] = []
 
     func parseMentions(from content: String) -> [String] {
         content.contains("@bob") ? ["bob"] : []
     }
 
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID) {
-        appendedTimelineMessages.append((message, channel))
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool {
+        appendedPublicMessages.append((message, conversationID))
+        return true
     }
 
-    func refreshVisibleMessages(from channel: ChannelID?) { refreshedChannels.append(channel) }
-    func trimMessagesIfNeeded() { trimMessagesIfNeededCount += 1 }
     func addSystemMessage(_ content: String) { systemMessages.append(content) }
 
     // Content dedup
@@ -129,7 +127,7 @@ struct ChatOutgoingCoordinatorContextTests {
         await drainMainActorTasks()
 
         #expect(context.handledCommands == ["/who all"])
-        #expect(context.appendedTimelineMessages.isEmpty)
+        #expect(context.appendedPublicMessages.isEmpty)
         #expect(context.sentMeshMessages.isEmpty)
     }
 
@@ -153,7 +151,7 @@ struct ChatOutgoingCoordinatorContextTests {
         coordinator.sendMessage("dropped")
         await drainMainActorTasks()
         #expect(context.sentPrivateMessages.count == 1)
-        #expect(context.appendedTimelineMessages.isEmpty)
+        #expect(context.appendedPublicMessages.isEmpty)
     }
 
     @Test @MainActor
@@ -165,16 +163,14 @@ struct ChatOutgoingCoordinatorContextTests {
         await drainMainActorTasks()
 
         // Local echo uses the trimmed content, own nickname/peer ID, mentions.
-        #expect(context.appendedTimelineMessages.count == 1)
-        let echo = context.appendedTimelineMessages[0]
+        #expect(context.appendedPublicMessages.count == 1)
+        let echo = context.appendedPublicMessages[0]
         #expect(echo.message.content == "hello @bob")
         #expect(echo.message.sender == "me")
         #expect(echo.message.senderPeerID == context.myPeerID)
         #expect(echo.message.mentions == ["bob"])
-        #expect(echo.channel == .mesh)
-        #expect(context.refreshedChannels == [.mesh])
+        #expect(echo.conversationID == .mesh)
         #expect(context.recordedContentKeys.map(\.key) == ["key:hello @bob"])
-        #expect(context.trimMessagesIfNeededCount == 1)
 
         // The mesh send carries the original (untrimmed) content and reuses
         // the echo's message ID and timestamp; activity is stamped for "mesh".
@@ -200,8 +196,9 @@ struct ChatOutgoingCoordinatorContextTests {
 
         // Local echo carries the geohash sender suffix (#last-4-of-pubkey) and
         // the signed event's ID; the send context targets the same channel.
-        #expect(context.appendedTimelineMessages.count == 1)
-        let echo = context.appendedTimelineMessages[0].message
+        #expect(context.appendedPublicMessages.count == 1)
+        let echo = context.appendedPublicMessages[0].message
+        #expect(context.appendedPublicMessages[0].conversationID == .geohash("u4pruydq"))
         #expect(echo.sender == "me#2222")
         #expect(context.recordedActivityKeys == ["geo:u4pruydq"])
         #expect(context.sentGeohashContexts.count == 1)
@@ -215,7 +212,7 @@ struct ChatOutgoingCoordinatorContextTests {
         coordinator.sendMessage("doomed")
         await drainMainActorTasks()
         #expect(context.systemMessages.count == 1)
-        #expect(context.appendedTimelineMessages.count == 1)
+        #expect(context.appendedPublicMessages.count == 1)
         #expect(context.sentGeohashContexts.count == 1)
     }
 }

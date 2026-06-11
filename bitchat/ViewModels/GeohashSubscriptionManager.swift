@@ -27,8 +27,9 @@ protocol GeohashSubscriptionContext: AnyObject {
 
     // MARK: Public timeline & pipeline
     var messages: [BitchatMessage] { get }
-    func resetPublicMessagePipeline()
-    func updatePublicMessagePipelineChannel(_ channel: ChannelID)
+    /// Commits any batched-but-unflushed public messages to the store so a
+    /// channel switch never strands them in the pipeline buffer.
+    func flushPublicMessagePipeline()
     func refreshVisibleMessages(from channel: ChannelID?)
     func addPublicSystemMessage(_ content: String)
     func drainPendingGeohashSystemMessages() -> [String]
@@ -64,16 +65,8 @@ extension ChatViewModel: GeohashSubscriptionContext {
     // `ChatViewModel`. The members below flatten nested service accesses into
     // intent-named calls.
 
-    func resetPublicMessagePipeline() {
-        publicMessagePipeline.reset()
-    }
-
-    func updatePublicMessagePipelineChannel(_ channel: ChannelID) {
-        publicMessagePipeline.updateActiveChannel(channel)
-    }
-
-    func drainPendingGeohashSystemMessages() -> [String] {
-        timelineStore.drainPendingGeohashSystemMessages()
+    func flushPublicMessagePipeline() {
+        publicMessagePipeline.flushIfNeeded()
     }
 
     func clearProcessedNostrEvents() {
@@ -178,9 +171,8 @@ final class GeohashSubscriptionManager {
     @MainActor
     func switchLocationChannel(to channel: ChannelID) {
         guard let context else { return }
-        context.resetPublicMessagePipeline()
+        context.flushPublicMessagePipeline()
         context.activeChannel = channel
-        context.updatePublicMessagePipelineChannel(channel)
 
         context.clearProcessedNostrEvents()
         switch channel {

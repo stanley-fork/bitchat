@@ -25,15 +25,13 @@ import BitFoundation
 /// `ChatPublicConversationCoordinator` is testable without a `ChatViewModel`.
 @MainActor
 private final class MockChatPublicConversationContext: ChatPublicConversationContext {
-    // Channel & visible timeline state
-    var messages: [BitchatMessage] = []
+    // Channel state
     var activeChannel: ChannelID = .mesh
     var currentGeohash: String?
     var nickname = "me"
     var myPeerID = PeerID(str: "0011223344556677")
     private(set) var isBatchingPublic = false
     private(set) var notifyUIChangedCount = 0
-    private(set) var trimMessagesCount = 0
 
     func setPublicBatching(_ isBatching: Bool) {
         isBatchingPublic = isBatching
@@ -43,101 +41,86 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
         notifyUIChangedCount += 1
     }
 
-    func trimMessagesIfNeeded() {
-        trimMessagesCount += 1
-    }
-
-    // Public timeline store
-    var meshTimeline: [BitchatMessage] = []
-    var geoTimelines: [String: [BitchatMessage]] = [:]
+    // Public conversation store (single-writer intents)
+    var conversations: [ConversationID: [BitchatMessage]] = [:]
     private(set) var queuedGeohashSystemMessages: [String] = []
 
-    func timelineMessages(for channel: ChannelID) -> [BitchatMessage] {
-        switch channel {
-        case .mesh: return meshTimeline
-        case .location(let channel): return geoTimelines[channel.geohash] ?? []
-        }
+    func publicMessages(in conversationID: ConversationID) -> [BitchatMessage] {
+        conversations[conversationID] ?? []
     }
 
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID) {
-        switch channel {
-        case .mesh: meshTimeline.append(message)
-        case .location(let channel): geoTimelines[channel.geohash, default: []].append(message)
-        }
-    }
-
-    func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool {
-        if geoTimelines[geohash]?.contains(where: { $0.id == message.id }) == true {
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool {
+        guard conversations[conversationID]?.contains(where: { $0.id == message.id }) != true else {
             return false
         }
-        geoTimelines[geohash, default: []].append(message)
+        conversations[conversationID, default: []].append(message)
         return true
     }
 
-    func removeTimelineMessage(withID id: String) -> BitchatMessage? {
-        if let index = meshTimeline.firstIndex(where: { $0.id == id }) {
-            return meshTimeline.remove(at: index)
-        }
-        for (geohash, timeline) in geoTimelines {
-            guard let index = timeline.firstIndex(where: { $0.id == id }) else { continue }
+    @discardableResult
+    func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool {
+        appendPublicMessage(message, to: .geohash(geohash.lowercased()))
+    }
+
+    func publicConversationContainsMessage(withID messageID: String, in conversationID: ConversationID) -> Bool {
+        conversations[conversationID]?.contains(where: { $0.id == messageID }) == true
+    }
+
+    @discardableResult
+    func removePublicMessage(withID messageID: String) -> BitchatMessage? {
+        for (conversationID, timeline) in conversations {
+            guard let index = timeline.firstIndex(where: { $0.id == messageID }) else { continue }
             var updated = timeline
             let removed = updated.remove(at: index)
-            geoTimelines[geohash] = updated
+            conversations[conversationID] = updated
             return removed
         }
         return nil
     }
 
-    func removeGeohashTimelineMessages(in geohash: String, where predicate: (BitchatMessage) -> Bool) {
-        geoTimelines[geohash]?.removeAll(where: predicate)
+    func removePublicMessages(fromGeohash geohash: String, where predicate: (BitchatMessage) -> Bool) {
+        conversations[.geohash(geohash.lowercased())]?.removeAll(where: predicate)
     }
 
-    func clearTimeline(for channel: ChannelID) {
-        switch channel {
-        case .mesh: meshTimeline.removeAll()
-        case .location(let channel): geoTimelines[channel.geohash] = []
-        }
-    }
+    private(set) var clearedConversations: [ConversationID] = []
 
-    func timelineGeohashKeys() -> [String] {
-        Array(geoTimelines.keys)
+    func clearPublicConversation(_ conversationID: ConversationID) {
+        clearedConversations.append(conversationID)
+        conversations[conversationID] = []
     }
 
     func queueGeohashSystemMessage(_ content: String) {
         queuedGeohashSystemMessages.append(content)
     }
 
-    // Conversation stores
-    private(set) var conversationActiveChannels: [ChannelID] = []
-    private(set) var replacedChannelMessages: [(channel: ChannelID, messageIDs: [String])] = []
-    private(set) var replacedConversationMessages: [(conversation: ConversationID, messageIDs: [String])] = []
-    private(set) var privateStoreSyncCount = 0
-    private(set) var selectionStoreSyncCount = 0
-
-    func setConversationActiveChannel(_ channel: ChannelID) {
-        conversationActiveChannels.append(channel)
-    }
-
-    func replaceConversationMessages(_ messages: [BitchatMessage], for channelID: ChannelID) {
-        replacedChannelMessages.append((channelID, messages.map(\.id)))
-    }
-
-    func replaceConversationMessages(_ messages: [BitchatMessage], for conversationID: ConversationID) {
-        replacedConversationMessages.append((conversationID, messages.map(\.id)))
-    }
-
-    func synchronizePrivateConversationStore() {
-        privateStoreSyncCount += 1
-    }
-
-    func synchronizeConversationSelectionStore() {
-        selectionStoreSyncCount += 1
-    }
-
     // Private chats
     var privateChats: [PeerID: [BitchatMessage]] = [:]
     var unreadPrivateMessages: Set<PeerID> = []
+    private(set) var removedPrivateChats: [PeerID] = []
     private(set) var cleanedUpFileMessageIDs: [String] = []
+
+    func removePrivateChat(_ peerID: PeerID) {
+        removedPrivateChats.append(peerID)
+        privateChats.removeValue(forKey: peerID)
+        unreadPrivateMessages.remove(peerID)
+    }
+
+    @discardableResult
+    func removePrivateMessage(withID messageID: String) -> BitchatMessage? {
+        var removed: BitchatMessage?
+        for (peerID, chat) in privateChats {
+            guard let message = chat.first(where: { $0.id == messageID }) else { continue }
+            removed = removed ?? message
+            let remaining = chat.filter { $0.id != messageID }
+            if remaining.isEmpty {
+                privateChats.removeValue(forKey: peerID)
+            } else {
+                privateChats[peerID] = remaining
+            }
+        }
+        return removed
+    }
 
     func cleanupLocalFile(forMessage message: BitchatMessage) {
         cleanedUpFileMessageIDs.append(message.id)
@@ -204,7 +187,8 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
     var blockedMessageIDs: Set<String> = []
     var rateLimitAllowed = true
     private(set) var rateLimitChecks: [(senderKey: String, contentKey: String)] = []
-    private(set) var enqueuedMessageIDs: [String] = []
+    private(set) var enqueuedMessages: [(messageID: String, conversationID: ConversationID)] = []
+    var enqueuedMessageIDs: [String] { enqueuedMessages.map(\.messageID) }
     var stablePeerIDs: [PeerID: PeerID] = [:]
 
     func processActionMessage(_ message: BitchatMessage) -> BitchatMessage {
@@ -220,8 +204,8 @@ private final class MockChatPublicConversationContext: ChatPublicConversationCon
         return rateLimitAllowed
     }
 
-    func enqueuePublicMessage(_ message: BitchatMessage) {
-        enqueuedMessageIDs.append(message.id)
+    func enqueuePublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) {
+        enqueuedMessages.append((message.id, conversationID))
     }
 
     func cachedStablePeerID(for shortPeerID: PeerID) -> PeerID? {
@@ -291,24 +275,24 @@ private func makePublicMessage(
 struct ChatPublicConversationCoordinatorContextTests {
 
     @Test @MainActor
-    func handlePublicMessage_meshMessage_appendsSyncsStoreAndEnqueues() async {
+    func handlePublicMessage_meshMessage_enqueuesForBatchedStoreCommit() async {
         let context = MockChatPublicConversationContext()
         let coordinator = ChatPublicConversationCoordinator(context: context)
         let message = makePublicMessage(id: "mesh-msg-1", content: "Hello Mesh")
 
         coordinator.handlePublicMessage(message)
 
-        #expect(context.meshTimeline.map(\.id) == ["mesh-msg-1"])
-        #expect(context.replacedChannelMessages.count == 1)
-        #expect(context.replacedChannelMessages.first?.channel == .mesh)
-        #expect(context.replacedChannelMessages.first?.messageIDs == ["mesh-msg-1"])
+        // Visible-channel arrival: buffered for the batched pipeline flush
+        // (which commits to the store), not appended directly.
         #expect(context.rateLimitChecks.count == 1)
         #expect(context.rateLimitChecks.first?.senderKey == "mesh:aabbccddeeff0011")
         #expect(context.rateLimitChecks.first?.contentKey == "hello mesh")
-        #expect(context.enqueuedMessageIDs == ["mesh-msg-1"])
+        #expect(context.enqueuedMessages.map(\.messageID) == ["mesh-msg-1"])
+        #expect(context.enqueuedMessages.first?.conversationID == .mesh)
+        #expect(context.publicMessages(in: .mesh).isEmpty)
 
-        // Already visible in the timeline: stored again, but not re-enqueued.
-        context.messages = [message]
+        // Already committed to the store: not re-enqueued.
+        context.appendPublicMessage(message, to: .mesh)
         coordinator.handlePublicMessage(message)
         #expect(context.enqueuedMessageIDs == ["mesh-msg-1"])
     }
@@ -322,14 +306,14 @@ struct ChatPublicConversationCoordinatorContextTests {
         context.blockedMessageIDs = ["blocked-msg"]
         coordinator.handlePublicMessage(makePublicMessage(id: "blocked-msg"))
         #expect(context.rateLimitChecks.isEmpty)
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.publicMessages(in: .mesh).isEmpty)
         #expect(context.enqueuedMessageIDs.isEmpty)
 
         // Rate limited: consulted, then dropped before storage.
         context.rateLimitAllowed = false
         coordinator.handlePublicMessage(makePublicMessage(id: "limited-msg"))
         #expect(context.rateLimitChecks.count == 1)
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.publicMessages(in: .mesh).isEmpty)
         #expect(context.enqueuedMessageIDs.isEmpty)
     }
 
@@ -346,16 +330,15 @@ struct ChatPublicConversationCoordinatorContextTests {
             senderPeerID: PeerID(nostr: senderHex)
         )
 
-        // On mesh channel: stored in the geohash timeline but not enqueued.
+        // On mesh channel: a background-channel arrival lands in the geohash
+        // conversation immediately, with no pipeline batching.
         context.activeChannel = .mesh
         coordinator.handlePublicMessage(geoMessage)
-        #expect(context.geoTimelines[geohash]?.map(\.id) == ["geo-msg-1"])
-        #expect(context.replacedConversationMessages.count == 1)
-        #expect(context.replacedConversationMessages.first?.conversation == .geohash(geohash))
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.publicMessages(in: .geohash(geohash)).map(\.id) == ["geo-msg-1"])
+        #expect(context.publicMessages(in: .mesh).isEmpty)
         #expect(context.enqueuedMessageIDs.isEmpty)
 
-        // On the matching location channel: enqueued for display.
+        // On the matching location channel: enqueued for the batched flush.
         context.activeChannel = .location(GeohashChannel(level: .city, geohash: geohash))
         let second = makePublicMessage(
             id: "geo-msg-2",
@@ -363,7 +346,8 @@ struct ChatPublicConversationCoordinatorContextTests {
             senderPeerID: PeerID(nostr: senderHex)
         )
         coordinator.handlePublicMessage(second)
-        #expect(context.enqueuedMessageIDs == ["geo-msg-2"])
+        #expect(context.enqueuedMessages.map(\.messageID) == ["geo-msg-2"])
+        #expect(context.enqueuedMessages.first?.conversationID == .geohash(geohash))
     }
 
     @Test @MainActor
@@ -378,8 +362,7 @@ struct ChatPublicConversationCoordinatorContextTests {
 
         context.currentGeohash = geohash
         context.activeChannel = .location(GeohashChannel(level: .city, geohash: geohash))
-        context.geoTimelines[geohash] = [geoMessage]
-        context.messages = [geoMessage]
+        context.conversations[.geohash(geohash)] = [geoMessage]
         context.nostrKeyMapping = [senderPeerID: hex, convKey: hex]
         context.privateChats[convKey] = [geoMessage]
         context.unreadPrivateMessages = [convKey]
@@ -388,13 +371,14 @@ struct ChatPublicConversationCoordinatorContextTests {
 
         #expect(context.blockedNostrPubkeys.contains(hex))
         #expect(context.removedGeoParticipants == [hex])
-        #expect(context.geoTimelines[geohash]?.isEmpty == true)
         #expect(context.privateChats[convKey] == nil)
         #expect(context.unreadPrivateMessages.isEmpty)
         #expect(context.nostrKeyMapping.isEmpty)
-        // The blocked user's visible message is gone; a system notice was added.
-        #expect(!context.messages.contains(where: { $0.id == "geo-bad-1" }))
-        #expect(context.messages.last?.sender == "system")
+        // The blocked user's message is purged from the geohash conversation
+        // (the visible timeline is the same conversation now); a system
+        // notice was appended to the active conversation.
+        #expect(!context.publicMessages(in: .geohash(geohash)).contains(where: { $0.id == "geo-bad-1" }))
+        #expect(context.publicMessages(in: .geohash(geohash)).last?.sender == "system")
 
         coordinator.unblockGeohashUser(pubkeyHexLowercased: hex, displayName: "rude#abcd")
         #expect(!context.blockedNostrPubkeys.contains(hex))
@@ -406,36 +390,27 @@ struct ChatPublicConversationCoordinatorContextTests {
         let coordinator = ChatPublicConversationCoordinator(context: context)
         let peerID = PeerID(str: "0102030405060708")
         let message = makePublicMessage(id: "doomed-msg")
-        context.messages = [message]
-        context.meshTimeline = [message]
+        context.conversations[.mesh] = [message]
         context.privateChats[peerID] = [message]
 
         coordinator.removeMessage(withID: "doomed-msg", cleanupFile: true)
 
-        #expect(context.messages.isEmpty)
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.publicMessages(in: .mesh).isEmpty)
         #expect(context.privateChats[peerID] == nil)
         #expect(context.cleanedUpFileMessageIDs == ["doomed-msg"])
         #expect(context.notifyUIChangedCount == 1)
-        // Timeline removal triggers a full conversation-store resync.
-        #expect(context.replacedChannelMessages.contains(where: { $0.channel == .mesh && $0.messageIDs.isEmpty }))
     }
 
     @Test @MainActor
-    func addPublicSystemMessage_appendsRefreshesAndRecordsContentKey() async {
+    func addPublicSystemMessage_appendsToActiveConversationAndRecordsContentKey() async {
         let context = MockChatPublicConversationContext()
         let coordinator = ChatPublicConversationCoordinator(context: context)
 
         coordinator.addPublicSystemMessage("Tor Ready")
 
-        #expect(context.meshTimeline.count == 1)
-        #expect(context.meshTimeline.first?.sender == "system")
-        // refreshVisibleMessages mirrors the timeline into the visible list.
-        #expect(context.messages.map(\.id) == context.meshTimeline.map(\.id))
+        #expect(context.publicMessages(in: .mesh).count == 1)
+        #expect(context.publicMessages(in: .mesh).first?.sender == "system")
         #expect(context.recordedContentKeys.map(\.key) == ["tor ready"])
-        #expect(context.trimMessagesCount == 1)
-        #expect(context.notifyUIChangedCount == 1)
-        #expect(context.conversationActiveChannels == [.mesh])
 
         // On mesh, geohash-only system messages are queued for the next geo visit.
         coordinator.addGeohashOnlySystemMessage("geo notice")
@@ -459,21 +434,19 @@ struct ChatPublicConversationCoordinatorContextTests {
         let coordinator = ChatPublicConversationCoordinator(context: context)
         let pipeline = PublicMessagePipeline()
         let message = makePublicMessage(id: "pipeline-msg")
-        context.messages = [message]
         context.contentTimestamps["key-1"] = Date(timeIntervalSince1970: 42)
 
-        #expect(coordinator.pipelineCurrentMessages(pipeline).map(\.id) == ["pipeline-msg"])
         #expect(coordinator.pipeline(pipeline, normalizeContent: "HeLLo") == "hello")
         #expect(coordinator.pipeline(pipeline, contentTimestampForKey: "key-1") == Date(timeIntervalSince1970: 42))
 
-        coordinator.pipeline(pipeline, setMessages: [])
-        #expect(context.messages.isEmpty)
+        // Commit lands in the store via the append intent; a duplicate ID
+        // reports `false` (the store's dedup contract).
+        #expect(coordinator.pipeline(pipeline, commit: message, to: .mesh))
+        #expect(context.publicMessages(in: .mesh).map(\.id) == ["pipeline-msg"])
+        #expect(!coordinator.pipeline(pipeline, commit: message, to: .mesh))
 
         coordinator.pipeline(pipeline, recordContentKey: "key-2", timestamp: Date(timeIntervalSince1970: 7))
         #expect(context.recordedContentKeys.map(\.key) == ["key-2"])
-
-        coordinator.pipelineTrimMessages(pipeline)
-        #expect(context.trimMessagesCount == 1)
 
         coordinator.pipelinePrewarmMessage(pipeline, message: message)
         #expect(context.prewarmedMessageIDs == ["pipeline-msg"])

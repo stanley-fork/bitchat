@@ -194,26 +194,18 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("gcs.buildAndDecode", samples: samples, operations: repsPerPass, unit: "filters")
     }
 
-    // MARK: - 4a. Delivery location index (incremental path)
+    // MARK: - 4a. Delivery status updates through the coordinator (store path)
 
-    /// `ChatDeliveryCoordinator.updateMessageDeliveryStatus` against a warm
-    /// location index: 2000 public + 50x40 private messages, 500 status
-    /// updates per pass. Statuses alternate sent <-> delivered so every call
-    /// performs a real update (never the skip path).
+    /// `ChatDeliveryCoordinator.updateMessageDeliveryStatus` over the
+    /// `ConversationStore`'s message-ID → conversation map: 2000 public
+    /// (split mesh + geohash to stay under the per-conversation cap) + 50x40
+    /// private messages, 500 status updates per pass. Statuses alternate
+    /// sent <-> delivered so every call performs a real update (never the
+    /// skip path).
     func testDeliveryStatusIncrementalUpdates() {
         let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 50, messagesPerPeer: 40)
         let coordinator = ChatDeliveryCoordinator(context: context)
-        // Warm the index so the measure block exercises the incremental path.
-        XCTAssertTrue(coordinator.updateMessageDeliveryStatus(context.messages[0].id, status: .sent))
-
-        // 250 public + 250 private IDs spread across the corpus.
-        var targetIDs: [String] = []
-        for i in stride(from: 0, to: 2000, by: 8) { targetIDs.append(context.messages[i].id) }
-        let peerIDs = context.privateChats.keys.sorted { $0.id < $1.id }
-        for (offset, peer) in peerIDs.enumerated() where offset < 25 {
-            guard let chat = context.privateChats[peer] else { continue }
-            for i in stride(from: 0, to: chat.count, by: 4) { targetIDs.append(chat[i].id) }
-        }
+        let targetIDs = context.makeTargetIDs(publicTargets: 250, privateTargets: 250)
         XCTAssertEqual(targetIDs.count, 500)
 
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
@@ -235,46 +227,38 @@ final class PerformanceBaselineTests: XCTestCase {
         reportThroughput("delivery.incrementalUpdate", samples: samples, operations: targetIDs.count, unit: "updates")
     }
 
-    // MARK: - 4b. Delivery location index (rebuild path)
+    // MARK: - 4b. Delivery status updates against the store directly
 
-    /// The expensive path: a non-append insertion (out-of-order arrival at
-    /// the head of the timeline) invalidates the index, so the next status
-    /// update triggers a full rebuild over ~4000 message locations.
-    func testDeliveryStatusIndexRebuild() {
+    /// `ConversationStore.setDeliveryStatus(_:forMessageID:)` at the same
+    /// scale as 4a, without the coordinator/context wrapping — the store-side
+    /// cost of an ID-only delivery update (map lookup + per-conversation
+    /// ID-index apply + change emission). Replaces the deleted
+    /// `delivery.indexRebuild` benchmark: the positional location index and
+    /// its rebuild path no longer exist; the store's ID indexes are
+    /// maintained inside each mutation, so there is no rebuild to measure.
+    func testDeliveryStatusStoreUpdates() {
         let context = PerfDeliveryContext.makeCorpus(publicCount: 2000, peerCount: 50, messagesPerPeer: 40)
-        let coordinator = ChatDeliveryCoordinator(context: context)
-        // Warm the index before the first insertion invalidates it.
-        XCTAssertTrue(coordinator.updateMessageDeliveryStatus(context.messages[0].id, status: .sent))
+        let store = context.store
+        let targetIDs = context.makeTargetIDs(publicTargets: 250, privateTargets: 250)
+        XCTAssertEqual(targetIDs.count, 500)
 
-        // Pre-built head insertions, one consumed per measure pass.
-        let insertions: [BitchatMessage] = (0..<32).map { i in
-            BitchatMessage(
-                id: "insert-\(i)",
-                sender: "alice",
-                content: "out-of-order arrival \(i)",
-                timestamp: Date(timeIntervalSince1970: 1_690_000_000),
-                isRelay: false
-            )
-        }
-        let probeID = context.messages[1000].id
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
-        var pass = 0
         var toggle = false
         var samples: [TimeInterval] = []
 
         measure {
-            precondition(pass < insertions.count, "add more pre-built insertions")
-            context.messages.insert(insertions[pass], at: 0)
-            pass += 1
             toggle.toggle()
             let status: DeliveryStatus = toggle ? .delivered(to: "peer", at: fixedDate) : .sent
             let start = Date()
-            let updated = coordinator.updateMessageDeliveryStatus(probeID, status: status)
+            var updated = 0
+            for id in targetIDs where store.setDeliveryStatus(status, forMessageID: id) {
+                updated += 1
+            }
             samples.append(Date().timeIntervalSince(start))
-            XCTAssertTrue(updated)
+            XCTAssertEqual(updated, targetIDs.count)
         }
 
-        reportThroughput("delivery.indexRebuild", samples: samples, operations: 1, unit: "rebuilds")
+        reportThroughput("delivery.storeUpdate", samples: samples, operations: targetIDs.count, unit: "updates")
     }
 
     // MARK: - 5. Message formatting
@@ -326,6 +310,176 @@ final class PerformanceBaselineTests: XCTestCase {
         }
 
         reportThroughput("formatting.formatMessage", samples: samples, operations: batchSize, unit: "messages")
+    }
+
+    // MARK: - 6a. End-to-end private ingest pipeline (current architecture)
+
+    /// Baseline for the full private-message ingest cycle through a real
+    /// `ChatViewModel`: `handlePrivateMessage` → `ConversationStore.append`
+    /// intent (ordered insert + ID-index dedup) → per-conversation publish +
+    /// `changes` emission → `PrivateInboxModel` (direct store reads).
+    /// Measures wall time from first ingest until the store AND the feature
+    /// model both reflect every message. The peer is not mesh-active and no
+    /// chat is selected, so notification/read-receipt side paths stay cold
+    /// (notifications are no-ops under test anyway).
+    func testPipelinePrivateIngest() {
+        let messageCount = 200
+        // 64-hex (stable Noise key) peer ID: skips the short-ID consolidation
+        // and ephemeral-mirror paths so every pass does identical work.
+        let peerID = PeerID(str: String(repeating: "ab", count: 32))
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let messages: [BitchatMessage] = (0..<messageCount).map { i in
+            BitchatMessage(
+                id: "perf-dm-\(i)",
+                sender: "perfsender",
+                content: "private pipeline message \(i)",
+                timestamp: base.addingTimeInterval(Double(i)),
+                isRelay: false,
+                isPrivate: true,
+                recipientNickname: "me",
+                senderPeerID: peerID
+            )
+        }
+        // Fresh fixture per pass so dedup scans and store syncs start from the
+        // same empty state every iteration. Kept alive so weakly captured
+        // coordinator Task hops stay valid.
+        var keepAlive: [PerfPipelineFixture] = []
+        var samples: [TimeInterval] = []
+
+        measure {
+            let fixture = PerfPipelineFixture()
+            keepAlive.append(fixture)
+            let start = Date()
+            for message in messages {
+                fixture.viewModel.handlePrivateMessage(message)
+            }
+            // Reads are synchronous against the single-writer store; the
+            // spin covers any coordinator main-actor hops.
+            let consistent = spinMainRunLoop(timeout: 10) {
+                fixture.conversations.conversationsByID[.directPeer(peerID)]?.messages.count == messageCount
+                    && fixture.privateInbox.messages(for: peerID).count == messageCount
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertTrue(consistent, "ConversationStore/PrivateInboxModel never converged")
+            XCTAssertEqual(fixture.viewModel.privateChats[peerID]?.count, messageCount)
+        }
+
+        reportThroughput("pipeline.privateIngest", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    // MARK: - 6b. End-to-end public ingest pipeline (current architecture)
+
+    /// Baseline for the full public-message ingest cycle through a real
+    /// `ChatViewModel`: `didReceivePublicMessage` (transport delegate entry,
+    /// main-actor Task hop per message) → `handlePublicMessage` (rate limit,
+    /// pipeline enqueue) → `PublicMessagePipeline` timer-batched flush into
+    /// the `ConversationStore` (derived `ChatViewModel.messages` view;
+    /// `PublicChatModel` observes the active `Conversation` directly).
+    /// Measures until `messages` and the feature model reflect every message,
+    /// so the pipeline's flush latency is part of the cycle. Senders are
+    /// spread 4-per-peer to stay under the 5-token sender rate bucket.
+    func testPipelinePublicIngest() {
+        let messageCount = 200
+        let senderCount = 50
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        struct InboundPublic {
+            let peerID: PeerID
+            let nickname: String
+            let content: String
+            let timestamp: Date
+            let messageID: String
+        }
+        let items: [InboundPublic] = (0..<messageCount).map { i in
+            let sender = i % senderCount
+            return InboundPublic(
+                peerID: PeerID(str: String(format: "%016x", 0xC0DE_0000 + sender)),
+                nickname: "perfpeer\(sender)",
+                content: "public pipeline message \(i) from sender \(sender)",
+                timestamp: base.addingTimeInterval(Double(i)),
+                messageID: "perf-pub-\(i)"
+            )
+        }
+        let expectedIDs = Set(items.map(\.messageID))
+        var keepAlive: [PerfPipelineFixture] = []
+        var samples: [TimeInterval] = []
+
+        measure {
+            let fixture = PerfPipelineFixture()
+            keepAlive.append(fixture)
+            let start = Date()
+            for item in items {
+                fixture.viewModel.didReceivePublicMessage(
+                    from: item.peerID,
+                    nickname: item.nickname,
+                    content: item.content,
+                    timestamp: item.timestamp,
+                    messageID: item.messageID
+                )
+            }
+            // Drain the per-message main-actor hops and whichever surfacing
+            // path wins (the pipeline's batched timer flush or the startup
+            // channel apply's `refreshVisibleMessages`); `PublicChatModel`
+            // reads the same conversation synchronously.
+            let consistent = spinMainRunLoop(timeout: 10) {
+                fixture.viewModel.messages.count >= messageCount
+                    && fixture.publicChat.messages.count >= messageCount
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertTrue(consistent, "messages/PublicChatModel never converged")
+            let ingested = fixture.viewModel.messages.filter { expectedIDs.contains($0.id) }
+            XCTAssertEqual(ingested.count, messageCount)
+        }
+
+        reportThroughput("pipeline.publicIngest", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    // MARK: - 7. ConversationStore append (to-be architecture)
+
+    /// Core op of the new single-source-of-truth `ConversationStore`
+    /// (docs/CONVERSATION-STORE-DESIGN.md): 1000 appends into one
+    /// conversation, every 10th arriving out of order so the binary-search
+    /// insert path (plus suffix reindex) is part of the measured work.
+    /// Includes per-message ID-index dedup and the per-conversation
+    /// `@Published` array write.
+    func testConversationStoreAppend() {
+        let messageCount = 1000
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let messages: [BitchatMessage] = (0..<messageCount).map { i in
+            // Every 10th message is "late": its timestamp predates already
+            // appended messages, forcing the ordered-insert slow path.
+            let offset = (i % 10 == 9) ? Double(i) - 5.5 : Double(i)
+            return BitchatMessage(
+                id: "perf-store-\(i)",
+                sender: "perfsender",
+                content: "store append message \(i)",
+                timestamp: base.addingTimeInterval(offset),
+                isRelay: false
+            )
+        }
+        var samples: [TimeInterval] = []
+
+        measure {
+            let store = ConversationStore()
+            let start = Date()
+            for message in messages {
+                store.append(message, to: .mesh)
+            }
+            samples.append(Date().timeIntervalSince(start))
+            XCTAssertEqual(store.conversation(for: .mesh).messages.count, messageCount)
+        }
+
+        reportThroughput("store.append", samples: samples, operations: messageCount, unit: "messages")
+    }
+
+    /// Spins the main run loop in small slices (draining main-queue tasks and
+    /// timers) until `condition` holds or `timeout` elapses.
+    private func spinMainRunLoop(timeout: TimeInterval, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+        return true
     }
 
     // MARK: - Fixtures
@@ -396,13 +550,11 @@ private final class PerfNostrContext: ChatNostrContext {
     }
 
     var messages: [BitchatMessage] = []
-    func resetPublicMessagePipeline() {}
-    func updatePublicMessagePipelineChannel(_ channel: ChannelID) {}
+    func flushPublicMessagePipeline() {}
     func refreshVisibleMessages(from channel: ChannelID?) {}
     func addPublicSystemMessage(_ content: String) {}
     func drainPendingGeohashSystemMessages() -> [String] { [] }
     func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool { true }
-    func synchronizePublicConversationStore(forGeohash geohash: String) {}
 
     private(set) var handledPublicMessageCount = 0
     func handlePublicMessage(_ message: BitchatMessage) { handledPublicMessageCount += 1 }
@@ -469,14 +621,32 @@ private final class PerfNostrContext: ChatNostrContext {
 
 // MARK: - Mock ChatDeliveryContext
 
+/// Minimal `ChatDeliveryContext` over a real `ConversationStore` (the
+/// coordinator is a thin mapper onto store intents, so the measured cost is
+/// the store's ID-map delivery path).
 @MainActor
 private final class PerfDeliveryContext: ChatDeliveryContext {
-    var messages: [BitchatMessage] = []
-    var privateChats: [PeerID: [BitchatMessage]] = [:]
+    let store = ConversationStore()
     var sentReadReceipts: Set<String> = []
     var isStartupPhase: Bool { false }
+    private var publicIDs: [String] = []
+    private var privateIDsByPeer: [(peerID: PeerID, messageIDs: [String])] = []
+
     func notifyUIChanged() {}
     func markMessageDelivered(_ messageID: String) {}
+
+    @discardableResult
+    func setDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
+        store.setDeliveryStatus(status, forMessageID: messageID)
+    }
+
+    func deliveryStatus(forMessageID messageID: String) -> DeliveryStatus? {
+        store.deliveryStatus(forMessageID: messageID)
+    }
+
+    func privateMessageIDs() -> Set<String> {
+        store.directMessageIDs()
+    }
 
     func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int {
         let oldCount = sentReadReceipts.count
@@ -484,24 +654,30 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
         return oldCount - sentReadReceipts.count
     }
 
-    /// 2000 public + `peerCount` x `messagesPerPeer` private messages with
-    /// deterministic IDs and timestamps.
+    /// `publicCount` public messages (split evenly between mesh and one
+    /// geohash conversation so the corpus stays under the per-conversation
+    /// cap) + `peerCount` x `messagesPerPeer` private messages, seeded into
+    /// the store with deterministic IDs and timestamps.
     static func makeCorpus(publicCount: Int, peerCount: Int, messagesPerPeer: Int) -> PerfDeliveryContext {
         let context = PerfDeliveryContext()
         let base = Date(timeIntervalSince1970: 1_700_000_000)
-        context.messages = (0..<publicCount).map { i in
-            BitchatMessage(
+        let geohashID = ConversationID.geohash("u4pruyd")
+        for i in 0..<publicCount {
+            let message = BitchatMessage(
                 id: "pub-\(i)",
                 sender: "peer\(i % 20)",
                 content: "public message number \(i)",
                 timestamp: base.addingTimeInterval(Double(i)),
                 isRelay: false
             )
+            context.store.append(message, to: i % 2 == 0 ? .mesh : geohashID)
+            context.publicIDs.append(message.id)
         }
         for p in 0..<peerCount {
             let peerID = PeerID(str: String(format: "%016x", 0xA000_0000 + p))
-            context.privateChats[peerID] = (0..<messagesPerPeer).map { i in
-                BitchatMessage(
+            var messageIDs: [String] = []
+            for i in 0..<messagesPerPeer {
+                let message = BitchatMessage(
                     id: "dm-\(p)-\(i)",
                     sender: "peer\(p)",
                     content: "private message \(i) for peer \(p)",
@@ -511,9 +687,67 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
                     recipientNickname: "me",
                     senderPeerID: peerID
                 )
+                context.store.append(message, to: .directPeer(peerID))
+                messageIDs.append(message.id)
             }
+            context.privateIDsByPeer.append((peerID, messageIDs))
         }
         return context
+    }
+
+    /// Deterministic update targets spread across the corpus: `publicTargets`
+    /// public IDs plus `privateTargets` private IDs.
+    func makeTargetIDs(publicTargets: Int, privateTargets: Int) -> [String] {
+        var targetIDs: [String] = []
+        let publicStride = max(1, publicIDs.count / publicTargets)
+        for i in stride(from: 0, to: publicIDs.count, by: publicStride) where targetIDs.count < publicTargets {
+            targetIDs.append(publicIDs[i])
+        }
+        var privateCount = 0
+        outer: for (_, messageIDs) in privateIDsByPeer {
+            for i in stride(from: 0, to: messageIDs.count, by: 4) {
+                guard privateCount < privateTargets else { break outer }
+                targetIDs.append(messageIDs[i])
+                privateCount += 1
+            }
+        }
+        return targetIDs
+    }
+}
+
+// MARK: - End-to-end pipeline fixture
+
+/// A real `ChatViewModel` over `MockTransport` plus the AppRuntime-style
+/// feature models (`PrivateInboxModel` / `PublicChatModel`) bound to the same
+/// single-writer `ConversationStore`, so end-to-end ingest benchmarks cover
+/// the full ingest-to-feature-model chain. Mirrors the construction used by
+/// `ChatViewModelExtensionsTests`.
+@MainActor
+private final class PerfPipelineFixture {
+    let viewModel: ChatViewModel
+    let transport: MockTransport
+    let conversations: ConversationStore
+    let privateInbox: PrivateInboxModel
+    let publicChat: PublicChatModel
+
+    init() {
+        let keychain = MockKeychain()
+        let idBridge = NostrIdentityBridge(keychain: MockKeychainHelper())
+        let identityManager = MockIdentityManager(keychain)
+        let transport = MockTransport()
+        let conversations = ConversationStore()
+
+        self.transport = transport
+        self.conversations = conversations
+        self.viewModel = ChatViewModel(
+            keychain: keychain,
+            idBridge: idBridge,
+            identityManager: identityManager,
+            transport: transport,
+            conversations: conversations
+        )
+        self.privateInbox = PrivateInboxModel(conversations: conversations)
+        self.publicChat = PublicChatModel(conversations: conversations)
     }
 }
 

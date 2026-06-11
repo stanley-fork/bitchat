@@ -42,22 +42,26 @@ private final class MockChatMediaTransferContext: ChatMediaTransferContext {
 
     // Message state
     var privateChats: [PeerID: [BitchatMessage]] = [:]
-    var meshTimeline: [BitchatMessage] = []
-    private(set) var refreshedChannels: [ChannelID?] = []
-    private(set) var trimCount = 0
+
+    @discardableResult
+    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool {
+        var chat = privateChats[peerID] ?? []
+        guard !chat.contains(where: { $0.id == message.id }) else { return false }
+        chat.append(message)
+        privateChats[peerID] = chat
+        return true
+    }
+
+    private(set) var appendedPublicMessages: [(message: BitchatMessage, conversationID: ConversationID)] = []
     private(set) var removedMessages: [(messageID: String, cleanupFile: Bool)] = []
     private(set) var systemMessages: [String] = []
     private(set) var notifyUIChangedCount = 0
 
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID) {
-        meshTimeline.append(message)
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool {
+        appendedPublicMessages.append((message, conversationID))
+        return true
     }
-
-    func refreshVisibleMessages(from channel: ChannelID?) {
-        refreshedChannels.append(channel)
-    }
-
-    func trimMessagesIfNeeded() { trimCount += 1 }
 
     func removeMessage(withID messageID: String, cleanupFile: Bool) {
         removedMessages.append((messageID, cleanupFile))
@@ -119,22 +123,21 @@ struct ChatMediaTransferCoordinatorContextTests {
         #expect(message.senderPeerID == context.myPeerID)
         #expect(message.deliveryStatus == .sending)
         #expect(context.recordedContentKeys == ["[voice] note.m4a"])
-        #expect(context.trimCount == 1)
         #expect(context.notifyUIChangedCount == 1)
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.appendedPublicMessages.isEmpty)
     }
 
     @Test @MainActor
-    func enqueueMediaMessage_publicAppendsToTimelineAndRefreshes() async {
+    func enqueueMediaMessage_publicAppendsToActiveConversation() async {
         let context = MockChatMediaTransferContext()
         let coordinator = ChatMediaTransferCoordinator(context: context)
 
         let message = coordinator.enqueueMediaMessage(content: "[image] pic.jpg", targetPeer: nil)
 
-        #expect(context.meshTimeline.map(\.id) == [message.id])
+        #expect(context.appendedPublicMessages.map(\.message.id) == [message.id])
+        #expect(context.appendedPublicMessages.first?.conversationID == .mesh)
         #expect(!message.isPrivate)
         #expect(message.sender == "me")
-        #expect(context.refreshedChannels.count == 1)
         #expect(context.privateChats.isEmpty)
         #expect(context.notifyUIChangedCount == 1)
     }
@@ -200,7 +203,7 @@ struct ChatMediaTransferCoordinatorContextTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
         #expect(context.systemMessages == ["Voice notes are only available in mesh chats."])
         #expect(context.privateChats.isEmpty)
-        #expect(context.meshTimeline.isEmpty)
+        #expect(context.appendedPublicMessages.isEmpty)
         #expect(coordinator.transferIdToMessageIDs.isEmpty)
     }
 }
