@@ -1195,6 +1195,98 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertTrue(reconnected)
     }
 
+    func test_pendingSubscriptions_perRelayCapEvictsOldestByInsertionOrder() async {
+        let relayURL = "wss://pending-cap.example"
+        // Tor stalled: nothing flushes, so every REQ stays pending.
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+        let cap = TransportConfig.nostrPendingSubscriptionsPerRelayCap
+
+        for i in 0..<(cap + 3) {
+            context.manager.subscribe(filter: makeFilter(), id: "cap-sub-\(i)", relayUrls: [relayURL], handler: { _ in })
+        }
+
+        XCTAssertEqual(context.manager.debugPendingSubscriptionCount(for: relayURL), cap)
+        let pendingIDs = context.manager.debugPendingSubscriptionIDs(for: relayURL)
+        // The three oldest entries were evicted; the newest survive.
+        for i in 0..<3 {
+            XCTAssertFalse(pendingIDs.contains("cap-sub-\(i)"), "expected cap-sub-\(i) to be evicted")
+        }
+        for i in 3..<(cap + 3) {
+            XCTAssertTrue(pendingIDs.contains("cap-sub-\(i)"), "expected cap-sub-\(i) to be retained")
+        }
+    }
+
+    func test_pendingSubscriptions_staleEntriesSweptOnConnectAttempt() async {
+        let relayURL = "wss://pending-sweep.example"
+        // Tor stalled: the REQ stays pending and no socket ever opens.
+        let context = makeContext(permission: .denied, userTorEnabled: true, torEnforced: true, torIsReady: false)
+
+        context.manager.subscribe(filter: makeFilter(), id: "stale-pending-sub", relayUrls: [relayURL], handler: { _ in })
+        XCTAssertEqual(context.manager.debugPendingSubscriptionCount(for: relayURL), 1)
+
+        // Just under the TTL the entry survives a connect attempt.
+        context.clock.now = context.clock.now.addingTimeInterval(TransportConfig.nostrPendingSubscriptionTTLSeconds - 1)
+        context.manager.ensureConnections(to: [relayURL])
+        XCTAssertEqual(context.manager.debugPendingSubscriptionCount(for: relayURL), 1)
+
+        // Past the TTL the next connect attempt sweeps it.
+        context.clock.now = context.clock.now.addingTimeInterval(2)
+        context.manager.ensureConnections(to: [relayURL])
+        XCTAssertEqual(context.manager.debugPendingSubscriptionCount(for: relayURL), 0)
+    }
+
+    func test_reconnectBackoff_appliesJitterWithinConfiguredBounds() async {
+        let relayURL = "wss://jitter-bounds.example"
+        // Pin the jitter source to the extremes and the midpoint of [0, 1).
+        let jitter = JitterSequence([0.0, 1.0.nextDown, 0.25])
+        let context = makeContext(permission: .denied, jitterUnit: { jitter.next() })
+        // Persistent ping failure: every connect attempt fails and schedules
+        // the next reconnect with an increasing attempt count.
+        context.sessionFactory.pingErrorByURL[relayURL] = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+
+        context.manager.ensureConnections(to: [relayURL])
+
+        var delays: [TimeInterval] = []
+        for attempt in 1...3 {
+            let scheduled = await waitUntil { context.scheduler.scheduled.count == 1 }
+            XCTAssertTrue(scheduled, "reconnect for attempt \(attempt) was not scheduled")
+            delays.append(context.scheduler.scheduled[0].delay)
+            context.scheduler.runNext()
+        }
+
+        // Bases: 1s, 2s, 4s. Jitter factors: 0.8, ~1.2, 0.9.
+        XCTAssertEqual(delays[0], 0.8 * TransportConfig.nostrRelayInitialBackoffSeconds, accuracy: 1e-9)
+        XCTAssertEqual(delays[1], 1.2 * TransportConfig.nostrRelayInitialBackoffSeconds * TransportConfig.nostrRelayBackoffMultiplier, accuracy: 1e-6)
+        XCTAssertEqual(delays[2], 0.9 * TransportConfig.nostrRelayInitialBackoffSeconds * pow(TransportConfig.nostrRelayBackoffMultiplier, 2), accuracy: 1e-9)
+    }
+
+    func test_reconnectBackoff_realRandomJitterStaysInBoundsAndVaries() async {
+        let relayURL = "wss://jitter-random.example"
+        let context = makeContext(permission: .denied, jitterUnit: { Double.random(in: 0..<1) })
+        context.sessionFactory.pingErrorByURL[relayURL] = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+
+        context.manager.ensureConnections(to: [relayURL])
+
+        var factors: [Double] = []
+        for attempt in 1...5 {
+            let scheduled = await waitUntil { context.scheduler.scheduled.count == 1 }
+            XCTAssertTrue(scheduled, "reconnect for attempt \(attempt) was not scheduled")
+            let base = min(
+                TransportConfig.nostrRelayInitialBackoffSeconds * pow(TransportConfig.nostrRelayBackoffMultiplier, Double(attempt - 1)),
+                TransportConfig.nostrRelayMaxBackoffSeconds
+            )
+            let factor = context.scheduler.scheduled[0].delay / base
+            XCTAssertGreaterThanOrEqual(factor, 1.0 - TransportConfig.nostrRelayBackoffJitterRatio)
+            XCTAssertLessThan(factor, 1.0 + TransportConfig.nostrRelayBackoffJitterRatio)
+            factors.append(factor)
+            context.scheduler.runNext()
+        }
+
+        // A real RNG must not produce a constant delay across attempts
+        // (5 identical uniform doubles is probability ~0).
+        XCTAssertGreaterThan(Set(factors).count, 1)
+    }
+
     private func makeContext(
         permission: LocationChannelManager.PermissionState,
         favorites: Set<Data> = [],
@@ -1202,7 +1294,8 @@ final class NostrRelayManagerTests: XCTestCase {
         userTorEnabled: Bool = false,
         torEnforced: Bool = false,
         torIsReady: Bool = true,
-        torIsForeground: Bool = true
+        torIsForeground: Bool = true,
+        jitterUnit: @escaping () -> Double = { 0.5 } // 0.5 -> jitter factor 1.0 (no jitter)
     ) -> RelayManagerTestContext {
         let permissionSubject = CurrentValueSubject<LocationChannelManager.PermissionState, Never>(permission)
         let favoritesSubject = CurrentValueSubject<Set<Data>, Never>(favorites)
@@ -1228,7 +1321,8 @@ final class NostrRelayManagerTests: XCTestCase {
                 scheduleAfter: { delay, action in
                     scheduler.schedule(delay: delay, action: action)
                 },
-                now: { clock.now }
+                now: { clock.now },
+                jitterUnit: jitterUnit
             )
         )
         return RelayManagerTestContext(
@@ -1302,6 +1396,20 @@ private final class MutableClock {
 
     init(now: Date) {
         self.now = now
+    }
+}
+
+/// Deterministic jitter source: returns the queued values in order, then a
+/// neutral 0.5 (jitter factor 1.0) once exhausted.
+private final class JitterSequence {
+    private var values: [Double]
+
+    init(_ values: [Double]) {
+        self.values = values
+    }
+
+    func next() -> Double {
+        values.isEmpty ? 0.5 : values.removeFirst()
     }
 }
 

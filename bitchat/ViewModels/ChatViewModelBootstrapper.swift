@@ -78,6 +78,23 @@ private extension ChatViewModelBootstrapper {
         viewModel.privateChatManager.messageRouter = viewModel.messageRouter
         viewModel.privateChatManager.unifiedPeerService = viewModel.unifiedPeerService
         viewModel.unifiedPeerService.messageRouter = viewModel.messageRouter
+        // Surface silent outbox drops (attempt cap, TTL expiry, overflow
+        // eviction) as a visible failure. The store's no-downgrade rule does
+        // not cover `.failed` over confirmed receipts, so guard here: a drop
+        // of an already-delivered/read message (e.g. a stale retained copy)
+        // must not downgrade its status.
+        viewModel.messageRouter.onMessageDropped = { [weak viewModel] messageID, _ in
+            guard let viewModel else { return }
+            switch viewModel.conversations.deliveryStatus(forMessageID: messageID) {
+            case .delivered, .read:
+                return
+            default:
+                viewModel.conversations.setDeliveryStatus(
+                    .failed(reason: "Not delivered"),
+                    forMessageID: messageID
+                )
+            }
+        }
         viewModel.commandProcessor.contextProvider = viewModel
         viewModel.commandProcessor.meshService = viewModel.meshService
         viewModel.participantTracker.configure(context: viewModel)

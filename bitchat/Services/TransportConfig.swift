@@ -148,11 +148,19 @@ enum TransportConfig {
     static let nostrRelayMaxBackoffSeconds: TimeInterval = 300.0
     static let nostrRelayBackoffMultiplier: Double = 2.0
     static let nostrRelayMaxReconnectAttempts: Int = 10
+    // Reconnect delays get ±20% random jitter so relays that dropped together
+    // (e.g. a network blip) don't thundering-herd the same reconnect instant.
+    static let nostrRelayBackoffJitterRatio: Double = 0.2
     static let nostrRelayDefaultFetchLimit: Int = 100
     // How many consecutive Tor-readiness waits (each bounded by TorManager's
     // bootstrap deadline) to attempt before unblocking pending EOSE callers.
     static let nostrTorReadyMaxWaitAttempts: Int = 3
     static let nostrPendingSendQueueCap: Int = 200
+    // Pending (not-yet-flushed) REQs are bounded per relay: oldest-by-insertion
+    // eviction at the cap, plus an age sweep on connect attempts. Durable
+    // subscription intent survives in subscriptionRequestState either way.
+    static let nostrPendingSubscriptionsPerRelayCap: Int = 64
+    static let nostrPendingSubscriptionTTLSeconds: TimeInterval = 600.0
     // Fallback deadline for treating a subscription's initial fetch as complete
     // when a relay never sends EOSE (generous to cover Tor circuit setup).
     static let nostrSubscriptionEOSEFallbackSeconds: TimeInterval = 10.0
