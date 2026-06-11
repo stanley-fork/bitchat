@@ -42,16 +42,13 @@ private final class MockChatNostrContext: ChatNostrContext {
 
     // Public timeline & pipeline
     var messages: [BitchatMessage] = []
-    private(set) var pipelineResetCount = 0
-    private(set) var pipelineChannelUpdates: [ChannelID] = []
+    private(set) var pipelineFlushCount = 0
     private(set) var refreshedChannels: [ChannelID?] = []
     private(set) var publicSystemMessages: [String] = []
     var pendingGeohashSystemMessages: [String] = []
     private(set) var appendedGeohashMessages: [(message: BitchatMessage, geohash: String)] = []
-    private(set) var synchronizedGeohashes: [String] = []
 
-    func resetPublicMessagePipeline() { pipelineResetCount += 1 }
-    func updatePublicMessagePipelineChannel(_ channel: ChannelID) { pipelineChannelUpdates.append(channel) }
+    func flushPublicMessagePipeline() { pipelineFlushCount += 1 }
     func refreshVisibleMessages(from channel: ChannelID?) { refreshedChannels.append(channel) }
     func addPublicSystemMessage(_ content: String) { publicSystemMessages.append(content) }
 
@@ -67,8 +64,6 @@ private final class MockChatNostrContext: ChatNostrContext {
         appendedGeohashMessages.append((message, geohash))
         return true
     }
-
-    func synchronizePublicConversationStore(forGeohash geohash: String) { synchronizedGeohashes.append(geohash) }
 
     // Inbound public messages
     private(set) var handledPublicMessages: [BitchatMessage] = []
@@ -441,9 +436,8 @@ struct ChatNostrCoordinatorContextTests {
 
         coordinator.subscriptions.switchLocationChannel(to: .mesh)
 
-        #expect(context.pipelineResetCount == 1)
+        #expect(context.pipelineFlushCount == 1)
         #expect(context.activeChannel == .mesh)
-        #expect(context.pipelineChannelUpdates == [.mesh])
         #expect(context.clearProcessedNostrEventsCount == 1)
         #expect(context.refreshedChannels == [.mesh])
         #expect(context.refreshTimerStopCount == 1)
@@ -578,7 +572,6 @@ struct GeoPresenceTrackerTests {
         await drainMainQueue()
         #expect(context.appendedGeohashMessages.isEmpty)
         #expect(context.lastGeoNotificationAt["9q8yy"] == recent)
-        #expect(context.synchronizedGeohashes.isEmpty)
     }
 
     @Test @MainActor
@@ -605,7 +598,7 @@ struct GeoPresenceTrackerTests {
         #expect(context.appendGeohashMessageIfAbsent(placeholder, toGeohash: "9q8yy"))
 
         // Cooldown elapsed: the geohash is re-stamped and the append is
-        // attempted (and rejected as a duplicate, so no store sync either).
+        // attempted (and rejected as a duplicate, so no notification either).
         let stale = Date().addingTimeInterval(-TransportConfig.uiGeoNotifyCooldownSeconds - 1)
         context.lastGeoNotificationAt["9q8yy"] = stale
         tracker.cooldownPerGeohash("9q8yy", content: "sampled activity", event: event)
@@ -614,7 +607,6 @@ struct GeoPresenceTrackerTests {
         let stamped = try #require(context.lastGeoNotificationAt["9q8yy"])
         #expect(stamped > stale)
         #expect(context.appendedGeohashMessages.count == 1)
-        #expect(context.synchronizedGeohashes.isEmpty)
     }
     @Test @MainActor
     func handleFavoriteNotification_persistsFavoriteAndPostsLocalNotification() async throws {
@@ -661,10 +653,9 @@ struct GeoPresenceTrackerTests {
         coordinator.presence.cooldownPerGeohash("u4pruyd", content: "hello geohash", event: first)
         await drainMainQueue()
 
-        // Sampled message recorded, store synced, and notification posted.
+        // Sampled message recorded in the store and notification posted.
         #expect(context.appendedGeohashMessages.map(\.message.id) == [first.id])
         #expect(context.appendedGeohashMessages.first?.message.sender == "alice#" + String(first.pubkey.suffix(4)))
-        #expect(context.synchronizedGeohashes == ["u4pruyd"])
         #expect(context.geohashActivityNotifications.count == 1)
         #expect(context.geohashActivityNotifications.first?.geohash == "u4pruyd")
         #expect(context.geohashActivityNotifications.first?.bodyPreview == "hello geohash")

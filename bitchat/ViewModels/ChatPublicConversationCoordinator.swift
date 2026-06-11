@@ -19,8 +19,7 @@ import UIKit
 /// pipeline.
 @MainActor
 protocol ChatPublicConversationContext: AnyObject {
-    // MARK: Channel & visible timeline state
-    var messages: [BitchatMessage] { get set }
+    // MARK: Channel state
     var activeChannel: ChannelID { get }
     var currentGeohash: String? { get }
     var nickname: String { get }
@@ -31,29 +30,34 @@ protocol ChatPublicConversationContext: AnyObject {
     func setPublicBatching(_ isBatching: Bool)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
     func notifyUIChanged()
-    func trimMessagesIfNeeded()
 
-    // MARK: Public timeline store
-    func timelineMessages(for channel: ChannelID) -> [BitchatMessage]
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
+    // MARK: Public conversation store (single-writer intents)
+    /// Appends a public message in timestamp order. Returns `false` when a
+    /// message with the same ID is already in that conversation.
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool
+    /// Appends a geohash message if absent. Returns `true` when stored.
+    @discardableResult
     func appendGeohashMessageIfAbsent(_ message: BitchatMessage, toGeohash geohash: String) -> Bool
-    func removeTimelineMessage(withID id: String) -> BitchatMessage?
-    func removeGeohashTimelineMessages(in geohash: String, where predicate: (BitchatMessage) -> Bool)
-    func clearTimeline(for channel: ChannelID)
-    func timelineGeohashKeys() -> [String]
+    func publicConversationContainsMessage(withID messageID: String, in conversationID: ConversationID) -> Bool
+    /// Removes a message by ID from whichever public conversation contains it.
+    @discardableResult
+    func removePublicMessage(withID messageID: String) -> BitchatMessage?
+    /// Removes every matching message from a geohash conversation (block purge).
+    func removePublicMessages(fromGeohash geohash: String, where predicate: (BitchatMessage) -> Bool)
+    /// Empties a public conversation's timeline (`/clear`).
+    func clearPublicConversation(_ conversationID: ConversationID)
     /// Queues a system message for the next geohash channel visit.
     func queueGeohashSystemMessage(_ content: String)
 
-    // MARK: Conversation stores
-    func setConversationActiveChannel(_ channel: ChannelID)
-    func replaceConversationMessages(_ messages: [BitchatMessage], for channelID: ChannelID)
-    func replaceConversationMessages(_ messages: [BitchatMessage], for conversationID: ConversationID)
-    func synchronizePrivateConversationStore()
-    func synchronizeConversationSelectionStore()
-
     // MARK: Private chats (block cleanup & message removal)
-    var privateChats: [PeerID: [BitchatMessage]] { get set }
-    var unreadPrivateMessages: Set<PeerID> { get set }
+    /// Removes the peer's chat entirely, including unread state
+    /// (single-writer store intent; no-op for unknown peers).
+    func removePrivateChat(_ peerID: PeerID)
+    /// Removes a message by ID from every private chat containing it,
+    /// dropping chats that become empty. Returns the removed message.
+    @discardableResult
+    func removePrivateMessage(withID messageID: String) -> BitchatMessage?
     func cleanupLocalFile(forMessage message: BitchatMessage)
 
     // MARK: Geohash participants & presence
@@ -79,7 +83,9 @@ protocol ChatPublicConversationContext: AnyObject {
     func processActionMessage(_ message: BitchatMessage) -> BitchatMessage
     func isMessageBlocked(_ message: BitchatMessage) -> Bool
     func allowPublicMessage(senderKey: String, contentKey: String) -> Bool
-    func enqueuePublicMessage(_ message: BitchatMessage)
+    /// Buffers a visible-channel message for the batched (~80 ms) pipeline
+    /// flush, which commits it to `conversationID` in the store.
+    func enqueuePublicMessage(_ message: BitchatMessage, to conversationID: ConversationID)
     func cachedStablePeerID(for shortPeerID: PeerID) -> PeerID?
 
     // MARK: Content dedup & formatting
@@ -95,55 +101,21 @@ protocol ChatPublicConversationContext: AnyObject {
 }
 
 extension ChatViewModel: ChatPublicConversationContext {
-    // `messages`, `privateChats`, `unreadPrivateMessages`, `nostrKeyMapping`,
+    // `unreadPrivateMessages`, `nostrKeyMapping`,
     // `nickname`, `activeChannel`, `currentGeohash`, `geoNicknames`,
     // `myPeerID`, `isTeleported`, `notifyUIChanged()`,
     // `geoParticipantCount(for:)`, `isNostrBlocked(pubkeyHexLowercased:)`,
-    // `deriveNostrIdentity(forGeohash:)`, and
-    // `appendGeohashMessageIfAbsent(_:toGeohash:)` are shared requirements
-    // with `ChatDeliveryContext` / `ChatPrivateConversationContext` /
-    // `ChatNostrContext`; their witnesses already exist. The members below
-    // flatten nested service accesses into intent-named calls.
-
-    func timelineMessages(for channel: ChannelID) -> [BitchatMessage] {
-        timelineStore.messages(for: channel)
-    }
-
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID) {
-        timelineStore.append(message, to: channel)
-    }
-
-    func removeTimelineMessage(withID id: String) -> BitchatMessage? {
-        timelineStore.removeMessage(withID: id)
-    }
-
-    func removeGeohashTimelineMessages(in geohash: String, where predicate: (BitchatMessage) -> Bool) {
-        timelineStore.removeMessages(in: geohash, where: predicate)
-    }
-
-    func clearTimeline(for channel: ChannelID) {
-        timelineStore.clear(channel: channel)
-    }
-
-    func timelineGeohashKeys() -> [String] {
-        timelineStore.geohashKeys()
-    }
-
-    func queueGeohashSystemMessage(_ content: String) {
-        timelineStore.queueGeohashSystemMessage(content)
-    }
-
-    func setConversationActiveChannel(_ channel: ChannelID) {
-        conversationStore.setActiveChannel(channel)
-    }
-
-    func replaceConversationMessages(_ messages: [BitchatMessage], for channelID: ChannelID) {
-        conversationStore.replaceMessages(messages, for: channelID)
-    }
-
-    func replaceConversationMessages(_ messages: [BitchatMessage], for conversationID: ConversationID) {
-        conversationStore.replaceMessages(messages, for: conversationID)
-    }
+    // `deriveNostrIdentity(forGeohash:)`, the public conversation store
+    // intents (`appendPublicMessage(_:to:)`,
+    // `appendGeohashMessageIfAbsent(_:toGeohash:)`,
+    // `publicConversationContainsMessage(withID:in:)`,
+    // `removePublicMessage(withID:)`,
+    // `removePublicMessages(fromGeohash:where:)`,
+    // `clearPublicConversation(_:)`, and `queueGeohashSystemMessage(_:)`)
+    // are shared requirements with `ChatDeliveryContext` /
+    // `ChatPrivateConversationContext` / `ChatNostrContext` or satisfied by
+    // existing `ChatViewModel` members. The members below flatten nested
+    // service accesses into intent-named calls.
 
     func visibleGeoPeople() -> [GeoPerson] {
         participantTracker.getVisiblePeople()
@@ -169,8 +141,8 @@ extension ChatViewModel: ChatPublicConversationContext {
         publicRateLimiter.allow(senderKey: senderKey, contentKey: contentKey)
     }
 
-    func enqueuePublicMessage(_ message: BitchatMessage) {
-        publicMessagePipeline.enqueue(message)
+    func enqueuePublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) {
+        publicMessagePipeline.enqueue(message, to: conversationID)
     }
 
     func normalizedContentKey(_ content: String) -> String {
@@ -242,23 +214,11 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
                 }
                 return false
             }
-            context.removeGeohashTimelineMessages(in: gh, where: predicate)
-            synchronizePublicConversationStore(forGeohash: gh)
-            if case .location = context.activeChannel {
-                context.messages.removeAll(where: predicate)
-            }
+            context.removePublicMessages(fromGeohash: gh, where: predicate)
         }
 
-        let conversationPeerID = PeerID(nostr_: hex)
-        if context.privateChats[conversationPeerID] != nil {
-            var privateChats = context.privateChats
-            privateChats.removeValue(forKey: conversationPeerID)
-            context.privateChats = privateChats
-
-            var unread = context.unreadPrivateMessages
-            unread.remove(conversationPeerID)
-            context.unreadPrivateMessages = unread
-        }
+        // The store intent no-ops when no such chat exists.
+        context.removePrivateChat(PeerID(nostr_: hex))
 
         context.removeNostrKeyMappings(matchingPubkeyHexLowercased: hex)
 
@@ -314,32 +274,11 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
     }
 
     func removeMessage(withID messageID: String, cleanupFile: Bool = false) {
-        var removedMessage: BitchatMessage?
+        var removedMessage = context.removePublicMessage(withID: messageID)
 
-        if let index = context.messages.firstIndex(where: { $0.id == messageID }) {
-            removedMessage = context.messages.remove(at: index)
+        if let removedPrivateMessage = context.removePrivateMessage(withID: messageID) {
+            removedMessage = removedMessage ?? removedPrivateMessage
         }
-
-        if let storeRemoved = context.removeTimelineMessage(withID: messageID) {
-            removedMessage = removedMessage ?? storeRemoved
-            synchronizeAllPublicConversationStores()
-        }
-
-        var chats = context.privateChats
-        for (peerID, items) in chats {
-            let filtered = items.filter { $0.id != messageID }
-            if filtered.count != items.count {
-                if filtered.isEmpty {
-                    chats.removeValue(forKey: peerID)
-                } else {
-                    chats[peerID] = filtered
-                }
-                if removedMessage == nil {
-                    removedMessage = items.first(where: { $0.id == messageID })
-                }
-            }
-        }
-        context.privateChats = chats
 
         if cleanupFile, let removedMessage {
             context.cleanupLocalFile(forMessage: removedMessage)
@@ -348,46 +287,8 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
         context.notifyUIChanged()
     }
 
-    func initializeConversationStore() {
-        context.setConversationActiveChannel(context.activeChannel)
-        synchronizePublicConversationStore(for: context.activeChannel)
-        context.synchronizePrivateConversationStore()
-        context.synchronizeConversationSelectionStore()
-    }
-
-    func synchronizePublicConversationStore(for channel: ChannelID) {
-        let publicMessages = context.timelineMessages(for: channel)
-        context.replaceConversationMessages(publicMessages, for: channel)
-        if channel == context.activeChannel {
-            context.setConversationActiveChannel(context.activeChannel)
-        }
-    }
-
-    func synchronizePublicConversationStore(forGeohash geohash: String) {
-        let channel = ChannelID.location(GeohashChannel(level: .city, geohash: geohash))
-        let publicMessages = context.timelineMessages(for: channel)
-        context.replaceConversationMessages(publicMessages, for: .geohash(geohash.lowercased()))
-    }
-
-    func synchronizeAllPublicConversationStores() {
-        synchronizePublicConversationStore(for: .mesh)
-        for geohash in context.timelineGeohashKeys() {
-            synchronizePublicConversationStore(forGeohash: geohash)
-        }
-    }
-
-    func refreshVisibleMessages(from channel: ChannelID? = nil) {
-        let target = channel ?? context.activeChannel
-        context.messages = context.timelineMessages(for: target)
-        context.replaceConversationMessages(context.messages, for: target)
-        if target == context.activeChannel {
-            context.setConversationActiveChannel(context.activeChannel)
-        }
-    }
-
     func clearCurrentPublicTimeline() {
-        context.messages.removeAll()
-        context.clearTimeline(for: context.activeChannel)
+        context.clearPublicConversation(ConversationID(channelID: context.activeChannel))
 
         Task.detached(priority: .utility) {
             do {
@@ -427,7 +328,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             timestamp: timestamp,
             isRelay: false
         )
-        context.messages.append(systemMessage)
+        context.appendPublicMessage(systemMessage, to: ConversationID(channelID: context.activeChannel))
     }
 
     func addMeshOnlySystemMessage(_ content: String) {
@@ -437,11 +338,7 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             timestamp: Date(),
             isRelay: false
         )
-        context.appendTimelineMessage(systemMessage, to: .mesh)
-        synchronizePublicConversationStore(for: .mesh)
-        refreshVisibleMessages()
-        context.trimMessagesIfNeeded()
-        context.notifyUIChanged()
+        context.appendPublicMessage(systemMessage, to: .mesh)
     }
 
     func addPublicSystemMessage(_ content: String) {
@@ -451,12 +348,9 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             timestamp: Date(),
             isRelay: false
         )
-        context.appendTimelineMessage(systemMessage, to: context.activeChannel)
-        refreshVisibleMessages(from: context.activeChannel)
+        context.appendPublicMessage(systemMessage, to: ConversationID(channelID: context.activeChannel))
         let contentKey = context.normalizedContentKey(systemMessage.content)
         context.recordContentKey(contentKey, timestamp: systemMessage.timestamp)
-        context.trimMessagesIfNeeded()
-        context.notifyUIChanged()
     }
 
     func addGeohashOnlySystemMessage(_ content: String) {
@@ -506,7 +400,8 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
         if context.isMessageBlocked(finalMessage) { return }
 
         let isGeo = finalMessage.senderPeerID?.isGeoChat == true
-        let shouldRateLimit = finalMessage.sender != "system" || finalMessage.senderPeerID != nil
+        let isSystem = finalMessage.sender == "system"
+        let shouldRateLimit = !isSystem || finalMessage.senderPeerID != nil
         if shouldRateLimit {
             let senderKey = normalizedSenderKey(for: finalMessage)
             let contentKey = context.normalizedContentKey(finalMessage.content)
@@ -515,20 +410,26 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             }
         }
 
-        if finalMessage.sender != "system" && finalMessage.content.count > 16000 { return }
+        if !isSystem && finalMessage.content.count > 16000 { return }
+        // Empty content never rendered before (the old visible-array enqueue
+        // filtered it); with the store as the sole timeline it is dropped
+        // outright instead of lingering invisibly in a backing buffer.
+        guard !finalMessage.content.trimmed.isEmpty else { return }
 
-        if !isGeo && finalMessage.sender != "system" {
-            context.appendTimelineMessage(finalMessage, to: .mesh)
-            synchronizePublicConversationStore(for: .mesh)
+        // Resolve the destination conversation. System messages surface on
+        // the active channel (matching their old visible-only routing); geo
+        // messages require a current geohash, mesh messages always land in
+        // the mesh conversation.
+        let destination: ConversationID?
+        if isSystem {
+            destination = ConversationID(channelID: context.activeChannel)
+        } else if isGeo {
+            destination = context.currentGeohash.map { .geohash($0.lowercased()) }
+        } else {
+            destination = .mesh
         }
+        guard let destination else { return }
 
-        if isGeo && finalMessage.sender != "system",
-           let geohash = context.currentGeohash,
-           context.appendGeohashMessageIfAbsent(finalMessage, toGeohash: geohash) {
-            synchronizePublicConversationStore(forGeohash: geohash)
-        }
-
-        let isSystem = finalMessage.sender == "system"
         let channelMatches: Bool = {
             switch context.activeChannel {
             case .mesh: return !isGeo || isSystem
@@ -536,11 +437,16 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             }
         }()
 
-        guard channelMatches else { return }
-
-        if !finalMessage.content.trimmed.isEmpty,
-           !context.messages.contains(where: { $0.id == finalMessage.id }) {
-            context.enqueuePublicMessage(finalMessage)
+        if channelMatches {
+            // Visible-channel arrivals are batched: the pipeline's ~80 ms
+            // flush commits them to the store (which dedups by ID), keeping
+            // the deliberate UI flush cadence.
+            guard !context.publicConversationContainsMessage(withID: finalMessage.id, in: destination) else { return }
+            context.enqueuePublicMessage(finalMessage, to: destination)
+        } else {
+            // Background-channel arrivals have no rendering observers to
+            // batch for; they land in the store immediately.
+            context.appendPublicMessage(finalMessage, to: destination)
         }
     }
 
@@ -598,14 +504,6 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
         #endif
     }
 
-    func pipelineCurrentMessages(_ pipeline: PublicMessagePipeline) -> [BitchatMessage] {
-        context.messages
-    }
-
-    func pipeline(_ pipeline: PublicMessagePipeline, setMessages messages: [BitchatMessage]) {
-        context.messages = messages
-    }
-
     func pipeline(_ pipeline: PublicMessagePipeline, normalizeContent content: String) -> String {
         context.normalizedContentKey(content)
     }
@@ -618,8 +516,8 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
         context.recordContentKey(key, timestamp: timestamp)
     }
 
-    func pipelineTrimMessages(_ pipeline: PublicMessagePipeline) {
-        context.trimMessagesIfNeeded()
+    func pipeline(_ pipeline: PublicMessagePipeline, commit message: BitchatMessage, to conversationID: ConversationID) -> Bool {
+        context.appendPublicMessage(message, to: conversationID)
     }
 
     func pipelinePrewarmMessage(_ pipeline: PublicMessagePipeline, message: BitchatMessage) {

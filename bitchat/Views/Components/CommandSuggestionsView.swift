@@ -81,7 +81,7 @@ struct CommandSuggestionsView: View {
     )
     let privateConversationModel = PrivateConversationModel(
         chatViewModel: viewModel,
-        conversationStore: viewModel.conversationStore
+        conversations: viewModel.conversations
     )
     let locationChannelsModel = LocationChannelsModel()
     

@@ -1,4 +1,5 @@
 import BitFoundation
+import Combine
 import Foundation
 import Testing
 @testable import bitchat
@@ -42,6 +43,27 @@ private func makeArchitectureSnapshot(
         isConnected: connected,
         noisePublicKey: noisePublicKey,
         lastSeen: Date()
+    )
+}
+
+@MainActor
+private func makeArchitectureMessage(
+    id: String,
+    timestamp: TimeInterval = 0,
+    content: String? = nil,
+    isPrivate: Bool = false,
+    senderPeerID: PeerID = PeerID(str: "peer-a")
+) -> BitchatMessage {
+    BitchatMessage(
+        id: id,
+        sender: "alice",
+        content: content ?? "message \(id)",
+        timestamp: Date(timeIntervalSince1970: timestamp),
+        isRelay: false,
+        originalSender: nil,
+        isPrivate: isPrivate,
+        recipientNickname: isPrivate ? "builder" : nil,
+        senderPeerID: senderPeerID
     )
 }
 
@@ -127,251 +149,119 @@ struct AppArchitectureTests {
 
     @Test("PeerHandle equality and hashing use the canonical identity only")
     func peerHandleEqualityUsesCanonicalIdentity() {
-        let first = PeerHandle(
-            id: "noise:abc123",
-            routingPeerID: PeerID(str: "peer-a"),
-            displayName: "alice",
-            noisePublicKeyHex: "abc123",
-            nostrPublicKey: nil
-        )
-        let second = PeerHandle(
-            id: "noise:abc123",
-            routingPeerID: PeerID(str: "peer-b"),
-            displayName: "alice-renamed",
-            noisePublicKeyHex: nil,
-            nostrPublicKey: "npub123"
-        )
+        let first = PeerHandle(id: "noise:abc123", routingPeerID: PeerID(str: "peer-a"))
+        let second = PeerHandle(id: "noise:abc123", routingPeerID: PeerID(str: "peer-b"))
 
         #expect(first == second)
         #expect(Set([first, second]).count == 1)
     }
 
-    @Test("ConversationStore normalizes timeline ordering and duplicates")
+    @Test("ConversationStore orders timelines and replaces duplicates by message ID")
     @MainActor
-    func conversationStoreNormalizesMessages() {
+    func conversationStoreOrdersAndDedupsMessages() {
         let store = ConversationStore()
-        let older = BitchatMessage(
-            id: "m1",
-            sender: "alice",
-            content: "first",
-            timestamp: Date(timeIntervalSince1970: 1),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: false,
-            recipientNickname: nil,
-            senderPeerID: PeerID(str: "peer-a")
-        )
-        let newer = BitchatMessage(
-            id: "m2",
-            sender: "alice",
-            content: "second",
-            timestamp: Date(timeIntervalSince1970: 2),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: false,
-            recipientNickname: nil,
-            senderPeerID: PeerID(str: "peer-a")
-        )
-        let replacement = BitchatMessage(
-            id: "m2",
-            sender: "alice",
-            content: "second-updated",
-            timestamp: Date(timeIntervalSince1970: 2),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: false,
-            recipientNickname: nil,
-            senderPeerID: PeerID(str: "peer-a")
-        )
+        let older = makeArchitectureMessage(id: "m1", timestamp: 1, content: "first")
+        let newer = makeArchitectureMessage(id: "m2", timestamp: 2, content: "second")
+        let replacement = makeArchitectureMessage(id: "m2", timestamp: 2, content: "second-updated")
 
-        store.replaceMessages([newer, older, replacement], for: ConversationID.mesh)
+        store.append(newer, to: .mesh)
+        store.append(older, to: .mesh)
+        store.upsertByID(replacement, in: .mesh)
 
-        let messages = store.messages(for: ConversationID.mesh)
+        let messages = store.conversation(for: .mesh).messages
         #expect(messages.map(\.id) == ["m1", "m2"])
         #expect(messages.last?.content == "second-updated")
     }
 
-    @Test("ConversationStore tracks unread direct conversations with canonical IDs")
+    @Test("ConversationStore tracks unread direct conversations by routing peer ID")
     @MainActor
     func conversationStoreTracksUnreadDirectConversations() {
         let store = ConversationStore()
-        let resolver = IdentityResolver()
         let peerID = PeerID(str: "peer-1")
-        let message = BitchatMessage(
-            id: "dm-1",
-            sender: "alice",
-            content: "hello",
-            timestamp: Date(),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: true,
-            recipientNickname: "bob",
-            senderPeerID: peerID
-        )
+        let message = makeArchitectureMessage(id: "dm-1", isPrivate: true, senderPeerID: peerID)
 
-        store.synchronizePrivateChats(
-            [peerID: [message]],
-            unreadPeerIDs: Set([peerID]),
-            identityResolver: resolver
-        )
+        store.append(message, to: .directPeer(peerID))
+        store.markUnread(.directPeer(peerID))
 
-        let conversationID = ConversationID.direct(
-            resolver.canonicalHandle(for: peerID, displayName: "alice")
-        )
+        #expect(store.conversation(for: .directPeer(peerID)).messages.map(\.id) == ["dm-1"])
+        #expect(store.unreadDirectRoutingPeerIDs() == Set([peerID]))
+        #expect(store.conversation(for: .directPeer(peerID)).isUnread)
 
-        #expect(store.messages(for: conversationID).map(\.id) == ["dm-1"])
-        #expect(store.unreadConversations.contains(conversationID))
-
-        store.markRead(conversationID)
-        #expect(!store.unreadConversations.contains(conversationID))
+        store.markRead(.directPeer(peerID))
+        #expect(store.unreadDirectRoutingPeerIDs().isEmpty)
+        #expect(!store.conversation(for: .directPeer(peerID)).isUnread)
     }
 
-    @Test("ConversationStore tracks the selected app conversation context")
+    @Test("ConversationStore derives the selected conversation from channel and private peer")
     @MainActor
     func conversationStoreTracksSelectedConversationContext() {
         let store = ConversationStore()
-        let resolver = IdentityResolver()
-        let noiseKey = Data((0..<32).map(UInt8.init))
-        let shortPeerID = PeerID(str: "0011223344556677")
+        let peerID = PeerID(str: "0011223344556677")
         let geohashChannel = ChannelID.location(GeohashChannel(level: .city, geohash: "9q8yy"))
-        let peer = BitchatPeer(
-            peerID: shortPeerID,
-            noisePublicKey: noiseKey,
-            nickname: "alice",
-            isConnected: true,
-            isReachable: true
-        )
 
-        resolver.register(peers: [peer])
-        store.synchronizeSelection(
-            activeChannel: geohashChannel,
-            selectedPeerID: shortPeerID,
-            identityResolver: resolver
-        )
-
-        let expectedConversationID = ConversationID.direct(
-            resolver.canonicalHandle(for: shortPeerID, displayName: "alice")
-        )
+        store.setActiveChannel(geohashChannel)
+        store.setSelectedPrivatePeer(peerID)
 
         #expect(store.activeChannel == geohashChannel)
-        #expect(store.selectedPrivatePeerID == shortPeerID)
-        #expect(store.selectedConversationID == expectedConversationID)
+        #expect(store.selectedPrivatePeerID == peerID)
+        // The open private chat wins the derived selection.
+        #expect(store.selectedConversationID == ConversationID.directPeer(peerID))
 
-        store.synchronizeSelection(
-            activeChannel: ChannelID.mesh,
-            selectedPeerID: nil,
-            identityResolver: resolver
-        )
+        store.setSelectedPrivatePeer(nil)
+        // Selection falls back to the active public channel.
+        #expect(store.selectedConversationID == ConversationID(channelID: geohashChannel))
 
+        store.setActiveChannel(.mesh)
         #expect(store.activeChannel == ChannelID.mesh)
         #expect(store.selectedPrivatePeerID == nil)
         #expect(store.selectedConversationID == ConversationID.mesh)
     }
 
-    @Test("ConversationStore exposes direct conversations by the latest routing peer ID")
+    @Test("ConversationStore re-keys a direct conversation via the migrate intent")
     @MainActor
-    func conversationStoreExposesDirectConversationsByLatestRoutingPeerID() {
+    func conversationStoreMigratesDirectConversationsBetweenPeerIDs() {
         let store = ConversationStore()
-        let resolver = IdentityResolver()
         let noiseKey = Data((0..<32).map(UInt8.init))
         let shortPeerID = PeerID(str: "0011223344556677")
         let fullPeerID = PeerID(hexData: noiseKey)
-        let firstMessage = BitchatMessage(
-            id: "dm-1",
-            sender: "alice",
-            content: "short id",
-            timestamp: Date(timeIntervalSince1970: 1),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: true,
-            recipientNickname: "builder",
-            senderPeerID: shortPeerID
-        )
-        let secondMessage = BitchatMessage(
-            id: "dm-2",
-            sender: "alice",
-            content: "full id",
-            timestamp: Date(timeIntervalSince1970: 2),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: true,
-            recipientNickname: "builder",
-            senderPeerID: fullPeerID
-        )
 
-        resolver.register(
-            peer: BitchatPeer(
-                peerID: shortPeerID,
-                noisePublicKey: noiseKey,
-                nickname: "alice",
-                isConnected: true,
-                isReachable: true
-            )
+        store.append(
+            makeArchitectureMessage(id: "dm-1", timestamp: 1, isPrivate: true, senderPeerID: shortPeerID),
+            to: .directPeer(shortPeerID)
         )
-        store.synchronizePrivateChats(
-            [shortPeerID: [firstMessage]],
-            unreadPeerIDs: Set([shortPeerID]),
-            identityResolver: resolver
-        )
+        store.markUnread(.directPeer(shortPeerID))
+        store.setSelectedPrivatePeer(shortPeerID)
 
-        resolver.register(
-            peer: BitchatPeer(
-                peerID: fullPeerID,
-                noisePublicKey: noiseKey,
-                nickname: "alice",
-                isConnected: true,
-                isReachable: true
-            )
-        )
-        store.synchronizePrivateChats(
-            [fullPeerID: [secondMessage]],
-            unreadPeerIDs: Set([fullPeerID]),
-            identityResolver: resolver
-        )
+        store.migrateConversation(from: .directPeer(shortPeerID), to: .directPeer(fullPeerID))
 
-        #expect(Set(store.directMessagesByPeerID().keys) == Set([fullPeerID]))
-        #expect(store.directMessagesByPeerID()[fullPeerID]?.map(\.id) == ["dm-2"])
-        #expect(store.unreadDirectPeerIDs() == Set([fullPeerID]))
+        // Raw keying: the old peer's conversation is gone, the new peer's
+        // conversation holds the timeline, unread and selection carried over.
+        #expect(store.conversationsByID[.directPeer(shortPeerID)] == nil)
+        #expect(Set(store.directMessagesByRoutingPeerID().keys) == Set([fullPeerID]))
+        #expect(store.directMessagesByRoutingPeerID()[fullPeerID]?.map(\.id) == ["dm-1"])
+        #expect(store.unreadDirectRoutingPeerIDs() == Set([fullPeerID]))
+        #expect(store.selectedPrivatePeerID == fullPeerID)
+        #expect(store.selectedConversationID == ConversationID.directPeer(fullPeerID))
     }
 
-    @Test("PrivateInboxModel mirrors direct message state from ConversationStore")
+    @Test("PrivateInboxModel reads direct message state from the ConversationStore")
     @MainActor
-    func privateInboxModelMirrorsDirectMessageStateFromConversationStore() async {
+    func privateInboxModelReadsDirectMessageStateFromConversationStore() {
         let store = ConversationStore()
-        let resolver = IdentityResolver()
-        let inboxModel = PrivateInboxModel(conversationStore: store)
+        let inboxModel = PrivateInboxModel(conversations: store)
         let messagePeerID = PeerID(str: "peer-1")
         let unreadOnlyPeerID = PeerID(str: "peer-2")
         let selectedOnlyPeerID = PeerID(str: "peer-3")
-        let message = BitchatMessage(
-            id: "dm-1",
-            sender: "alice",
-            content: "hello",
-            timestamp: Date(),
-            isRelay: false,
-            originalSender: nil,
-            isPrivate: true,
-            recipientNickname: "builder",
-            senderPeerID: messagePeerID
-        )
 
-        store.synchronizePrivateChats(
-            [messagePeerID: [message]],
-            unreadPeerIDs: Set([messagePeerID, unreadOnlyPeerID]),
-            identityResolver: resolver
+        store.append(
+            makeArchitectureMessage(id: "dm-1", isPrivate: true, senderPeerID: messagePeerID),
+            to: .directPeer(messagePeerID)
         )
-        store.synchronizeSelection(
-            activeChannel: ChannelID.mesh,
-            selectedPeerID: selectedOnlyPeerID,
-            identityResolver: resolver
-        )
+        store.markUnread(.directPeer(messagePeerID))
+        store.markUnread(.directPeer(unreadOnlyPeerID))
+        store.setSelectedPrivatePeer(selectedOnlyPeerID)
 
-        await waitUntil {
-            inboxModel.selectedPeerID == selectedOnlyPeerID &&
-            inboxModel.unreadPeerIDs == Set([messagePeerID, unreadOnlyPeerID]) &&
-            Set(inboxModel.messagesByPeerID.keys) == Set([messagePeerID, unreadOnlyPeerID, selectedOnlyPeerID])
-        }
-
+        // Reads are synchronous against the single-writer store.
         #expect(inboxModel.selectedPeerID == selectedOnlyPeerID)
         #expect(inboxModel.unreadPeerIDs == Set([messagePeerID, unreadOnlyPeerID]))
         #expect(inboxModel.messages(for: messagePeerID).map(\.id) == ["dm-1"])
@@ -379,13 +269,74 @@ struct AppArchitectureTests {
         #expect(inboxModel.messages(for: selectedOnlyPeerID).isEmpty)
     }
 
+    @Test("PrivateInboxModel republishes only for the selected conversation")
+    @MainActor
+    func privateInboxModelIsolatesBackgroundConversations() {
+        let store = ConversationStore()
+        let inboxModel = PrivateInboxModel(conversations: store)
+        let selectedPeerID = PeerID(str: "peer-selected")
+        let backgroundPeerID = PeerID(str: "peer-background")
+        store.setSelectedPrivatePeer(selectedPeerID)
+
+        var emissions = 0
+        let cancellable = inboxModel.objectWillChange.sink { _ in emissions += 1 }
+        defer { cancellable.cancel() }
+
+        let baseline = emissions
+        store.append(
+            makeArchitectureMessage(id: "dm-bg-1", isPrivate: true, senderPeerID: backgroundPeerID),
+            to: .directPeer(backgroundPeerID)
+        )
+        // An append to a background chat does not republish the model.
+        #expect(emissions == baseline)
+
+        store.append(
+            makeArchitectureMessage(id: "dm-sel-1", isPrivate: true, senderPeerID: selectedPeerID),
+            to: .directPeer(selectedPeerID)
+        )
+        #expect(emissions == baseline + 1)
+        #expect(inboxModel.messages(for: selectedPeerID).map(\.id) == ["dm-sel-1"])
+    }
+
+    @Test("PublicChatModel ignores appends to background conversations")
+    @MainActor
+    func publicChatModelIsolatesBackgroundConversations() {
+        let store = ConversationStore()
+        store.setActiveChannel(.mesh)
+        let model = PublicChatModel(conversations: store)
+
+        var emissions = 0
+        let cancellable = model.objectWillChange.sink { _ in emissions += 1 }
+        defer { cancellable.cancel() }
+
+        store.append(makeArchitectureMessage(id: "mesh-1"), to: .mesh)
+        let afterActiveAppend = emissions
+        #expect(afterActiveAppend >= 1)
+        #expect(model.messages.map(\.id) == ["mesh-1"])
+
+        // Appends to a background geohash channel and to a private chat do
+        // not invalidate the observer of the active conversation.
+        store.append(makeArchitectureMessage(id: "geo-1"), to: .geohash("u4pruyd"))
+        store.append(
+            makeArchitectureMessage(id: "dm-1", isPrivate: true),
+            to: .directPeer(PeerID(str: "peer-1"))
+        )
+        #expect(emissions == afterActiveAppend)
+        #expect(model.messages.map(\.id) == ["mesh-1"])
+
+        // Switching the channel retargets the observation.
+        store.setActiveChannel(.location(GeohashChannel(level: .neighborhood, geohash: "u4pruyd")))
+        #expect(model.messages.map(\.id) == ["geo-1"])
+        store.append(makeArchitectureMessage(id: "geo-2", timestamp: 1), to: .geohash("u4pruyd"))
+        #expect(model.messages.map(\.id) == ["geo-1", "geo-2"])
+    }
+
     @Test("AppChromeModel mirrors nickname and unread state through focused models")
     @MainActor
     func appChromeModelMirrorsNicknameAndUnreadState() async {
         let viewModel = makeArchitectureViewModel()
-        let conversationStore = ConversationStore()
-        let resolver = IdentityResolver()
-        let privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
+        let conversations = ConversationStore()
+        let privateInboxModel = PrivateInboxModel(conversations: conversations)
         let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
 
         chromeModel.setNickname("builder")
@@ -398,11 +349,7 @@ struct AppArchitectureTests {
         #expect(!chromeModel.hasUnreadPrivateMessages)
 
         let peerID = PeerID(str: "peer-1")
-        conversationStore.synchronizePrivateChats(
-            [:],
-            unreadPeerIDs: Set([peerID]),
-            identityResolver: resolver
-        )
+        conversations.markUnread(.directPeer(peerID))
         await waitUntil {
             chromeModel.hasUnreadPrivateMessages
         }
@@ -414,8 +361,7 @@ struct AppArchitectureTests {
     @MainActor
     func appChromeModelOwnsPresentationState() {
         let viewModel = makeArchitectureViewModel()
-        let conversationStore = ConversationStore()
-        let privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
+        let privateInboxModel = PrivateInboxModel(conversations: ConversationStore())
         let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
         let peerID = PeerID(str: "peer-2")
 
@@ -441,11 +387,10 @@ struct AppArchitectureTests {
             Issue.record("Expected ChatViewModel meshService to be a MockTransport in architecture tests")
             return
         }
-        let conversationStore = viewModel.conversationStore
         let locationChannelsModel = LocationChannelsModel(manager: makeArchitectureLocationManager())
         let conversationModel = PrivateConversationModel(
             chatViewModel: viewModel,
-            conversationStore: conversationStore,
+            conversations: viewModel.conversations,
             locationChannelsModel: locationChannelsModel
         )
 
@@ -493,18 +438,17 @@ struct AppArchitectureTests {
             return
         }
 
-        let conversationStore = viewModel.conversationStore
         locationManager.select(.mesh)
         let locationChannelsModel = LocationChannelsModel(manager: locationManager)
         let privateConversationModel = PrivateConversationModel(
             chatViewModel: viewModel,
-            conversationStore: conversationStore,
+            conversations: viewModel.conversations,
             locationChannelsModel: locationChannelsModel
         )
         let uiModel = ConversationUIModel(
             chatViewModel: viewModel,
             privateConversationModel: privateConversationModel,
-            conversationStore: conversationStore
+            conversations: viewModel.conversations
         )
         let geohashChannel = ChannelID.location(GeohashChannel(level: .city, geohash: "9q8yy"))
         defer {
@@ -558,11 +502,10 @@ struct AppArchitectureTests {
 
         let peerID = PeerID(str: "0011223344556677")
         let fingerprint = "verified-fingerprint"
-        let conversationStore = viewModel.conversationStore
         let locationChannelsModel = LocationChannelsModel(manager: makeArchitectureLocationManager())
         let privateConversationModel = PrivateConversationModel(
             chatViewModel: viewModel,
-            conversationStore: conversationStore,
+            conversations: viewModel.conversations,
             locationChannelsModel: locationChannelsModel
         )
         let verificationModel = VerificationModel(
@@ -631,7 +574,7 @@ struct AppArchitectureTests {
         transport.reachablePeers.insert(otherPeerID)
         viewModel.nickname = "builder"
         viewModel.verifiedFingerprints.insert(verifiedFingerprint)
-        viewModel.unreadPrivateMessages = Set([otherPeerID])
+        viewModel.markPrivateChatUnread(otherPeerID)
         transport.updatePeerSnapshots([
             makeArchitectureSnapshot(
                 peerID: myPeerID,
@@ -664,7 +607,7 @@ struct AppArchitectureTests {
 
         let peerListModel = PeerListModel(
             chatViewModel: viewModel,
-            conversationStore: viewModel.conversationStore,
+            conversations: viewModel.conversations,
             locationChannelsModel: locationChannelsModel
         )
 

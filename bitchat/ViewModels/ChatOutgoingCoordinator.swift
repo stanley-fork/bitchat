@@ -25,9 +25,10 @@ protocol ChatOutgoingContext: AnyObject {
 
     // MARK: Public timeline (local echo)
     func parseMentions(from content: String) -> [String]
-    func appendTimelineMessage(_ message: BitchatMessage, to channel: ChannelID)
-    func refreshVisibleMessages(from channel: ChannelID?)
-    func trimMessagesIfNeeded()
+    /// Appends a public message via the single-writer store intent
+    /// (immediate: the local echo must render without batching).
+    @discardableResult
+    func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool
     func addSystemMessage(_ content: String)
 
     // MARK: Content dedup
@@ -50,8 +51,7 @@ extension ChatViewModel: ChatOutgoingContext {
     // `nickname`, `myPeerID`, `activeChannel`, `selectedPrivateChatPeer`,
     // `isTeleported`, `handleCommand(_:)`, `updatePrivateChatPeerIfNeeded()`,
     // `sendPrivateMessage(_:to:)`, `parseMentions(from:)`,
-    // `appendTimelineMessage(_:to:)`, `refreshVisibleMessages(from:)`,
-    // `trimMessagesIfNeeded()`, `addSystemMessage(_:)`,
+    // `appendPublicMessage(_:to:)`, `addSystemMessage(_:)`,
     // `normalizedContentKey(_:)`, `recordContentKey(_:timestamp:)`,
     // `sendMeshMessage(_:mentions:messageID:timestamp:)`,
     // `sendGeohash(context:)`, and `deriveNostrIdentity(forGeohash:)` are
@@ -169,12 +169,10 @@ private extension ChatOutgoingCoordinator {
     }
 
     func appendLocalEcho(_ message: BitchatMessage) {
-        context.appendTimelineMessage(message, to: context.activeChannel)
-        context.refreshVisibleMessages(from: context.activeChannel)
+        context.appendPublicMessage(message, to: ConversationID(channelID: context.activeChannel))
 
         let contentKey = context.normalizedContentKey(message.content)
         context.recordContentKey(contentKey, timestamp: message.timestamp)
-        context.trimMessagesIfNeeded()
     }
 
     func routePublicMessage(

@@ -423,6 +423,12 @@ private final class MockCommandContextProvider: CommandContextProvider {
         clearCurrentPublicTimelineCallCount += 1
     }
 
+    private(set) var clearedPrivateChats: [PeerID] = []
+    func clearPrivateChat(_ peerID: PeerID) {
+        clearedPrivateChats.append(peerID)
+        privateChats[peerID] = []
+    }
+
     func sendPublicRaw(_ content: String) {
         sentPublicRawMessages.append(content)
     }

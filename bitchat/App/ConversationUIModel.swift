@@ -15,19 +15,19 @@ final class ConversationUIModel: ObservableObject {
 
     private let chatViewModel: ChatViewModel
     private let privateConversationModel: PrivateConversationModel
-    private let conversationStore: ConversationStore
+    private let conversations: ConversationStore
     private var activeChannel: ChannelID
     private var cancellables = Set<AnyCancellable>()
 
     init(
         chatViewModel: ChatViewModel,
         privateConversationModel: PrivateConversationModel,
-        conversationStore: ConversationStore
+        conversations: ConversationStore
     ) {
         self.chatViewModel = chatViewModel
         self.privateConversationModel = privateConversationModel
-        self.conversationStore = conversationStore
-        self.activeChannel = conversationStore.activeChannel
+        self.conversations = conversations
+        self.activeChannel = conversations.activeChannel
         self.currentNickname = chatViewModel.nickname
         self.isBatchingPublic = chatViewModel.isBatchingPublic
         self.showAutocomplete = chatViewModel.showAutocomplete
@@ -151,7 +151,7 @@ final class ConversationUIModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .assign(to: &$isBatchingPublic)
 
-        conversationStore.$activeChannel
+        conversations.$activeChannel
             .receive(on: DispatchQueue.main)
             .sink { [weak self] channel in
                 self?.activeChannel = channel

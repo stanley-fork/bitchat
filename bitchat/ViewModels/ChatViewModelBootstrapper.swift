@@ -74,6 +74,7 @@ final class ChatViewModelBootstrapper {
 
 private extension ChatViewModelBootstrapper {
     func wireServiceGraph() {
+        viewModel.privateChatManager.conversationStore = viewModel.conversations
         viewModel.privateChatManager.messageRouter = viewModel.messageRouter
         viewModel.privateChatManager.unifiedPeerService = viewModel.unifiedPeerService
         viewModel.unifiedPeerService.messageRouter = viewModel.messageRouter
@@ -89,24 +90,9 @@ private extension ChatViewModelBootstrapper {
             }
             .store(in: &viewModel.cancellables)
 
-        viewModel.privateChatManager.$privateChats
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.schedulePrivateConversationStoreSynchronization()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
-        viewModel.privateChatManager.$unreadMessages
-            .receive(on: DispatchQueue.main)
-            .sink { [weak viewModel] _ in
-                Task { @MainActor [weak viewModel] in
-                    viewModel?.schedulePrivateConversationStoreSynchronization()
-                }
-            }
-            .store(in: &viewModel.cancellables)
-
+        // Private message state flows through the single-writer
+        // `ConversationStore` intents and its `changes` subject; only the
+        // selection still originates in `PrivateChatManager`.
         viewModel.privateChatManager.$selectedPeer
             .receive(on: DispatchQueue.main)
             .sink { [weak viewModel] _ in
@@ -144,7 +130,6 @@ private extension ChatViewModelBootstrapper {
         viewModel.meshService.startServices()
 
         viewModel.publicMessagePipeline.delegate = viewModel.publicConversationCoordinator
-        viewModel.publicMessagePipeline.updateActiveChannel(viewModel.activeChannel)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak viewModel] in
             guard let viewModel,
@@ -173,7 +158,6 @@ private extension ChatViewModelBootstrapper {
                     guard let viewModel else { return }
 
                     viewModel.allPeers = peers
-                    viewModel.identityResolver.register(peers: peers)
 
                     var uniquePeers: [PeerID: BitchatPeer] = [:]
                     for peer in peers {
@@ -192,7 +176,6 @@ private extension ChatViewModelBootstrapper {
                         viewModel.updatePrivateChatPeerIfNeeded()
                     }
 
-                    viewModel.synchronizePrivateConversationStore()
                     viewModel.synchronizeConversationSelectionStore()
                 }
             }

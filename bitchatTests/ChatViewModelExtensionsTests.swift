@@ -177,7 +177,7 @@ struct ChatViewModelPrivateChatExtensionTests {
             isPrivate: true,
             senderPeerID: oldPeerID
         )
-        viewModel.privateChats[oldPeerID] = [oldMessage]
+        viewModel.seedPrivateChat([oldMessage], for: oldPeerID)
         viewModel.peerIDToPublicKeyFingerprint[oldPeerID] = fingerprint
         
         // Setup new peer fingerprint
@@ -444,7 +444,7 @@ struct ChatViewModelNostrExtensionTests {
         let convKey = PeerID(nostr_: sender.publicKeyHex)
         let messageID = "geo-ack-delivered"
 
-        viewModel.privateChats[convKey] = [
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -456,7 +456,7 @@ struct ChatViewModelNostrExtensionTests {
                 senderPeerID: viewModel.meshService.myPeerID,
                 deliveryStatus: .sent
             )
-        ]
+        ], for: convKey)
 
         let content = try ackContent(type: .delivered, messageID: messageID, senderPeerID: PeerID(str: "0123456789abcdef"))
         let giftWrap = try NostrProtocol.createPrivateMessage(
@@ -482,7 +482,7 @@ struct ChatViewModelNostrExtensionTests {
         let convKey = PeerID(nostr_: sender.publicKeyHex)
         let messageID = "geo-ack-read"
 
-        viewModel.privateChats[convKey] = [
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -494,7 +494,7 @@ struct ChatViewModelNostrExtensionTests {
                 senderPeerID: viewModel.meshService.myPeerID,
                 deliveryStatus: .delivered(to: "Friend", at: Date())
             )
-        ]
+        ], for: convKey)
 
         let content = try ackContent(type: .readReceipt, messageID: messageID, senderPeerID: PeerID(str: "0123456789abcdef"))
         let giftWrap = try NostrProtocol.createPrivateMessage(
@@ -578,7 +578,7 @@ struct ChatViewModelNostrExtensionTests {
         let convKey = PeerID(nostr_: sender.publicKeyHex)
         let messageID = "gift-delivered"
 
-        viewModel.privateChats[convKey] = [
+        viewModel.seedPrivateChat([
             BitchatMessage(
                 id: messageID,
                 sender: viewModel.nickname,
@@ -590,7 +590,7 @@ struct ChatViewModelNostrExtensionTests {
                 senderPeerID: viewModel.meshService.myPeerID,
                 deliveryStatus: .sent
             )
-        ]
+        ], for: convKey)
 
         let content = try ackContent(type: .delivered, messageID: messageID, senderPeerID: PeerID(str: "0123456789abcdef"))
         let giftWrap = try NostrProtocol.createPrivateMessage(
@@ -1095,7 +1095,7 @@ struct ChatViewModelMediaTransferTests {
             senderPeerID: viewModel.meshService.myPeerID,
             deliveryStatus: .sending
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
         viewModel.registerTransfer(transferId: "transfer-cancel", messageID: message.id)
 
         viewModel.cancelMediaSend(messageID: message.id)
@@ -1124,7 +1124,7 @@ struct ChatViewModelMediaTransferTests {
             senderPeerID: viewModel.meshService.myPeerID,
             deliveryStatus: .sent
         )
-        viewModel.privateChats[peerID] = [message]
+        viewModel.seedPrivateChat([message], for: peerID)
         viewModel.registerTransfer(transferId: "transfer-delete", messageID: message.id)
 
         viewModel.deleteMediaMessage(messageID: message.id)
