@@ -761,12 +761,203 @@ final class NostrRelayManagerTests: XCTestCase {
         }
         XCTAssertTrue(subscribed)
 
-        let timedOut = await waitUntil(timeout: 3.0) { eoseCount == 1 }
+        // The fallback is scheduled but has not fired yet.
+        XCTAssertEqual(context.scheduler.scheduled.first?.delay, TransportConfig.nostrSubscriptionEOSEFallbackSeconds)
+        XCTAssertEqual(eoseCount, 0)
+
+        context.scheduler.runNext()
+        let timedOut = await waitUntil { eoseCount == 1 }
         XCTAssertTrue(timedOut)
 
         try context.sessionFactory.latestConnection(for: relayURL)?.emitEOSE(subscriptionID: "timeout")
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(eoseCount, 1)
+    }
+
+    func test_eose_completesWhenRelayDisconnectsBeforeEOSE() async throws {
+        let relayOne = "wss://eose-drop-one.example"
+        let relayTwo = "wss://eose-drop-two.example"
+        let context = makeContext(permission: .denied)
+        var eoseCount = 0
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "eose-drop",
+            relayUrls: [relayOne, relayTwo],
+            handler: { _ in },
+            onEOSE: { eoseCount += 1 }
+        )
+
+        let subscribed = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayOne)?.sentStrings.count == 1 &&
+            context.sessionFactory.latestConnection(for: relayTwo)?.sentStrings.count == 1
+        }
+        XCTAssertTrue(subscribed)
+
+        try context.sessionFactory.latestConnection(for: relayOne)?.emitEOSE(subscriptionID: "eose-drop")
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(eoseCount, 0)
+
+        context.sessionFactory.latestConnection(for: relayTwo)?.fail(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+        )
+        let completed = await waitUntil { eoseCount == 1 }
+        XCTAssertTrue(completed)
+    }
+
+    func test_reconnect_replaysActiveSubscriptionsAndDeliversEvents() async throws {
+        let relayURL = "wss://replay.example"
+        let context = makeContext(permission: .denied)
+        var received: [NostrEvent] = []
+
+        context.manager.subscribe(
+            filter: makeFilter(),
+            id: "replay-sub",
+            relayUrls: [relayURL],
+            handler: { received.append($0) }
+        )
+        let subscribed = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.contains { $0.contains("replay-sub") } == true
+        }
+        XCTAssertTrue(subscribed)
+
+        // Drop the socket; the relay forgets the subscription with it.
+        context.sessionFactory.latestConnection(for: relayURL)?.fail(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)
+        )
+        let retryScheduled = await waitUntil { !context.scheduler.scheduled.isEmpty }
+        XCTAssertTrue(retryScheduled)
+        context.scheduler.runNext()
+
+        let replayed = await waitUntil {
+            let connections = context.sessionFactory.connectionsByURL[relayURL] ?? []
+            return connections.count == 2 &&
+                connections.last?.sentStrings.contains { $0.contains("replay-sub") } == true
+        }
+        XCTAssertTrue(replayed)
+
+        let event = try makeSignedEvent(content: "after reconnect")
+        try context.sessionFactory.latestConnection(for: relayURL)?.emitEventMessage(subscriptionID: "replay-sub", event: event)
+        let delivered = await waitUntil { received.count == 1 }
+        XCTAssertTrue(delivered)
+    }
+
+    func test_disconnectThenConnect_restoresSubscriptions() async {
+        let relayURL = "wss://restore.example"
+        let context = makeContext(permission: .denied)
+
+        context.manager.subscribe(filter: makeFilter(), id: "restore-sub", relayUrls: [relayURL], handler: { _ in })
+        let subscribed = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.contains { $0.contains("restore-sub") } == true
+        }
+        XCTAssertTrue(subscribed)
+
+        // Background → foreground: connections reset, subscriptions must survive.
+        context.manager.disconnect()
+        context.manager.connect()
+
+        let resubscribed = await waitUntil {
+            let connections = context.sessionFactory.connectionsByURL[relayURL] ?? []
+            return connections.count == 2 &&
+                connections.last?.sentStrings.contains { $0.contains("restore-sub") } == true
+        }
+        XCTAssertTrue(resubscribed)
+    }
+
+    func test_subscriptionSendFailure_retriesOnReconnect() async {
+        let relayURL = "wss://flaky-send.example"
+        let context = makeContext(permission: .denied)
+        context.sessionFactory.sendErrorByURL[relayURL] = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+
+        context.manager.subscribe(filter: makeFilter(), id: "flaky-sub", relayUrls: [relayURL], handler: { _ in })
+        let attempted = await waitUntil {
+            context.sessionFactory.latestConnection(for: relayURL)?.sentStrings.isEmpty == false
+        }
+        XCTAssertTrue(attempted)
+
+        // The REQ send failed; the subscription must survive for the next connection.
+        context.sessionFactory.sendErrorByURL[relayURL] = nil
+        context.sessionFactory.latestConnection(for: relayURL)?.fail(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)
+        )
+        let retryScheduled = await waitUntil { !context.scheduler.scheduled.isEmpty }
+        XCTAssertTrue(retryScheduled)
+        context.scheduler.runNext()
+
+        let resubscribed = await waitUntil {
+            let connections = context.sessionFactory.connectionsByURL[relayURL] ?? []
+            return connections.count == 2 &&
+                connections.last?.sentStrings.contains { $0.contains("flaky-sub") } == true
+        }
+        XCTAssertTrue(resubscribed)
+    }
+
+    func test_staleSendCompletionFromDeadSocket_doesNotBlockReplayOnNextConnection() async {
+        let relayURL = "wss://stale-completion.example"
+        let context = makeContext(permission: .denied)
+
+        context.manager.subscribe(filter: makeFilter(), id: "stale-sub", relayUrls: [relayURL], handler: { _ in })
+        // The connection exists synchronously; its REQ flush lands on a later
+        // main-queue tick, so deferring completions here is race-free.
+        let connectionA = context.sessionFactory.latestConnection(for: relayURL)
+        XCTAssertNotNil(connectionA)
+        connectionA?.deferSendCompletions = true
+
+        let reqSent = await waitUntil {
+            connectionA?.sentStrings.contains { $0.contains("stale-sub") } == true
+        }
+        XCTAssertTrue(reqSent)
+
+        // Socket dies while the REQ's send completion is still in flight.
+        connectionA?.fail(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost))
+        let disconnected = await waitUntil {
+            context.manager.relays.first(where: { $0.url == relayURL })?.isConnected == false
+        }
+        XCTAssertTrue(disconnected)
+
+        // The stale success completion must not mark the subscription active.
+        connectionA?.flushDeferredSendCompletions()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        context.scheduler.runNext()
+        let replayed = await waitUntil {
+            let connections = context.sessionFactory.connectionsByURL[relayURL] ?? []
+            return connections.count == 2 &&
+                connections.last?.sentStrings.contains { $0.contains("stale-sub") } == true
+        }
+        XCTAssertTrue(replayed)
+    }
+
+    func test_permanentFailure_decaysAfterCooldownAndRetries() async {
+        let relayURL = "wss://cooldown.example"
+        let context = makeContext(permission: .denied)
+        context.sessionFactory.pingErrorByURL[relayURL] = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCannotFindHost,
+            userInfo: [NSLocalizedDescriptionKey: "DNS failure"]
+        )
+
+        context.manager.ensureConnections(to: [relayURL])
+        let failed = await waitUntil {
+            context.manager.relays.first(where: { $0.url == relayURL })?.reconnectAttempts == TransportConfig.nostrRelayMaxReconnectAttempts
+        }
+        XCTAssertTrue(failed)
+
+        // Within the cooldown the relay is skipped.
+        let countBefore = context.sessionFactory.requestedURLs.count
+        context.manager.ensureConnections(to: [relayURL])
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(context.sessionFactory.requestedURLs.count, countBefore)
+
+        // After the cooldown it gets another chance and recovers.
+        context.sessionFactory.pingErrorByURL[relayURL] = nil
+        context.clock.now = context.clock.now.addingTimeInterval(TransportConfig.nostrRelayFailureCooldownSeconds + 1)
+        context.manager.ensureConnections(to: [relayURL])
+        let retried = await waitUntil {
+            context.sessionFactory.requestedURLs.count == countBefore + 1 &&
+            context.manager.relays.first(where: { $0.url == relayURL })?.isConnected == true
+        }
+        XCTAssertTrue(retried)
     }
 
     func test_receiveFailure_schedulesReconnectWithBackoff() async {
@@ -1222,9 +1413,22 @@ private final class MockRelayConnection: NostrRelayConnectionProtocol {
         cancelCallCount += 1
     }
 
+    var deferSendCompletions = false
+    private var deferredSendCompletions: [(Error?) -> Void] = []
+
     func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping (Error?) -> Void) {
         sentMessages.append(message)
-        completionHandler(sendError)
+        if deferSendCompletions {
+            deferredSendCompletions.append(completionHandler)
+        } else {
+            completionHandler(sendError)
+        }
+    }
+
+    func flushDeferredSendCompletions() {
+        let pending = deferredSendCompletions
+        deferredSendCompletions = []
+        pending.forEach { $0(sendError) }
     }
 
     func receive(completionHandler: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
