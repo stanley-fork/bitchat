@@ -90,10 +90,9 @@ private extension ChatViewModelBootstrapper {
             }
             .store(in: &viewModel.cancellables)
 
-        // Private message state now flows: store intent →
-        // `ConversationStore.changes` → `LegacyConversationStoreBridge` (and
-        // the ChatViewModel shim-cache sink), so the old `$privateChats` /
-        // `$unreadMessages` debounced synchronization sinks are gone.
+        // Private message state flows through the single-writer
+        // `ConversationStore` intents and its `changes` subject; only the
+        // selection still originates in `PrivateChatManager`.
         viewModel.privateChatManager.$selectedPeer
             .receive(on: DispatchQueue.main)
             .sink { [weak viewModel] _ in
@@ -159,7 +158,6 @@ private extension ChatViewModelBootstrapper {
                     guard let viewModel else { return }
 
                     viewModel.allPeers = peers
-                    viewModel.identityResolver.register(peers: peers)
 
                     var uniquePeers: [PeerID: BitchatPeer] = [:]
                     for peer in peers {
@@ -178,9 +176,6 @@ private extension ChatViewModelBootstrapper {
                         viewModel.updatePrivateChatPeerIfNeeded()
                     }
 
-                    // Peer registrations can change a conversation's
-                    // canonical handle in the legacy store; re-key it.
-                    viewModel.resynchronizeLegacyPrivateConversations()
                     viewModel.synchronizeConversationSelectionStore()
                 }
             }

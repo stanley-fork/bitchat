@@ -41,10 +41,7 @@ private func makeMessage(
 private func makeDirectConversationID(_ suffix: String) -> ConversationID {
     .direct(PeerHandle(
         id: "noise:\(suffix)",
-        routingPeerID: PeerID(str: "peer-\(suffix)"),
-        displayName: "peer \(suffix)",
-        noisePublicKeyHex: suffix,
-        nostrPublicKey: nil
+        routingPeerID: PeerID(str: "peer-\(suffix)")
     ))
 }
 

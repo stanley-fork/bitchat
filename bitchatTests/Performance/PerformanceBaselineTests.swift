@@ -315,14 +315,13 @@ final class PerformanceBaselineTests: XCTestCase {
     // MARK: - 6a. End-to-end private ingest pipeline (current architecture)
 
     /// Baseline for the full private-message ingest cycle through a real
-    /// `ChatViewModel`: `handlePrivateMessage` → `privateChats` passthrough →
-    /// `PrivateChatManager`'s `@Published` dict → bootstrapper Combine sink →
-    /// `Task.yield`-debounced `LegacyConversationStore.synchronizePrivateChats`
-    /// (full-dict replace) → `PrivateInboxModel.refreshMessages` (full
-    /// rebuild). Measures wall time from first ingest until the store AND the
-    /// feature model both reflect every message. The peer is not mesh-active
-    /// and no chat is selected, so notification/read-receipt side paths stay
-    /// cold (notifications are no-ops under test anyway).
+    /// `ChatViewModel`: `handlePrivateMessage` → `ConversationStore.append`
+    /// intent (ordered insert + ID-index dedup) → per-conversation publish +
+    /// `changes` emission → `PrivateInboxModel` (direct store reads).
+    /// Measures wall time from first ingest until the store AND the feature
+    /// model both reflect every message. The peer is not mesh-active and no
+    /// chat is selected, so notification/read-receipt side paths stay cold
+    /// (notifications are no-ops under test anyway).
     func testPipelinePrivateIngest() {
         let messageCount = 200
         // 64-hex (stable Noise key) peer ID: skips the short-ID consolidation
@@ -354,14 +353,14 @@ final class PerformanceBaselineTests: XCTestCase {
             for message in messages {
                 fixture.viewModel.handlePrivateMessage(message)
             }
-            // Drain the main queue until the debounced LegacyConversationStore sync
-            // ran and the PrivateInboxModel mirror caught up.
+            // Reads are synchronous against the single-writer store; the
+            // spin covers any coordinator main-actor hops.
             let consistent = spinMainRunLoop(timeout: 10) {
-                fixture.conversationStore.directMessagesByPeerID()[peerID]?.count == messageCount
-                    && fixture.privateInbox.messagesByPeerID[peerID]?.count == messageCount
+                fixture.conversations.conversationsByID[.directPeer(peerID)]?.messages.count == messageCount
+                    && fixture.privateInbox.messages(for: peerID).count == messageCount
             }
             samples.append(Date().timeIntervalSince(start))
-            XCTAssertTrue(consistent, "LegacyConversationStore/PrivateInboxModel never converged")
+            XCTAssertTrue(consistent, "ConversationStore/PrivateInboxModel never converged")
             XCTAssertEqual(fixture.viewModel.privateChats[peerID]?.count, messageCount)
         }
 
@@ -374,8 +373,8 @@ final class PerformanceBaselineTests: XCTestCase {
     /// `ChatViewModel`: `didReceivePublicMessage` (transport delegate entry,
     /// main-actor Task hop per message) → `handlePublicMessage` (rate limit,
     /// pipeline enqueue) → `PublicMessagePipeline` timer-batched flush into
-    /// the `ConversationStore` (derived `ChatViewModel.messages` view) →
-    /// coalesced `LegacyConversationStoreBridge` mirror → `PublicChatModel`.
+    /// the `ConversationStore` (derived `ChatViewModel.messages` view;
+    /// `PublicChatModel` observes the active `Conversation` directly).
     /// Measures until `messages` and the feature model reflect every message,
     /// so the pipeline's flush latency is part of the cycle. Senders are
     /// spread 4-per-peer to stay under the 5-token sender rate bucket.
@@ -419,8 +418,8 @@ final class PerformanceBaselineTests: XCTestCase {
             }
             // Drain the per-message main-actor hops and whichever surfacing
             // path wins (the pipeline's batched timer flush or the startup
-            // channel apply's `refreshVisibleMessages`, which pulls the whole
-            // timeline into `messages`), plus the PublicChatModel mirror.
+            // channel apply's `refreshVisibleMessages`); `PublicChatModel`
+            // reads the same conversation synchronously.
             let consistent = spinMainRunLoop(timeout: 10) {
                 fixture.viewModel.messages.count >= messageCount
                     && fixture.publicChat.messages.count >= messageCount
@@ -720,14 +719,14 @@ private final class PerfDeliveryContext: ChatDeliveryContext {
 
 /// A real `ChatViewModel` over `MockTransport` plus the AppRuntime-style
 /// feature models (`PrivateInboxModel` / `PublicChatModel`) bound to the same
-/// `LegacyConversationStore`, so end-to-end ingest benchmarks cover the full
-/// current store-synchronization chain. Mirrors the construction used by
+/// single-writer `ConversationStore`, so end-to-end ingest benchmarks cover
+/// the full ingest-to-feature-model chain. Mirrors the construction used by
 /// `ChatViewModelExtensionsTests`.
 @MainActor
 private final class PerfPipelineFixture {
     let viewModel: ChatViewModel
     let transport: MockTransport
-    let conversationStore: LegacyConversationStore
+    let conversations: ConversationStore
     let privateInbox: PrivateInboxModel
     let publicChat: PublicChatModel
 
@@ -736,19 +735,19 @@ private final class PerfPipelineFixture {
         let idBridge = NostrIdentityBridge(keychain: MockKeychainHelper())
         let identityManager = MockIdentityManager(keychain)
         let transport = MockTransport()
-        let conversationStore = LegacyConversationStore()
+        let conversations = ConversationStore()
 
         self.transport = transport
-        self.conversationStore = conversationStore
+        self.conversations = conversations
         self.viewModel = ChatViewModel(
             keychain: keychain,
             idBridge: idBridge,
             identityManager: identityManager,
             transport: transport,
-            conversationStore: conversationStore
+            conversations: conversations
         )
-        self.privateInbox = PrivateInboxModel(conversationStore: conversationStore)
-        self.publicChat = PublicChatModel(conversationStore: conversationStore)
+        self.privateInbox = PrivateInboxModel(conversations: conversations)
+        self.publicChat = PublicChatModel(conversations: conversations)
     }
 }
 

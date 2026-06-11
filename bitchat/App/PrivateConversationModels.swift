@@ -2,69 +2,93 @@ import BitFoundation
 import Combine
 import Foundation
 
+/// Feature model for private (direct) conversations.
+///
+/// Reads the single-writer `ConversationStore` directly: `messages(for:)`
+/// returns the peer's conversation backing array (no mirror dictionary), and
+/// the store's typed `changes` subject drives invalidation — a change in the
+/// SELECTED peer's conversation republishes this model, while appends to
+/// other private chats only surface through the unread set. Direct
+/// conversations are keyed by raw routing peer ID; the coordinators'
+/// ephemeral/stable mirroring guarantees the selected peer's key always
+/// holds the full timeline (see `ConversationID.directPeer`).
 @MainActor
 final class PrivateInboxModel: ObservableObject {
     @Published private(set) var selectedPeerID: PeerID?
     @Published private(set) var unreadPeerIDs: Set<PeerID> = []
-    @Published private(set) var messagesByPeerID: [PeerID: [BitchatMessage]] = [:]
 
-    private let conversationStore: LegacyConversationStore
+    private let conversations: ConversationStore
     private var cancellables = Set<AnyCancellable>()
 
-    init(conversationStore: LegacyConversationStore) {
-        self.conversationStore = conversationStore
+    init(conversations: ConversationStore) {
+        self.conversations = conversations
+        self.selectedPeerID = conversations.selectedPrivatePeerID
+        self.unreadPeerIDs = conversations.unreadDirectRoutingPeerIDs()
 
         bind()
-        refreshMessages()
     }
 
     func messages(for peerID: PeerID?) -> [BitchatMessage] {
         guard let peerID else { return [] }
-        return messagesByPeerID[peerID] ?? []
+        return conversations.conversationsByID[.directPeer(peerID)]?.messages ?? []
     }
 
     private func bind() {
-        conversationStore.$selectedPrivatePeerID
-            .receive(on: DispatchQueue.main)
+        conversations.$selectedPrivatePeerID
+            .dropFirst()
             .sink { [weak self] peerID in
-                self?.selectedPeerID = peerID
-                self?.refreshMessages()
+                guard let self, self.selectedPeerID != peerID else { return }
+                self.selectedPeerID = peerID
             }
             .store(in: &cancellables)
 
-        conversationStore.$unreadConversations
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.unreadPeerIDs = self?.conversationStore.unreadDirectPeerIDs() ?? []
-                self?.refreshMessages()
+        conversations.changes
+            .sink { [weak self] change in
+                self?.apply(change)
             }
             .store(in: &cancellables)
-
-        conversationStore.$messagesByConversation
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.refreshMessages()
-            }
-            .store(in: &cancellables)
-
-        selectedPeerID = conversationStore.selectedPrivatePeerID
-        unreadPeerIDs = conversationStore.unreadDirectPeerIDs()
     }
 
-    private func refreshMessages() {
-        var nextMessagesByPeerID = conversationStore.directMessagesByPeerID()
-        var peerIDs = Set(nextMessagesByPeerID.keys)
-        peerIDs.formUnion(conversationStore.unreadDirectPeerIDs())
-        if let selectedPeerID = conversationStore.selectedPrivatePeerID {
-            peerIDs.insert(selectedPeerID)
-        }
+    private func apply(_ change: ConversationChange) {
+        switch change {
+        case .appended(let id, _),
+             .updated(let id, _),
+             .statusChanged(let id, _, _),
+             .messageRemoved(let id, _),
+             .cleared(let id):
+            republishIfSelected(id)
 
-        for peerID in peerIDs where nextMessagesByPeerID[peerID] == nil {
-            nextMessagesByPeerID[peerID] = []
-        }
+        case .unreadChanged(let id, _):
+            guard isDirect(id) else { return }
+            refreshUnreadPeerIDs()
 
-        guard messagesByPeerID != nextMessagesByPeerID else { return }
-        messagesByPeerID = nextMessagesByPeerID
+        case .removed(let id):
+            guard isDirect(id) else { return }
+            refreshUnreadPeerIDs()
+            republishIfSelected(id)
+
+        case .migrated(let source, let destination):
+            guard isDirect(source) || isDirect(destination) else { return }
+            refreshUnreadPeerIDs()
+            republishIfSelected(source)
+            republishIfSelected(destination)
+        }
+    }
+
+    private func republishIfSelected(_ id: ConversationID) {
+        guard let selectedPeerID, id == .directPeer(selectedPeerID) else { return }
+        objectWillChange.send()
+    }
+
+    private func refreshUnreadPeerIDs() {
+        let next = conversations.unreadDirectRoutingPeerIDs()
+        guard unreadPeerIDs != next else { return }
+        unreadPeerIDs = next
+    }
+
+    private func isDirect(_ id: ConversationID) -> Bool {
+        if case .direct = id { return true }
+        return false
     }
 }
 
@@ -94,22 +118,22 @@ final class PrivateConversationModel: ObservableObject {
     @Published private(set) var selectedHeaderState: PrivateConversationHeaderState?
 
     private let chatViewModel: ChatViewModel
-    private let conversationStore: LegacyConversationStore
+    private let conversations: ConversationStore
     private let locationChannelsModel: LocationChannelsModel
     private let peerIdentityStore: PeerIdentityStore
     private var cancellables = Set<AnyCancellable>()
 
     init(
         chatViewModel: ChatViewModel,
-        conversationStore: LegacyConversationStore,
+        conversations: ConversationStore,
         locationChannelsModel: LocationChannelsModel? = nil,
         peerIdentityStore: PeerIdentityStore? = nil
     ) {
         self.chatViewModel = chatViewModel
-        self.conversationStore = conversationStore
+        self.conversations = conversations
         self.locationChannelsModel = locationChannelsModel ?? LocationChannelsModel()
         self.peerIdentityStore = peerIdentityStore ?? chatViewModel.peerIdentityStore
-        let initialPeerID = conversationStore.selectedPrivatePeerID
+        let initialPeerID = conversations.selectedPrivatePeerID
         self.selectedPeerID = initialPeerID
         self.selectedHeaderState = initialPeerID.flatMap { peerID in
             makeHeaderState(for: peerID)
@@ -154,7 +178,7 @@ final class PrivateConversationModel: ObservableObject {
     }
 
     private func bind() {
-        conversationStore.$selectedPrivatePeerID
+        conversations.$selectedPrivatePeerID
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refreshSelectedConversation()
@@ -198,7 +222,7 @@ final class PrivateConversationModel: ObservableObject {
     }
 
     private func refreshSelectedConversation() {
-        selectedPeerID = conversationStore.selectedPrivatePeerID
+        selectedPeerID = conversations.selectedPrivatePeerID
         selectedHeaderState = selectedPeerID.flatMap { peerID in
             makeHeaderState(for: peerID)
         }

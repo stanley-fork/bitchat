@@ -29,6 +29,10 @@ private final class MockChatLifecycleContext: ChatLifecycleContext {
     // Chat & receipt state
     var messages: [BitchatMessage] = []
     var privateChats: [PeerID: [BitchatMessage]] = [:]
+
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage] {
+        privateChats[peerID] ?? []
+    }
     var unreadPrivateMessages: Set<PeerID> = []
     var selectedPrivateChatPeer: PeerID?
     var sentReadReceipts: Set<String> = []

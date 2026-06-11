@@ -25,7 +25,6 @@ protocol ChatMediaTransferContext: AnyObject {
     func currentPublicSender() -> (name: String, peerID: PeerID)
 
     // MARK: Message state
-    var privateChats: [PeerID: [BitchatMessage]] { get }
     /// Appends a private message via the single-writer store intent.
     @discardableResult
     func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
@@ -52,7 +51,7 @@ protocol ChatMediaTransferContext: AnyObject {
 extension ChatViewModel: ChatMediaTransferContext {
     // `canSendMediaInCurrentContext`, `selectedPrivateChatPeer`, `nickname`,
     // `myPeerID`, `activeChannel`, `nicknameForPeer(_:)`,
-    // `currentPublicSender()`, `privateChats`,
+    // `currentPublicSender()`,
     // `appendPublicMessage(_:to:)`, `removeMessage(withID:cleanupFile:)`,
     // `addSystemMessage(_:)`, `notifyUIChanged()`,
     // `updateMessageDeliveryStatus(_:status:)`, `normalizedContentKey(_:)`,

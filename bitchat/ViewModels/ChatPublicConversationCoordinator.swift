@@ -51,9 +51,8 @@ protocol ChatPublicConversationContext: AnyObject {
     func queueGeohashSystemMessage(_ content: String)
 
     // MARK: Private chats (block cleanup & message removal)
-    var privateChats: [PeerID: [BitchatMessage]] { get }
     /// Removes the peer's chat entirely, including unread state
-    /// (single-writer store intent).
+    /// (single-writer store intent; no-op for unknown peers).
     func removePrivateChat(_ peerID: PeerID)
     /// Removes a message by ID from every private chat containing it,
     /// dropping chats that become empty. Returns the removed message.
@@ -102,7 +101,7 @@ protocol ChatPublicConversationContext: AnyObject {
 }
 
 extension ChatViewModel: ChatPublicConversationContext {
-    // `privateChats`, `unreadPrivateMessages`, `nostrKeyMapping`,
+    // `unreadPrivateMessages`, `nostrKeyMapping`,
     // `nickname`, `activeChannel`, `currentGeohash`, `geoNicknames`,
     // `myPeerID`, `isTeleported`, `notifyUIChanged()`,
     // `geoParticipantCount(for:)`, `isNostrBlocked(pubkeyHexLowercased:)`,
@@ -218,10 +217,8 @@ final class ChatPublicConversationCoordinator: PublicMessagePipelineDelegate {
             context.removePublicMessages(fromGeohash: gh, where: predicate)
         }
 
-        let conversationPeerID = PeerID(nostr_: hex)
-        if context.privateChats[conversationPeerID] != nil {
-            context.removePrivateChat(conversationPeerID)
-        }
+        // The store intent no-ops when no such chat exists.
+        context.removePrivateChat(PeerID(nostr_: hex))
 
         context.removeNostrKeyMappings(matchingPubkeyHexLowercased: hex)
 

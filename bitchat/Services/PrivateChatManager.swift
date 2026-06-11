@@ -14,9 +14,8 @@ import SwiftUI
 /// Manages private chat session policy (selection, read receipts,
 /// consolidation). Message storage lives in the single-writer
 /// `ConversationStore` (docs/CONVERSATION-STORE-DESIGN.md); the
-/// `privateChats` / `unreadMessages` properties below are read-only compat
-/// views derived from it (migration step 2 — the manager shrinks to
-/// read-receipt policy in step 5).
+/// `privateChats` / `unreadMessages` properties below are read-only views
+/// derived from it.
 final class PrivateChatManager: ObservableObject {
     @Published var selectedPeer: PeerID? = nil
 

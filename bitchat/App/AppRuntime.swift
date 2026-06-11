@@ -14,11 +14,9 @@ import AppKit
 final class AppRuntime: ObservableObject {
     let chatViewModel: ChatViewModel
     let events = AppEventStream()
-    let conversationStore: LegacyConversationStore
-    /// Single source of truth for conversation message state
-    /// (docs/CONVERSATION-STORE-DESIGN.md). The legacy store above keeps
-    /// feeding the feature models until step 5, mirrored from this one by
-    /// `LegacyConversationStoreBridge`.
+    /// Single source of truth for conversation message state and selection
+    /// (docs/CONVERSATION-STORE-DESIGN.md). Owned here; the feature models
+    /// and `ChatViewModel` observe and mutate it through its intent API.
     let conversations: ConversationStore
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
@@ -47,13 +45,10 @@ final class AppRuntime: ObservableObject {
         idBridge: NostrIdentityBridge = NostrIdentityBridge()
     ) {
         self.idBridge = idBridge
-        let identityResolver = IdentityResolver()
-        let conversationStore = LegacyConversationStore()
         let conversations = ConversationStore()
         let peerIdentityStore = PeerIdentityStore()
         let locationPresenceStore = LocationPresenceStore()
         let locationManager = LocationChannelManager.shared
-        self.conversationStore = conversationStore
         self.conversations = conversations
         self.peerIdentityStore = peerIdentityStore
         self.locationPresenceStore = locationPresenceStore
@@ -61,19 +56,17 @@ final class AppRuntime: ObservableObject {
             keychain: keychain,
             idBridge: idBridge,
             identityManager: SecureIdentityStateManager(keychain),
-            conversationStore: conversationStore,
             conversations: conversations,
-            identityResolver: identityResolver,
             peerIdentityStore: peerIdentityStore,
             locationPresenceStore: locationPresenceStore,
             locationManager: locationManager
         )
-        self.publicChatModel = PublicChatModel(conversationStore: conversationStore)
-        self.privateInboxModel = PrivateInboxModel(conversationStore: conversationStore)
+        self.publicChatModel = PublicChatModel(conversations: conversations)
+        self.privateInboxModel = PrivateInboxModel(conversations: conversations)
         self.locationChannelsModel = LocationChannelsModel(manager: locationManager)
         self.privateConversationModel = PrivateConversationModel(
             chatViewModel: self.chatViewModel,
-            conversationStore: conversationStore,
+            conversations: conversations,
             locationChannelsModel: self.locationChannelsModel,
             peerIdentityStore: peerIdentityStore
         )
@@ -85,11 +78,11 @@ final class AppRuntime: ObservableObject {
         self.conversationUIModel = ConversationUIModel(
             chatViewModel: self.chatViewModel,
             privateConversationModel: self.privateConversationModel,
-            conversationStore: conversationStore
+            conversations: conversations
         )
         self.peerListModel = PeerListModel(
             chatViewModel: self.chatViewModel,
-            conversationStore: conversationStore,
+            conversations: conversations,
             locationChannelsModel: self.locationChannelsModel,
             peerIdentityStore: peerIdentityStore,
             locationPresenceStore: locationPresenceStore
@@ -226,7 +219,7 @@ final class AppRuntime: ObservableObject {
         userInfo: [AnyHashable: Any]
     ) async -> UNNotificationPresentationOptions {
         if identifier.hasPrefix("private-"), let peerID = PeerID(str: userInfo["peerID"] as? String) {
-            if conversationStore.selectedPrivatePeerID == peerID {
+            if conversations.selectedPrivatePeerID == peerID {
                 return []
             }
             return [.banner, .sound]

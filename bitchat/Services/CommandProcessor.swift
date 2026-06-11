@@ -31,7 +31,6 @@ protocol CommandContextProvider: AnyObject {
     var activeChannel: ChannelID { get }
     var selectedPrivateChatPeer: PeerID? { get }
     var blockedUsers: Set<String> { get }
-    var privateChats: [PeerID: [BitchatMessage]] { get }
     var idBridge: NostrIdentityBridge { get }
 
     // MARK: - Peer Lookup

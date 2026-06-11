@@ -1,11 +1,39 @@
 # Conversation Store: Single Source of Truth
 
-**Status:** Steps 1–4 implemented (additive store, private cutover, public
-cutover, delivery via store; `PublicTimelineStore` and
-`ChatDeliveryCoordinator.messageLocationIndex` deleted). Baselines recorded in
-`bitchatTests/Performance/PerformanceBaselineTests.swift` (`pipeline.privateIngest`,
-`pipeline.publicIngest`, `store.append`, `delivery.incrementalUpdate`,
-`delivery.storeUpdate`).
+**Status: migration complete (steps 1–5).** `ConversationStore` is the sole
+holder of message state; the feature models (`PublicChatModel`,
+`PrivateInboxModel`, `PrivateConversationModel`, `PeerListModel`,
+`ConversationUIModel`) observe it directly — `PublicChatModel` observes the
+active `Conversation` object, so background appends never invalidate it.
+`LegacyConversationStore`, `LegacyConversationStoreBridge`, and
+`PublicTimelineStore` are deleted. Baselines recorded in
+`bitchatTests/Performance/PerformanceBaselineTests.swift`
+(`pipeline.privateIngest`, `pipeline.publicIngest`, `store.append`,
+`delivery.incrementalUpdate`, `delivery.storeUpdate`).
+
+Deviations from the plan below, chosen at cutover:
+
+- **No `IdentityResolver` canonicalization layer.** Direct conversations stay
+  keyed by raw routing `PeerID` (`ConversationID.directPeer`). The
+  coordinators' ephemeral↔stable mirroring/consolidation guarantees the
+  selected peer's key always holds the full timeline, and no view enumerates
+  direct conversations as a list — the legacy resolver-keyed dedup only ever
+  fed `isEmpty`-style badge checks (identity-aware unread resolution lives in
+  `ChatUnreadStateResolver`, which works on raw keys). `IdentityResolver` was
+  deleted with the legacy store; `PeerHandle` slimmed to `id` +
+  `routingPeerID`.
+- **Selection state lives in the store.** The legacy store also carried the
+  two UI selection axes (`activeChannel`, `selectedPrivatePeerID`); they
+  moved into `ConversationStore` (`setActiveChannel` /
+  `setSelectedPrivatePeer`, deriving `selectedConversationID`), and
+  `migrateConversation` hands the private-peer selection off with the
+  conversation.
+- **`ChatViewModel.messages` / `privateChats` / `unreadPrivateMessages`
+  survive as derived read-only views** (not stored properties): coordinators,
+  commands, and tests read them; the dict shape is only rebuilt where a
+  coordinator genuinely needs the whole dictionary (migration scans, unread
+  resolution). Simple per-peer reads dispatch through the store-direct
+  `privateMessages(for:)` context witness instead.
 
 ---
 
@@ -96,7 +124,7 @@ while a timer-batched `PublicMessagePipeline` mutates `messages` ~80 ms later
   is one copy, "await the sync" disappears: after `append` returns, every observer of
   that `Conversation` sees the message.
 
-## 3. Deleted at end state
+## 3. Deleted at end state (done)
 
 - `PublicTimelineStore` (`bitchat/ViewModels/PublicTimelineStore.swift`) — folded into
   `Conversation` cap/dedup policy.
@@ -113,7 +141,7 @@ while a timer-batched `PublicMessagePipeline` mutates `messages` ~80 ms later
   `PublicChatModel.messages` (they observe `Conversation` objects directly).
 - `ChatViewModel.messages` / `ChatViewModel.privateChats` as stored/owning properties.
 
-## 4. Migration plan
+## 4. Migration plan (complete)
 
 Each step lands green against the full suite plus the `PerformanceBaselineTests`
 numbers (no pipeline throughput regression at any step).

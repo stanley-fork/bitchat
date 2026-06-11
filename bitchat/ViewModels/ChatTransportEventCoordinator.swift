@@ -15,7 +15,9 @@ protocol ChatTransportEventContext: AnyObject {
     var isConnected: Bool { get set }
     var nickname: String { get }
     var myPeerID: PeerID { get }
-    var privateChats: [PeerID: [BitchatMessage]] { get }
+    /// A single private chat's timeline (store-direct lookup on
+    /// `ChatViewModel`; no `privateChats` dictionary build).
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage]
     var unreadPrivateMessages: Set<PeerID> { get }
     var selectedPrivateChatPeer: PeerID? { get set }
     /// Appends a private message via the single-writer store intent;
@@ -70,7 +72,7 @@ protocol ChatTransportEventContext: AnyObject {
 }
 
 extension ChatViewModel: ChatTransportEventContext {
-    // `isConnected`, `nickname`, `myPeerID`, `privateChats`,
+    // `isConnected`, `nickname`, `myPeerID`, `privateMessages(for:)`,
     // `unreadPrivateMessages`, `selectedPrivateChatPeer`, `notifyUIChanged()`,
     // the inbound message handlers, `isPeerBlocked(_:)`,
     // `parseMentions(from:)`, `resolveNickname(for:)`,
@@ -233,12 +235,10 @@ final class ChatTransportEventCoordinator {
                 )
             }
 
-            if let messages = context.privateChats[peerID] {
-                let receiptIDs = messages
-                    .filter { $0.senderPeerID == peerID }
-                    .map(\.id)
-                context.unmarkReadReceiptsSent(receiptIDs)
-            }
+            let receiptIDs = context.privateMessages(for: peerID)
+                .filter { $0.senderPeerID == peerID }
+                .map(\.id)
+            context.unmarkReadReceiptsSent(receiptIDs)
 
             context.notifyUIChanged()
         }
@@ -261,8 +261,9 @@ private extension ChatTransportEventCoordinator {
     ) {
         let hadUnread = context.unreadPrivateMessages.contains(shortPeerID)
 
-        if let messages = context.privateChats[shortPeerID] {
-            for message in messages {
+        let shortPeerMessages = context.privateMessages(for: shortPeerID)
+        if !shortPeerMessages.isEmpty {
+            for message in shortPeerMessages {
                 // Rewrite senderPeerID to the stable key so read receipts
                 // keep working; store append dedups by ID and keeps order.
                 let migrated = BitchatMessage(

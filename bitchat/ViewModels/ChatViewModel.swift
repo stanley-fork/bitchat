@@ -120,11 +120,13 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // MARK: - Published Properties
 
     /// Read-only derived view of the ACTIVE public channel's conversation in
-    /// the single-writer `ConversationStore` (migration step 3 shim; views
-    /// observe `Conversation` objects directly in step 5). Hot for rendering,
-    /// so the array is cached and invalidated from the store's `changes`
-    /// subject (filtered to the active conversation) and on channel switches.
-    /// `objectWillChange` fires on every store change via the sink in `init`.
+    /// the single-writer `ConversationStore`. SwiftUI renders through
+    /// `PublicChatModel` (which observes the `Conversation` object directly);
+    /// this view serves the coordinators/commands that need "the visible
+    /// timeline" plus tests. Hot enough that the array is cached and
+    /// invalidated from the store's `changes` subject (filtered to the
+    /// active conversation) and on channel switches. `objectWillChange`
+    /// fires on every store change via the sink in `init`.
     @MainActor
     var messages: [BitchatMessage] {
         if let cached = visibleMessagesCache { return cached }
@@ -180,13 +182,15 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     var connectedPeers: Set<PeerID> { unifiedPeerService.connectedPeerIDs }
     @Published var allPeers: [BitchatPeer] = []
 
-    /// Read-only compat view of all direct conversations in the new
-    /// `ConversationStore`, keyed by routing peer ID (migration step 2 shim;
-    /// views/feature models observe `Conversation` objects directly in
-    /// step 5). All mutations go through the private-chat intent ops below.
-    /// Rebuilt per access — O(#conversations) thanks to COW message arrays;
-    /// measured equal to a change-invalidated cache on
-    /// `pipeline.privateIngest`, so the simpler form wins.
+    /// Read-only derived view of all direct conversations in the
+    /// `ConversationStore`, keyed by routing peer ID. Serves the coordinator
+    /// reads that genuinely need the whole dictionary (migration scans,
+    /// unread resolution); simple per-peer reads go through
+    /// `privateMessages(for:)` instead. All mutations go through the
+    /// private-chat intent ops below. Rebuilt per access —
+    /// O(#conversations) thanks to COW message arrays; measured equal to a
+    /// change-invalidated cache on `pipeline.privateIngest`, so the simpler
+    /// form wins.
     @MainActor
     var privateChats: [PeerID: [BitchatMessage]] {
         conversations.directMessagesByRoutingPeerID()
@@ -203,9 +207,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             synchronizeConversationSelectionStore()
         }
     }
-    /// Read-only compat view of the store's unread direct conversations
-    /// (migration step 2 shim). Mutate via `markPrivateChatUnread(_:)` /
-    /// `markPrivateChatRead(_:)`.
+    /// Read-only derived view of the store's unread direct conversations.
+    /// Mutate via `markPrivateChatUnread(_:)` / `markPrivateChatRead(_:)`.
     @MainActor
     var unreadPrivateMessages: Set<PeerID> {
         conversations.unreadDirectRoutingPeerIDs()
@@ -291,15 +294,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     let meshService: Transport
     let idBridge: NostrIdentityBridge
     let identityManager: SecureIdentityStateManagerProtocol
-    let conversationStore: LegacyConversationStore
-    /// Single source of truth for conversation message state
+    /// Single source of truth for conversation message state and selection
     /// (docs/CONVERSATION-STORE-DESIGN.md). Owned by `AppRuntime` and passed
-    /// through, mirroring the legacy store's wiring.
+    /// through.
     let conversations: ConversationStore
-    /// Keeps `LegacyConversationStore` fed from `conversations` while feature
-    /// models still read Legacy (DELETE IN STEP 5).
-    private var legacyStoreBridge: LegacyConversationStoreBridge?
-    let identityResolver: IdentityResolver
     let peerIdentityStore: PeerIdentityStore
     let locationPresenceStore: LocationPresenceStore
     let locationManager: LocationChannelManager
@@ -310,12 +308,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     private let nicknameKey = "bitchat.nickname"
     // Location channel state (macOS supports manual geohash selection)
     var activeChannel: ChannelID {
-        get { conversationStore.activeChannel }
+        get { conversations.activeChannel }
         set {
-            guard conversationStore.activeChannel != newValue else { return }
-            conversationStore.setActiveChannel(newValue)
+            guard conversations.activeChannel != newValue else { return }
+            conversations.setActiveChannel(newValue)
             visibleMessagesCache = nil
-            synchronizeConversationSelectionStore()
             objectWillChange.send()
         }
     }
@@ -550,7 +547,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // The sole mutation paths for private (direct) message state. Each op
     // forwards to the single-writer `ConversationStore`
     // (docs/CONVERSATION-STORE-DESIGN.md); the read-only `privateChats` /
-    // `unreadPrivateMessages` shims above are derived from the same store.
+    // `unreadPrivateMessages` views above are derived from the same store.
 
     /// Appends a private message in timestamp order. Returns `false` when a
     /// message with the same ID is already in that chat (O(1) dedup via the
@@ -608,6 +605,14 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID) {
         conversations.migrateConversation(from: .directPeer(oldPeerID), to: .directPeer(newPeerID))
+    }
+
+    /// A single private chat's timeline, read straight from the store —
+    /// an O(1) lookup that skips the `privateChats` dictionary build. The
+    /// context protocols' simple per-peer reads dispatch here.
+    @MainActor
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage] {
+        conversations.conversationsByID[.directPeer(peerID)]?.messages ?? []
     }
 
     /// `true` when any private chat contains a message with `messageID`
@@ -724,23 +729,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         keychain: KeychainManagerProtocol,
         idBridge: NostrIdentityBridge,
         identityManager: SecureIdentityStateManagerProtocol,
-        conversationStore: LegacyConversationStore? = nil,
         conversations: ConversationStore? = nil,
-        identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
         locationManager: LocationChannelManager = .shared
     ) {
-        let conversationStore = conversationStore ?? LegacyConversationStore()
-        let identityResolver = identityResolver ?? IdentityResolver()
         self.init(
             keychain: keychain,
             idBridge: idBridge,
             identityManager: identityManager,
             transport: BLEService(keychain: keychain, idBridge: idBridge, identityManager: identityManager),
-            conversationStore: conversationStore,
             conversations: conversations,
-            identityResolver: identityResolver,
             peerIdentityStore: peerIdentityStore ?? PeerIdentityStore(),
             locationPresenceStore: locationPresenceStore ?? LocationPresenceStore(),
             locationManager: locationManager
@@ -755,16 +754,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         idBridge: NostrIdentityBridge,
         identityManager: SecureIdentityStateManagerProtocol,
         transport: Transport,
-        conversationStore: LegacyConversationStore? = nil,
         conversations: ConversationStore? = nil,
-        identityResolver: IdentityResolver? = nil,
         peerIdentityStore: PeerIdentityStore? = nil,
         locationPresenceStore: LocationPresenceStore? = nil,
         locationManager: LocationChannelManager = .shared
     ) {
-        let conversationStore = conversationStore ?? LegacyConversationStore()
         let conversations = conversations ?? ConversationStore()
-        let identityResolver = identityResolver ?? IdentityResolver()
         let peerIdentityStore = peerIdentityStore ?? PeerIdentityStore()
         let locationPresenceStore = locationPresenceStore ?? LocationPresenceStore()
         let services = ChatViewModelServiceBundle(
@@ -777,9 +772,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.keychain = keychain
         self.idBridge = idBridge
         self.identityManager = identityManager
-        self.conversationStore = conversationStore
         self.conversations = conversations
-        self.identityResolver = identityResolver
         self.peerIdentityStore = peerIdentityStore
         self.locationPresenceStore = locationPresenceStore
         self.locationManager = locationManager
@@ -793,21 +786,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.publicMessagePipeline = services.publicMessagePipeline
         self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts()
 
-        // Keep the legacy store fed from the new store until the feature
-        // models cut over (migration step 5).
-        self.legacyStoreBridge = LegacyConversationStoreBridge(
-            store: conversations,
-            legacyStore: conversationStore,
-            identityResolver: identityResolver
-        )
-
         // Republish on every store change so SwiftUI observers of the
         // view model refresh. This replaces the UI-update role of the old
         // `PrivateChatManager.@Published` dictionaries and the old
-        // `@Published var messages` (their debounced Legacy synchronization
-        // sinks are gone; the bridge above feeds Legacy instead). Changes
-        // touching the ACTIVE public conversation also invalidate the
-        // derived `messages` cache before observers re-read it.
+        // `@Published var messages`. Changes touching the ACTIVE public
+        // conversation also invalidate the derived `messages` cache before
+        // observers re-read it.
         conversations.changes
             .sink { [weak self] change in
                 guard let self else { return }
@@ -819,7 +803,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             .store(in: &cancellables)
 
         ChatViewModelBootstrapper(viewModel: self).configure()
-        initializeConversationStore()
+        synchronizeConversationSelectionStore()
     }
 
     // MARK: - Deinitialization
@@ -1156,7 +1140,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             bleService.resetIdentityForPanic(currentNickname: nickname)
         }
 
-        initializeConversationStore()
+        synchronizeConversationSelectionStore()
 
         // No need to force UserDefaults synchronization
 
@@ -1278,28 +1262,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // MARK: - Message Handling
 
-    @MainActor
-    func initializeConversationStore() {
-        conversationStore.setActiveChannel(activeChannel)
-        synchronizeConversationSelectionStore()
-    }
-
-    /// Full Legacy-store resynchronization from the new `ConversationStore`.
-    /// Needed when `IdentityResolver` learns new peer associations, which can
-    /// re-key a direct conversation's canonical handle in Legacy
-    /// (DELETE IN STEP 5 with the bridge).
-    @MainActor
-    func resynchronizeLegacyPrivateConversations() {
-        legacyStoreBridge?.resynchronizeAll()
-    }
-
+    /// Pushes the private-chat manager's selection into the store, which
+    /// derives `selectedConversationID` from it and the active channel.
     @MainActor
     func synchronizeConversationSelectionStore() {
-        conversationStore.setSelectedPeerID(
-            privateChatManager.selectedPeer,
-            activeChannel: activeChannel,
-            identityResolver: identityResolver
-        )
+        conversations.setSelectedPrivatePeer(privateChatManager.selectedPeer)
     }
 
     /// Invalidates the derived `messages` cache and notifies observers.

@@ -28,6 +28,10 @@ private final class MockChatTransportEventContext: ChatTransportEventContext {
     var nickname = "me"
     var myPeerID = PeerID(str: "0011223344556677")
     var privateChats: [PeerID: [BitchatMessage]] = [:]
+
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage] {
+        privateChats[peerID] ?? []
+    }
     var unreadPrivateMessages: Set<PeerID> = []
     var selectedPrivateChatPeer: PeerID?
     private(set) var unmarkedReadReceiptBatches: [[String]] = []

@@ -553,10 +553,7 @@ struct ChatViewModelNoisePayloadTests {
         }, timeout: TestConstants.defaultTimeout)
 
         let conversationStoreUpdated = await TestHelpers.waitUntil({
-            let messages = viewModel.conversationStore.directMessages(
-                for: peerID,
-                identityResolver: viewModel.identityResolver
-            )
+            let messages = viewModel.conversations.conversationsByID[.directPeer(peerID)]?.messages ?? []
             guard let status = messages.first?.deliveryStatus else { return false }
             if case .read = status {
                 return true

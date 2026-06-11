@@ -18,6 +18,9 @@ import Foundation
 protocol ChatPeerIdentityContext: AnyObject {
     // MARK: Conversation state
     var privateChats: [PeerID: [BitchatMessage]] { get }
+    /// A single private chat's timeline. Witnessed by the store-direct
+    /// lookup on `ChatViewModel` (no `privateChats` dictionary build).
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage]
     var unreadPrivateMessages: Set<PeerID> { get }
     /// Clears the peer's unread flag (single-writer store intent).
     func markPrivateChatRead(_ peerID: PeerID)
@@ -229,7 +232,7 @@ final class ChatPeerIdentityCoordinator {
     @MainActor
     func openMostRelevantPrivateChat() {
         let unreadSorted = context.unreadPrivateMessages
-            .map { ($0, context.privateChats[$0]?.last?.timestamp ?? Date.distantPast) }
+            .map { ($0, context.privateMessages(for: $0).last?.timestamp ?? Date.distantPast) }
             .sorted { $0.1 > $1.1 }
         if let target = unreadSorted.first?.0 {
             startPrivateChat(with: target)
@@ -563,7 +566,7 @@ private extension ChatPeerIdentityCoordinator {
     func migrateNoiseKeyUpdate(oldPeerID: PeerID, newPeerID: PeerID) {
         if context.selectedPrivateChatPeer == oldPeerID {
             SecureLogger.info("📱 Updating private chat peer ID due to key change: \(oldPeerID) -> \(newPeerID)", category: .session)
-        } else if context.privateChats[oldPeerID] != nil {
+        } else if !context.privateMessages(for: oldPeerID).isEmpty {
             SecureLogger.debug("📱 Migrating private chat messages from \(oldPeerID) to \(newPeerID)", category: .session)
         }
 
@@ -613,7 +616,7 @@ private extension ChatPeerIdentityCoordinator {
         }
 
         let currentStatus = context.favoriteRelationship(forNoiseKey: noisePublicKey)
-        let fallbackNickname = context.privateChats[peerID]?.first { $0.senderPeerID == peerID }?.sender
+        let fallbackNickname = context.privateMessages(for: peerID).first { $0.senderPeerID == peerID }?.sender
         let plan = ChatFavoriteTogglePolicy.plan(
             currentStatus: currentStatus.map(ChatFavoriteStatusSnapshot.init),
             fallbackNickname: fallbackNickname,
@@ -640,5 +643,13 @@ private extension ChatPeerIdentityCoordinator {
                 isFavorite: isFavorite
             )
         }
+    }
+}
+
+/// Default for conforming test contexts that model chats as a dictionary;
+/// `ChatViewModel` overrides with a store-direct lookup.
+extension ChatPeerIdentityContext {
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage] {
+        privateChats[peerID] ?? []
     }
 }

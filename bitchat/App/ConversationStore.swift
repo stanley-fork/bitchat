@@ -7,9 +7,9 @@
 // `ConversationID`; all mutations flow through the store's intent API and
 // every mutation emits a `ConversationChange` after state is consistent.
 //
-// During migration the previous replace-based store lives on as
-// `LegacyConversationStore` (AppArchitecture.swift) and is deleted in the
-// final migration step.
+// The store also owns conversation selection: the active public channel and
+// the selected private peer (the two UI selection axes) plus the derived
+// `selectedConversationID`.
 //
 // This is free and unencumbered software released into the public domain.
 // For more information, see <https://unlicense.org>
@@ -257,6 +257,16 @@ final class ConversationStore: ObservableObject {
     @Published private(set) var selectedConversationID: ConversationID?
     @Published private(set) var unreadConversations: Set<ConversationID> = []
 
+    // MARK: Selection state
+    // The two UI selection axes: which public channel is active, and which
+    // private chat (if any) is open on top of it. `selectedConversationID`
+    // is derived: the open private chat wins, otherwise the active public
+    // channel's conversation. Mutate via `setActiveChannel` /
+    // `setSelectedPrivatePeer` only.
+
+    @Published private(set) var activeChannel: ChannelID = .mesh
+    @Published private(set) var selectedPrivatePeerID: PeerID?
+
     private(set) var conversationsByID: [ConversationID: Conversation] = [:]
 
     /// Store-level message-ID → conversation-membership map for ID-only
@@ -391,6 +401,32 @@ final class ConversationStore: ObservableObject {
         selectedConversationID = id
     }
 
+    /// Switches the active public channel. While no private chat is open
+    /// the selection follows the channel.
+    func setActiveChannel(_ channelID: ChannelID) {
+        if activeChannel != channelID {
+            activeChannel = channelID
+        }
+        refreshDerivedSelection()
+    }
+
+    /// Opens a private chat (`nil` closes it, returning the selection to the
+    /// active public channel's conversation).
+    func setSelectedPrivatePeer(_ peerID: PeerID?) {
+        if selectedPrivatePeerID != peerID {
+            selectedPrivatePeerID = peerID
+        }
+        refreshDerivedSelection()
+    }
+
+    private func refreshDerivedSelection() {
+        if let peerID = selectedPrivatePeerID {
+            select(.directPeer(peerID))
+        } else {
+            select(ConversationID(channelID: activeChannel))
+        }
+    }
+
     /// Moves all messages from `source` into `destination` (the
     /// ephemeral↔stable peer-ID handoff): dedups by message ID, preserves
     /// timestamp order, carries unread state over, and hands off the
@@ -424,6 +460,13 @@ final class ConversationStore: ObservableObject {
         }
         if wasSelected {
             selectedConversationID = destination
+            // Keep the private-peer selection axis consistent with the
+            // handed-off selection.
+            if let peerID = selectedPrivatePeerID,
+               source == .directPeer(peerID),
+               case .direct(let destinationHandle) = destination {
+                selectedPrivatePeerID = destinationHandle.routingPeerID
+            }
         }
 
         changes.send(.migrated(from: source, to: destination))
@@ -532,32 +575,27 @@ final class ConversationStore: ObservableObject {
     }
 }
 
-// MARK: - Migration step 2 compatibility (raw per-peer keying + derived views)
+// MARK: - Direct-conversation keying + derived views
 
 extension ConversationID {
     /// Direct-conversation ID keyed by the *raw* routing peer ID.
     ///
-    /// Migration step 2 keeps one conversation per `PeerID` — exactly the
-    /// buckets the legacy `privateChats` dictionary had — so the
-    /// ephemeral/stable mirroring and consolidation coordinators keep their
-    /// current semantics. Step 5 canonicalizes direct conversations through
-    /// `IdentityResolver` and this helper goes away.
+    /// Direct conversations are deliberately keyed per `PeerID`, not per
+    /// resolved identity: the private-chat coordinators mirror messages into
+    /// both the ephemeral and stable peer's conversations
+    /// (`mirrorToEphemeralIfNeeded`) and consolidate/migrate between them
+    /// explicitly, so a raw lookup by whichever peer ID is selected always
+    /// finds the right timeline without an identity-resolution layer.
     static func directPeer(_ peerID: PeerID) -> ConversationID {
-        .direct(PeerHandle(
-            id: "peer:\(peerID.id)",
-            routingPeerID: peerID,
-            displayName: nil,
-            noisePublicKeyHex: nil,
-            nostrPublicKey: nil
-        ))
+        .direct(PeerHandle(id: "peer:\(peerID.id)", routingPeerID: peerID))
     }
 }
 
 extension ConversationStore {
     /// All direct conversations' messages keyed by routing peer ID — the
-    /// compat shape of the legacy `privateChats` dictionary. Values are the
-    /// conversations' backing arrays (COW), so building this is
-    /// O(#conversations), not O(#messages).
+    /// shape `ChatViewModel.privateChats` exposes to the coordinators.
+    /// Values are the conversations' backing arrays (COW), so building this
+    /// is O(#conversations), not O(#messages).
     func directMessagesByRoutingPeerID() -> [PeerID: [BitchatMessage]] {
         var messagesByPeerID: [PeerID: [BitchatMessage]] = [:]
         messagesByPeerID.reserveCapacity(conversationsByID.count)
@@ -568,8 +606,8 @@ extension ConversationStore {
         return messagesByPeerID
     }
 
-    /// Unread direct conversations as routing peer IDs — the compat shape of
-    /// the legacy `unreadPrivateMessages` set.
+    /// Unread direct conversations as routing peer IDs — the shape
+    /// `ChatViewModel.unreadPrivateMessages` exposes to the coordinators.
     func unreadDirectRoutingPeerIDs() -> Set<PeerID> {
         var peerIDs = Set<PeerID>()
         for id in unreadConversations {
@@ -611,13 +649,11 @@ extension ConversationStore {
     }
 }
 
-// MARK: - Migration step 3 compatibility (public timeline derived views)
+// MARK: - Public timeline derived views
 
 extension ConversationStore {
     /// Removes a message by ID from whichever public (mesh/geohash)
-    /// conversation contains it — the compat shape of the legacy
-    /// `PublicTimelineStore.removeMessage(withID:)`. Returns the removed
-    /// message, if any.
+    /// conversation contains it. Returns the removed message, if any.
     @discardableResult
     func removePublicMessage(withID messageID: String) -> BitchatMessage? {
         for id in conversationIDs(forMessageID: messageID) {

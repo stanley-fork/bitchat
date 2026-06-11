@@ -15,6 +15,9 @@ import Foundation
 protocol ChatPrivateConversationContext: AnyObject {
     // MARK: Conversation state
     var privateChats: [PeerID: [BitchatMessage]] { get }
+    /// A single private chat's timeline. Witnessed by the store-direct
+    /// lookup on `ChatViewModel` (no `privateChats` dictionary build).
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage]
     var sentReadReceipts: Set<String> { get }
     var unreadPrivateMessages: Set<PeerID> { get }
     var selectedPrivateChatPeer: PeerID? { get }
@@ -588,8 +591,8 @@ final class ChatPrivateConversationCoordinator {
 
         if peerID.id.count == 16, let peerNoiseKey = context.noisePublicKey(for: peerID) {
             let stableKeyHex = PeerID(hexData: peerNoiseKey)
+            let nostrMessages = context.privateMessages(for: stableKeyHex)
             if stableKeyHex != peerID,
-               let nostrMessages = context.privateChats[stableKeyHex],
                !nostrMessages.isEmpty {
                 // Store migration dedups by ID, keeps timestamp order, and
                 // removes the stable-key chat.
@@ -767,7 +770,7 @@ final class ChatPrivateConversationCoordinator {
     func migratePrivateChatsIfNeeded(for peerID: PeerID, senderNickname: String) {
         let currentFingerprint = context.getFingerprint(for: peerID)
 
-        if context.privateChats[peerID] == nil || context.privateChats[peerID]?.isEmpty == true {
+        if context.privateMessages(for: peerID).isEmpty {
             // Chats migrated wholesale go through the store's
             // `migrateConversation` intent; partially-migrated chats keep
             // their non-recent tail, so the recent messages are copied in
@@ -874,5 +877,13 @@ final class ChatPrivateConversationCoordinator {
             }
         }
         return false
+    }
+}
+
+/// Default for conforming test contexts that model chats as a dictionary;
+/// `ChatViewModel` overrides with a store-direct lookup.
+extension ChatPrivateConversationContext {
+    func privateMessages(for peerID: PeerID) -> [BitchatMessage] {
+        privateChats[peerID] ?? []
     }
 }
