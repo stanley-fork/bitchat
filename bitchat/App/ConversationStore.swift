@@ -135,6 +135,17 @@ final class Conversation: ObservableObject, Identifiable {
         return true
     }
 
+    /// Republishes a message without changing state. Used for mirrored
+    /// copies that share a BitchatMessage instance: the first conversation's
+    /// status apply mutated the shared object, so this conversation's
+    /// observers still need an @Published emission to re-render.
+    @discardableResult
+    fileprivate func republishMessage(withID messageID: String) -> Bool {
+        guard let index = indexByMessageID[messageID] else { return false }
+        messages[index] = messages[index]
+        return true
+    }
+
     @discardableResult
     fileprivate func setUnread(_ unread: Bool) -> Bool {
         guard isUnread != unread else { return false }
@@ -345,17 +356,32 @@ final class ConversationStore: ObservableObject {
     /// downgrade — read beats delivered beats sent).
     ///
     /// `BitchatMessage` is a reference type, so mirrored copies sharing one
-    /// instance are updated by the first apply; subsequent conversations
-    /// skip as already-equal (state stays correct everywhere, the
-    /// `.statusChanged` event fires for the conversation that applied).
+    /// instance are mutated by the first conversation's apply. The skipped
+    /// conversations still hold the changed message, so they get an explicit
+    /// republish and `.statusChanged` event - otherwise a view observing the
+    /// mirrored conversation would render stale status. Distinct copies whose
+    /// update was genuinely rejected (downgrade) are left untouched, guarded
+    /// by status equality.
     @discardableResult
     func setDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String) -> Bool {
         guard let ids = conversationIDsByMessageID[messageID] else { return false }
         var applied = false
-        for id in ids where setDeliveryStatus(status, forMessageID: messageID, in: id) {
-            applied = true
+        var skipped: [ConversationID] = []
+        for id in ids {
+            if setDeliveryStatus(status, forMessageID: messageID, in: id) {
+                applied = true
+            } else {
+                skipped.append(id)
+            }
         }
-        return applied
+        guard applied else { return false }
+        for id in skipped {
+            guard let conversation = conversationsByID[id],
+                  conversation.message(withID: messageID)?.deliveryStatus == status,
+                  conversation.republishMessage(withID: messageID) else { continue }
+            changes.send(.statusChanged(id, messageID: messageID, status))
+        }
+        return true
     }
 
     /// Current delivery status of `messageID` in whichever conversation

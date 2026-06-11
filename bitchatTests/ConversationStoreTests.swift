@@ -714,4 +714,44 @@ struct ConversationStoreTests {
             }
         }
     }
+
+    @Test("mirrored conversations both republish and emit on a shared-instance status change")
+    @MainActor
+    func sharedInstanceMirroredCopiesBothRepublishOnStatusChange() {
+        let store = ConversationStore()
+        let stable = makeDirectConversationID("stable")
+        let ephemeral = makeDirectConversationID("ephemeral")
+        let message = makeMessage(id: "dm-2", timestamp: 1, isPrivate: true, deliveryStatus: .sent)
+        store.upsertByID(message, in: stable)
+        store.upsertByID(message, in: ephemeral)
+
+        var cancellables = Set<AnyCancellable>()
+        var publishedIDs: [ConversationID] = []
+        for id in [stable, ephemeral] {
+            store.conversation(for: id).objectWillChange
+                .sink { publishedIDs.append(id) }
+                .store(in: &cancellables)
+        }
+        var statusChangedIDs: [ConversationID] = []
+        store.changes
+            .sink { change in
+                if case .statusChanged(let id, "dm-2", _) = change { statusChangedIDs.append(id) }
+            }
+            .store(in: &cancellables)
+
+        let read = DeliveryStatus.read(by: "bob", at: Date())
+        #expect(store.setDeliveryStatus(read, forMessageID: "dm-2"))
+
+        // The shared instance is mutated once, but a view observing EITHER
+        // conversation must re-render, and both emit a change event.
+        #expect(Set(publishedIDs) == Set([stable, ephemeral]))
+        #expect(Set(statusChangedIDs) == Set([stable, ephemeral]))
+
+        // A duplicate ack applies nowhere and must publish nothing.
+        publishedIDs.removeAll()
+        statusChangedIDs.removeAll()
+        #expect(!store.setDeliveryStatus(read, forMessageID: "dm-2"))
+        #expect(publishedIDs.isEmpty)
+        #expect(statusChangedIDs.isEmpty)
+    }
 }
