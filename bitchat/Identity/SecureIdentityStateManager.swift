@@ -151,13 +151,12 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     // Thread safety
     private let queue = DispatchQueue(label: "bitchat.identity.state", attributes: .concurrent)
     
-    // Debouncing for keychain saves.
-    // A DispatchSourceTimer on `queue` is used rather than Timer.scheduledTimer:
-    // saves are scheduled from inside `queue.async(flags: .barrier)` blocks that
-    // run on GCD worker threads, which have no active run loop, so a
-    // Timer.scheduledTimer there would never fire.
-    private var saveTimer: DispatchSourceTimer?
-    private let saveDebounceInterval: TimeInterval = 2.0  // Save at most once every 2 seconds
+    // Pending-save coalescing flag. Reads/writes are serialized on `queue`.
+    // Persistence is done with a fire-and-forget `queue.async(.barrier)` rather
+    // than a retained DispatchSourceTimer: a lingering, never-cancelled timer
+    // keeps the dispatch machinery alive and prevents the unit-test process from
+    // exiting. (The original code used Timer.scheduledTimer on a GCD queue with
+    // no run loop, so saves never actually fired.)
     private var pendingSave = false
 
     // Encryption key
@@ -242,42 +241,13 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
         }
     }
     
-    /// True in unit-test bundles. Used to persist synchronously instead of
-    /// scheduling a debounce timer — a lingering DispatchSourceTimer keeps the
-    /// dispatch run loop alive and prevents the test process from exiting.
-    private static var isRunningTests: Bool {
-        let env = ProcessInfo.processInfo.environment
-        return NSClassFromString("XCTestCase") != nil ||
-            env["XCTestConfigurationFilePath"] != nil ||
-            env["XCTestBundlePath"] != nil
-    }
-
-    /// Schedules a debounced save. Always invoked on `queue` under a barrier, so
-    /// the timer/pendingSave bookkeeping is serialized with all other state.
+    /// Persists the cache. Always invoked on `queue` under a barrier (its callers
+    /// run inside `queue.async(.barrier)`), so it simply marks the cache dirty
+    /// and persists it on the same serialized context — no timer, nothing left
+    /// scheduled to keep the process alive.
     private func saveIdentityCache() {
-        // Mark that we need to save
         pendingSave = true
-
-        // Under tests, persist immediately (already on `queue` under a barrier)
-        // rather than leaving a pending timer that blocks process exit.
-        if Self.isRunningTests {
-            performSave()
-            return
-        }
-
-        // Cancel any pending timer and schedule a fresh one on `queue`.
-        saveTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + saveDebounceInterval)
-        timer.setEventHandler { [weak self] in
-            // Hop to a barrier so performSave reads/writes state exclusively.
-            // Capture self weakly here too: a strong capture would let the object
-            // deallocate on `queue` when this block drops the last reference,
-            // sending deinit -> forceSave through a sync-on-self deadlock.
-            self?.queue.async(flags: .barrier) { [weak self] in self?.performSave() }
-        }
-        saveTimer = timer
-        timer.resume()
+        performSave()
     }
 
     /// Writes the cache to the keychain. Must run on `queue` with exclusive
@@ -305,15 +275,13 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
         }
     }
 
-    // Force immediate save (for app termination / lifecycle events). Runs the
-    // write directly on the caller's thread — deliberately NOT a
-    // `queue.sync(barrier)`: forceSave is reachable from `deinit` and from
-    // async tests on the swift-concurrency cooperative pool, and a blocking
-    // barrier-sync there can starve/deadlock the pool. Cancelling the debounce
-    // timer first prevents a concurrent timer-driven save.
+    // Force immediate save (for app termination / lifecycle events). Mutations
+    // already persist synchronously via saveIdentityCache, so this is normally a
+    // no-op (performSave early-returns when nothing is pending). Runs directly on
+    // the caller's thread — deliberately NOT a `queue.sync(barrier)`, which is
+    // reachable from `deinit` and from async tests on the swift-concurrency
+    // cooperative pool where a blocking barrier-sync can starve/deadlock it.
     func forceSave() {
-        saveTimer?.cancel()
-        saveTimer = nil
         performSave()
     }
     
