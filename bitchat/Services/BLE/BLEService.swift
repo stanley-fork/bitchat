@@ -135,6 +135,11 @@ final class BLEService: NSObject {
     
     private var maintenanceTimer: DispatchSourceTimer?  // Single timer for all maintenance tasks
     private var maintenanceCounter = 0  // Track maintenance cycles
+    /// Whether real CoreBluetooth managers were initialized. When false (unit
+    /// tests), the periodic maintenance timer is not started: it only drains BLE
+    /// writes/notifications and re-announces, which is meaningless without
+    /// Bluetooth and would otherwise run its cross-queue work in-process.
+    private var maintenanceTimerEnabled = false
 
     // MARK: - Connection budget & scheduling (central role)
     private var connectionScheduler = BLEConnectionScheduler<CBPeripheral>()
@@ -233,7 +238,9 @@ final class BLEService: NSObject {
             #endif
         }
         
-        // Single maintenance timer for all periodic tasks (dispatch-based for determinism)
+        // Single maintenance timer for all periodic tasks (dispatch-based for
+        // determinism). Only run it when real Bluetooth managers exist.
+        maintenanceTimerEnabled = initializeBluetoothManagers
         startMaintenanceTimer()
 
         // Publish initial empty state
@@ -432,7 +439,7 @@ final class BLEService: NSObject {
     /// `startServices()` — the latter matters after a panic reset, where
     /// `stopServices()` cancels and nils the timer.
     private func startMaintenanceTimer() {
-        guard maintenanceTimer == nil else { return }
+        guard maintenanceTimerEnabled, maintenanceTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: bleQueue)
         timer.schedule(deadline: .now() + TransportConfig.bleMaintenanceInterval,
                        repeating: TransportConfig.bleMaintenanceInterval,
@@ -1616,7 +1623,7 @@ private extension BLEService {
 #if DEBUG
 // Test-only helper to inject packets into the receive pipeline
 extension BLEService {
-    func _test_handlePacket(_ packet: BitchatPacket, fromPeerID: PeerID, preseedPeer: Bool = true) {
+    func _test_handlePacket(_ packet: BitchatPacket, fromPeerID: PeerID, preseedPeer: Bool = true, signingPublicKey: Data? = nil) {
         if preseedPeer {
             // Ensure the synthetic peer is known and marked verified for public-message tests
             let normalizedID = PeerID(hexData: packet.senderID)
@@ -1624,6 +1631,7 @@ extension BLEService {
                 if var existing = peerRegistry.info(for: normalizedID) {
                     existing.isConnected = true
                     existing.isVerifiedNickname = true
+                    if let signingPublicKey { existing.signingPublicKey = signingPublicKey }
                     existing.lastSeen = Date()
                     peerRegistry.upsert(existing)
                 } else {
@@ -1632,7 +1640,7 @@ extension BLEService {
                         nickname: "TestPeer_\(fromPeerID.id.prefix(4))",
                         isConnected: true,
                         noisePublicKey: packet.senderID,
-                        signingPublicKey: nil,
+                        signingPublicKey: signingPublicKey,
                         isVerifiedNickname: true,
                         lastSeen: Date()
                     ))
