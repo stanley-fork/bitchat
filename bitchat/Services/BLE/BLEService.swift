@@ -234,15 +234,7 @@ final class BLEService: NSObject {
         }
         
         // Single maintenance timer for all periodic tasks (dispatch-based for determinism)
-        let timer = DispatchSource.makeTimerSource(queue: bleQueue)
-        timer.schedule(deadline: .now() + TransportConfig.bleMaintenanceInterval,
-                       repeating: TransportConfig.bleMaintenanceInterval,
-                       leeway: .seconds(TransportConfig.bleMaintenanceLeewaySeconds))
-        timer.setEventHandler { [weak self] in
-            self?.performMaintenance()
-        }
-        timer.resume()
-        maintenanceTimer = timer
+        startMaintenanceTimer()
 
         // Publish initial empty state
         requestPeerDataPublish()
@@ -435,7 +427,29 @@ final class BLEService: NSObject {
     
     // MARK: Lifecycle
     
+    /// Creates and starts the periodic maintenance timer if it is not already
+    /// running. Idempotent so it can be called from both `init` and
+    /// `startServices()` — the latter matters after a panic reset, where
+    /// `stopServices()` cancels and nils the timer.
+    private func startMaintenanceTimer() {
+        guard maintenanceTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: bleQueue)
+        timer.schedule(deadline: .now() + TransportConfig.bleMaintenanceInterval,
+                       repeating: TransportConfig.bleMaintenanceInterval,
+                       leeway: .seconds(TransportConfig.bleMaintenanceLeewaySeconds))
+        timer.setEventHandler { [weak self] in
+            self?.performMaintenance()
+        }
+        timer.resume()
+        maintenanceTimer = timer
+    }
+
     func startServices() {
+        // Restart the maintenance timer if a prior stopServices() cancelled it
+        // (e.g. the panic flow), otherwise periodic announces, peer reconciliation
+        // and cache cleanup would never resume until app restart.
+        startMaintenanceTimer()
+
         // Start BLE services if not already running
         if centralManager?.state == .poweredOn {
             centralManager?.scanForPeripherals(

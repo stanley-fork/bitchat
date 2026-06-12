@@ -1129,6 +1129,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         userDefaults.removeObject(forKey: "bitchat.noiseIdentityKey")
         userDefaults.removeObject(forKey: "bitchat.messageRetentionKey")
 
+        // Wipe persisted location state (selected channel, teleport set,
+        // bookmarks). For an activist-safety wipe, where the user has been is
+        // exactly the data an adversary inspecting the device wants.
+        LocationStateManager.shared.panicWipe()
+
         // Reset nickname to anonymous
         nickname = "anon\(Int.random(in: 1000...9999))"
         saveNickname()
@@ -1180,8 +1185,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
             // Small delay to ensure cleanup completes
             try? await Task.sleep(nanoseconds: TransportConfig.uiAsyncShortSleepNs) // 0.1 seconds
 
-            // Reinitialize Nostr relay manager with new identity
-            nostrRelayManager = NostrRelayManager()
+            // Reinitialize Nostr relay manager with new identity. Reuse the
+            // shared singleton — every other component (NostrTransport, geohash
+            // subscriptions, AppRuntime observers) is bound to `.shared`, so
+            // creating a fresh instance here would split relay state and leave
+            // sends running against a disconnected manager.
+            nostrRelayManager = NostrRelayManager.shared
             setupNostrMessageHandling()
             nostrRelayManager?.connect()
         }

@@ -59,13 +59,17 @@ struct BLEPublicMessageHandlerTests {
         let now = Date(timeIntervalSince1970: 1_000)
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        // A valid packet signature is required even for a registry-verified peer:
+        // senderID is spoofable, so registry membership alone is not authentication.
+        recorder.signedName = "SignedAlice"
         let handler = makeHandler(recorder: recorder, now: now)
         let packet = makeMessagePacket(sender: remotePeerID, content: "hello mesh", timestamp: timestamp(now))
 
         handler.handle(packet, from: remotePeerID)
 
         #expect(recorder.peersSnapshotReads == 1)
-        #expect(recorder.signedNameQueries.isEmpty)
+        // Signature is verified, then the registry's collision-resolved name is preferred.
+        #expect(recorder.signedNameQueries == [remotePeerID])
         #expect(recorder.trackedPackets.count == 1)
         #expect(recorder.selfBroadcastTakes.isEmpty)
         #expect(recorder.deliveries.count == 1)
@@ -154,6 +158,7 @@ struct BLEPublicMessageHandlerTests {
         let now = Date(timeIntervalSince1970: 1_000)
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        recorder.signedName = "SignedAlice"
         let handler = makeHandler(recorder: recorder, now: now)
         let packet = makeMessagePacket(sender: remotePeerID, payload: Data([0xFF, 0xFE, 0xFD]), timestamp: timestamp(now))
 
@@ -187,6 +192,7 @@ struct BLEPublicMessageHandlerTests {
         let now = Date(timeIntervalSince1970: 1_000)
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        recorder.signedName = "SignedAlice"
         let handler = makeHandler(recorder: recorder, now: now)
         let packet = makeMessagePacket(
             sender: remotePeerID,

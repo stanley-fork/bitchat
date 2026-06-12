@@ -68,14 +68,29 @@ final class BLEPublicMessageHandler {
         // Snapshot peers to avoid concurrent mutation while iterating during nickname collision checks.
         let peersSnapshot = env.peersSnapshot()
 
+        // Public messages are always signed by their sender. `senderID` is
+        // attacker-controlled, so registry membership alone is NOT proof of
+        // identity — a peer in the registry as "verified" could be impersonated
+        // by anyone spoofing their senderID. Require a valid packet signature
+        // from the claimed sender (our own echoes are exempt; they are matched
+        // by self-broadcast tracking below).
+        let isSelf = peerID == env.localPeerID()
+        let signedDisplayName = isSelf ? nil : env.signedSenderDisplayName(packet, peerID)
+        guard isSelf || signedDisplayName != nil else {
+            SecureLogger.warning("🚫 Dropping public message with missing/invalid signature for claimed sender \(peerID.id.prefix(8))…", category: .security)
+            return
+        }
+
+        // Authenticity is established; prefer the registry's collision-resolved
+        // display name, then the signature-derived name.
         guard let senderNickname = BLEPeerSenderDisplayName.resolveKnownPeer(
             peerID: peerID,
             localPeerID: env.localPeerID(),
             localNickname: env.localNickname(),
             peers: peersSnapshot,
             allowConnectedUnverified: false
-        ) ?? env.signedSenderDisplayName(packet, peerID) else {
-            SecureLogger.warning("🚫 Dropping public message from unverified or unknown peer \(peerID.id.prefix(8))…", category: .security)
+        ) ?? signedDisplayName else {
+            SecureLogger.warning("🚫 Dropping public message from unknown peer \(peerID.id.prefix(8))…", category: .security)
             return
         }
 
