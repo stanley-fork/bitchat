@@ -150,6 +150,10 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     
     // Thread safety
     private let queue = DispatchQueue(label: "bitchat.identity.state", attributes: .concurrent)
+    /// Marks `queue` so `forceSave()` can detect when it is already executing on
+    /// it (e.g. when `deinit` is triggered from inside a queue block) and run
+    /// directly instead of `queue.sync`-ing onto itself, which would deadlock.
+    private static let queueSpecificKey = DispatchSpecificKey<UInt8>()
     
     // Debouncing for keychain saves.
     // A DispatchSourceTimer on `queue` is used rather than Timer.scheduledTimer:
@@ -170,7 +174,8 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     
     init(_ keychain: KeychainManagerProtocol) {
         self.keychain = keychain
-        
+        queue.setSpecific(key: Self.queueSpecificKey, value: 1)
+
         // Retrieve (or, only on genuine first run, generate) the cache
         // encryption key. We MUST distinguish "key doesn't exist yet" from a
         // transient failure (device locked / access denied): the legacy
@@ -253,9 +258,11 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + saveDebounceInterval)
         timer.setEventHandler { [weak self] in
-            guard let self else { return }
             // Hop to a barrier so performSave reads/writes state exclusively.
-            self.queue.async(flags: .barrier) { self.performSave() }
+            // Capture self weakly here too: a strong capture would let the object
+            // deallocate on `queue` when this block drops the last reference,
+            // sending deinit -> forceSave through a sync-on-self deadlock.
+            self?.queue.async(flags: .barrier) { [weak self] in self?.performSave() }
         }
         saveTimer = timer
         timer.resume()
@@ -289,10 +296,17 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     // Force immediate save (for app termination). Runs synchronously on `queue`
     // so the write completes before the caller proceeds (e.g. app exit).
     func forceSave() {
-        queue.sync(flags: .barrier) {
+        let work = {
             self.saveTimer?.cancel()
             self.saveTimer = nil
             self.performSave()
+        }
+        // If we are already on `queue` (e.g. deinit fired from inside a queue
+        // block), run directly — `queue.sync` onto the current queue deadlocks.
+        if DispatchQueue.getSpecific(key: Self.queueSpecificKey) != nil {
+            work()
+        } else {
+            queue.sync(flags: .barrier, execute: work)
         }
     }
     
