@@ -8,10 +8,12 @@ struct BLEPublicMessageHandlerTests {
         var localNickname = "Me"
         var peers: [PeerID: BLEPeerInfo] = [:]
         var signedName: String?
+        var verifyPacketSignatureResult = false
         var linkState: (hasPeripheral: Bool, hasCentral: Bool) = (false, false)
         var selfBroadcastMessageID: String?
 
         var peersSnapshotReads = 0
+        var verifyPacketSignatureQueries: [PeerID] = []
         var signedNameQueries: [PeerID] = []
         var trackedPackets: [BitchatPacket] = []
         var selfBroadcastTakes: [BitchatPacket] = []
@@ -34,6 +36,10 @@ struct BLEPublicMessageHandlerTests {
             peersSnapshot: {
                 recorder.peersSnapshotReads += 1
                 return recorder.peers
+            },
+            verifyPacketSignature: { packet, _ in
+                recorder.verifyPacketSignatureQueries.append(PeerID(hexData: packet.senderID))
+                return recorder.verifyPacketSignatureResult
             },
             signedSenderDisplayName: { _, peerID in
                 recorder.signedNameQueries.append(peerID)
@@ -138,6 +144,63 @@ struct BLEPublicMessageHandlerTests {
     }
 
     @Test
+    func registryVerifiedPeerDeliveredBeforeIdentityCachePersists() {
+        // A freshly verified announce updates the peer registry synchronously,
+        // but identity-cache persistence is async. A message arriving in that
+        // window has a valid signature and a registry signing key, yet the
+        // persisted-identity lookup (signedName) would still return nil. It must
+        // be verified against the registry key and delivered, not dropped.
+        let now = Date(timeIntervalSince1970: 1_000)
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(
+            remotePeerID,
+            nickname: "Alice",
+            isVerified: true,
+            signingPublicKey: Data(repeating: 0xAB, count: 32)
+        )]
+        recorder.verifyPacketSignatureResult = true
+        recorder.signedName = nil
+        let handler = makeHandler(recorder: recorder, now: now)
+        let packet = makeMessagePacket(sender: remotePeerID, content: "first msg", timestamp: timestamp(now))
+
+        handler.handle(packet, from: remotePeerID)
+
+        #expect(recorder.verifyPacketSignatureQueries == [remotePeerID])
+        // Verified via the registry key, so no fallback to the persisted lookup.
+        #expect(recorder.signedNameQueries.isEmpty)
+        #expect(recorder.trackedPackets.count == 1)
+        #expect(recorder.deliveries.count == 1)
+        #expect(recorder.deliveries.first?.nickname == "Alice")
+        #expect(recorder.deliveries.first?.content == "first msg")
+    }
+
+    @Test
+    func registryPeerWithInvalidSignatureFallsBackAndDrops() {
+        // Spoofed senderID: the peer is in the registry with a signing key, but
+        // the packet signature does not verify against it. The handler must fall
+        // back to the persisted lookup and, finding nothing, drop the message.
+        let now = Date(timeIntervalSince1970: 1_000)
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(
+            remotePeerID,
+            nickname: "Alice",
+            isVerified: true,
+            signingPublicKey: Data(repeating: 0xAB, count: 32)
+        )]
+        recorder.verifyPacketSignatureResult = false
+        recorder.signedName = nil
+        let handler = makeHandler(recorder: recorder, now: now)
+        let packet = makeMessagePacket(sender: remotePeerID, content: "spoofed", timestamp: timestamp(now))
+
+        handler.handle(packet, from: remotePeerID)
+
+        #expect(recorder.verifyPacketSignatureQueries == [remotePeerID])
+        #expect(recorder.signedNameQueries == [remotePeerID])
+        #expect(recorder.trackedPackets.isEmpty)
+        #expect(recorder.deliveries.isEmpty)
+    }
+
+    @Test
     func signedSenderFallbackDeliversWithSignedName() {
         let now = Date(timeIntervalSince1970: 1_000)
         let recorder = Recorder()
@@ -219,14 +282,15 @@ struct BLEPublicMessageHandlerTests {
         _ peerID: PeerID,
         nickname: String,
         isVerified: Bool,
-        isConnected: Bool = true
+        isConnected: Bool = true,
+        signingPublicKey: Data? = nil
     ) -> BLEPeerInfo {
         BLEPeerInfo(
             peerID: peerID,
             nickname: nickname,
             isConnected: isConnected,
             noisePublicKey: nil,
-            signingPublicKey: nil,
+            signingPublicKey: signingPublicKey,
             isVerifiedNickname: isVerified,
             lastSeen: Date(timeIntervalSince1970: 999)
         )

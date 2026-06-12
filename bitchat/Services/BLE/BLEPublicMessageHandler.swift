@@ -16,6 +16,8 @@ struct BLEPublicMessageHandlerEnvironment {
     let now: () -> Date
     /// Snapshot of known peers keyed by ID (registry read).
     let peersSnapshot: () -> [PeerID: BLEPeerInfo]
+    /// Verifies a packet's signature against a known signing public key.
+    let verifyPacketSignature: (_ packet: BitchatPacket, _ signingPublicKey: Data) -> Bool
     /// Resolves a display name from a verified packet signature for peers missing from the registry.
     let signedSenderDisplayName: (_ packet: BitchatPacket, _ peerID: PeerID) -> String?
     /// Tracks the broadcast message packet for gossip sync.
@@ -74,9 +76,19 @@ final class BLEPublicMessageHandler {
         // by anyone spoofing their senderID. Require a valid packet signature
         // from the claimed sender (our own echoes are exempt; they are matched
         // by self-broadcast tracking below).
+        //
+        // Verify against the signing key already in the (synchronously-updated)
+        // peer registry first: identity-cache persistence is asynchronous, so a
+        // message arriving right after a verified announce would otherwise be
+        // dropped because `signedSenderDisplayName` only searches the persisted
+        // cache. Fall back to that persisted-identity lookup for peers not (yet)
+        // in the registry.
         let isSelf = peerID == env.localPeerID()
-        let signedDisplayName = isSelf ? nil : env.signedSenderDisplayName(packet, peerID)
-        guard isSelf || signedDisplayName != nil else {
+        let registrySigningKey = peersSnapshot[peerID]?.signingPublicKey
+        let verifiedViaRegistry = !isSelf
+            && (registrySigningKey.map { env.verifyPacketSignature(packet, $0) } ?? false)
+        let signedDisplayName = (isSelf || verifiedViaRegistry) ? nil : env.signedSenderDisplayName(packet, peerID)
+        guard isSelf || verifiedViaRegistry || signedDisplayName != nil else {
             SecureLogger.warning("🚫 Dropping public message with missing/invalid signature for claimed sender \(peerID.id.prefix(8))…", category: .security)
             return
         }
