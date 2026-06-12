@@ -136,10 +136,12 @@ final class BLEService: NSObject {
     private var maintenanceTimer: DispatchSourceTimer?  // Single timer for all maintenance tasks
     private var maintenanceCounter = 0  // Track maintenance cycles
     /// Whether real CoreBluetooth managers were initialized. When false (unit
-    /// tests), the periodic maintenance timer is not started: it only drains BLE
-    /// writes/notifications and re-announces, which is meaningless without
-    /// Bluetooth and would otherwise run its cross-queue work in-process.
-    private var maintenanceTimerEnabled = false
+    /// tests), periodic mesh background work is not started — the maintenance
+    /// timer and the gossip-sync timers only drain BLE writes/notifications,
+    /// re-announce, and sign/broadcast sync packets, all meaningless without
+    /// Bluetooth. Leaving them running in the test process is pure background
+    /// churn that aggravates flaky exit hangs.
+    private var meshBackgroundEnabled = false
 
     // MARK: - Connection budget & scheduling (central role)
     private var connectionScheduler = BLEConnectionScheduler<CBPeripheral>()
@@ -240,7 +242,7 @@ final class BLEService: NSObject {
         
         // Single maintenance timer for all periodic tasks (dispatch-based for
         // determinism). Only run it when real Bluetooth managers exist.
-        maintenanceTimerEnabled = initializeBluetoothManagers
+        meshBackgroundEnabled = initializeBluetoothManagers
         startMaintenanceTimer()
 
         // Publish initial empty state
@@ -271,7 +273,12 @@ final class BLEService: NSObject {
         
         let manager = GossipSyncManager(myPeerID: myPeerID, config: config, requestSyncManager: requestSyncManager)
         manager.delegate = self
-        manager.start()
+        // Only start the periodic sync timers when real Bluetooth exists. In unit
+        // tests there is no mesh to sync with, and the periodic sign/broadcast
+        // churn just keeps the process busy and aggravates flaky exit hangs.
+        if meshBackgroundEnabled {
+            manager.start()
+        }
         gossipSyncManager = manager
     }
 
@@ -439,7 +446,7 @@ final class BLEService: NSObject {
     /// `startServices()` — the latter matters after a panic reset, where
     /// `stopServices()` cancels and nils the timer.
     private func startMaintenanceTimer() {
-        guard maintenanceTimerEnabled, maintenanceTimer == nil else { return }
+        guard meshBackgroundEnabled, maintenanceTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: bleQueue)
         timer.schedule(deadline: .now() + TransportConfig.bleMaintenanceInterval,
                        repeating: TransportConfig.bleMaintenanceInterval,

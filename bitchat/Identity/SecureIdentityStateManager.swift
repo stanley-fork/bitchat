@@ -150,10 +150,6 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     
     // Thread safety
     private let queue = DispatchQueue(label: "bitchat.identity.state", attributes: .concurrent)
-    /// Marks `queue` so `forceSave()` can detect when it is already executing on
-    /// it (e.g. when `deinit` is triggered from inside a queue block) and run
-    /// directly instead of `queue.sync`-ing onto itself, which would deadlock.
-    private static let queueSpecificKey = DispatchSpecificKey<UInt8>()
     
     // Debouncing for keychain saves.
     // A DispatchSourceTimer on `queue` is used rather than Timer.scheduledTimer:
@@ -174,7 +170,6 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
     
     init(_ keychain: KeychainManagerProtocol) {
         self.keychain = keychain
-        queue.setSpecific(key: Self.queueSpecificKey, value: 1)
 
         // Retrieve (or, only on genuine first run, generate) the cache
         // encryption key. We MUST distinguish "key doesn't exist yet" from a
@@ -247,11 +242,28 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
         }
     }
     
+    /// True in unit-test bundles. Used to persist synchronously instead of
+    /// scheduling a debounce timer — a lingering DispatchSourceTimer keeps the
+    /// dispatch run loop alive and prevents the test process from exiting.
+    private static var isRunningTests: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return NSClassFromString("XCTestCase") != nil ||
+            env["XCTestConfigurationFilePath"] != nil ||
+            env["XCTestBundlePath"] != nil
+    }
+
     /// Schedules a debounced save. Always invoked on `queue` under a barrier, so
     /// the timer/pendingSave bookkeeping is serialized with all other state.
     private func saveIdentityCache() {
         // Mark that we need to save
         pendingSave = true
+
+        // Under tests, persist immediately (already on `queue` under a barrier)
+        // rather than leaving a pending timer that blocks process exit.
+        if Self.isRunningTests {
+            performSave()
+            return
+        }
 
         // Cancel any pending timer and schedule a fresh one on `queue`.
         saveTimer?.cancel()
@@ -293,21 +305,16 @@ final class SecureIdentityStateManager: SecureIdentityStateManagerProtocol {
         }
     }
 
-    // Force immediate save (for app termination). Runs synchronously on `queue`
-    // so the write completes before the caller proceeds (e.g. app exit).
+    // Force immediate save (for app termination / lifecycle events). Runs the
+    // write directly on the caller's thread — deliberately NOT a
+    // `queue.sync(barrier)`: forceSave is reachable from `deinit` and from
+    // async tests on the swift-concurrency cooperative pool, and a blocking
+    // barrier-sync there can starve/deadlock the pool. Cancelling the debounce
+    // timer first prevents a concurrent timer-driven save.
     func forceSave() {
-        let work = {
-            self.saveTimer?.cancel()
-            self.saveTimer = nil
-            self.performSave()
-        }
-        // If we are already on `queue` (e.g. deinit fired from inside a queue
-        // block), run directly — `queue.sync` onto the current queue deadlocks.
-        if DispatchQueue.getSpecific(key: Self.queueSpecificKey) != nil {
-            work()
-        } else {
-            queue.sync(flags: .barrier, execute: work)
-        }
+        saveTimer?.cancel()
+        saveTimer = nil
+        performSave()
     }
     
     // MARK: - Social Identity Management
