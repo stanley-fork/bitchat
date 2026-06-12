@@ -25,10 +25,8 @@ struct ContentPeopleSheetView: View {
     var isTextFieldFocused: FocusState<Bool>.Binding
     @ObservedObject var voiceRecordingVM: VoiceRecordingViewModel
     @Binding var autocompleteDebounceTimer: Timer?
+    @ThemedPalette private var palette
 
-    let backgroundColor: Color
-    let textColor: Color
-    let secondaryTextColor: Color
     let headerHeight: CGFloat
     let onSendMessage: () -> Void
 
@@ -56,9 +54,6 @@ struct ContentPeopleSheetView: View {
                         isTextFieldFocused: isTextFieldFocused,
                         voiceRecordingVM: voiceRecordingVM,
                         autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                        backgroundColor: backgroundColor,
-                        textColor: textColor,
-                        secondaryTextColor: secondaryTextColor,
                         headerHeight: headerHeight,
                         onSendMessage: onSendMessage,
                         showImagePicker: $showImagePicker,
@@ -77,9 +72,6 @@ struct ContentPeopleSheetView: View {
                         isTextFieldFocused: isTextFieldFocused,
                         voiceRecordingVM: voiceRecordingVM,
                         autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                        backgroundColor: backgroundColor,
-                        textColor: textColor,
-                        secondaryTextColor: secondaryTextColor,
                         headerHeight: headerHeight,
                         onSendMessage: onSendMessage,
                         showMacImagePicker: $showMacImagePicker
@@ -88,9 +80,6 @@ struct ContentPeopleSheetView: View {
                 } else {
                     ContentPeopleListView(
                         showSidebar: $showSidebar,
-                        backgroundColor: backgroundColor,
-                        textColor: textColor,
-                        secondaryTextColor: secondaryTextColor,
                         headerHeight: headerHeight
                     )
                 }
@@ -109,8 +98,8 @@ struct ContentPeopleSheetView: View {
                 }
             }
         }
-        .background(backgroundColor)
-        .foregroundColor(textColor)
+        .themedSheetBackground()
+        .foregroundColor(palette.primary)
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 520)
         #endif
@@ -148,12 +137,10 @@ private struct ContentPeopleListView: View {
     @EnvironmentObject private var locationChannelsModel: LocationChannelsModel
     @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.dismiss) private var dismiss
+    @ThemedPalette private var palette
 
     @Binding var showSidebar: Bool
 
-    let backgroundColor: Color
-    let textColor: Color
-    let secondaryTextColor: Color
     let headerHeight: CGFloat
 
     @State private var showVerifySheet = false
@@ -163,8 +150,8 @@ private struct ContentPeopleListView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
                     Text(peopleSheetTitle)
-                        .font(.bitchatSystem(size: 18, design: .monospaced))
-                        .foregroundColor(textColor)
+                        .bitchatFont(size: 18)
+                        .foregroundColor(palette.primary)
                     Spacer()
                     if case .mesh = locationChannelsModel.selectedChannel {
                         Button(action: { showVerifySheet = true }) {
@@ -185,7 +172,7 @@ private struct ContentPeopleListView: View {
                         }
                     }) {
                         Image(systemName: "xmark")
-                            .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                            .bitchatFont(size: 12, weight: .semibold)
                             .frame(width: 32, height: 32)
                     }
                     .buttonStyle(.plain)
@@ -201,9 +188,9 @@ private struct ContentPeopleListView: View {
                     let subtitleColor: Color = {
                         switch locationChannelsModel.selectedChannel {
                         case .mesh:
-                            return Color.blue
+                            return palette.accentBlue
                         case .location:
-                            return Color.green
+                            return palette.locationAccent
                         }
                     }()
 
@@ -213,32 +200,28 @@ private struct ContentPeopleListView: View {
                         Text(activeText)
                             .foregroundColor(.secondary)
                     }
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
+                    .bitchatFont(size: 12)
                 } else {
                     Text(activeText)
-                        .font(.bitchatSystem(size: 12, design: .monospaced))
+                        .bitchatFont(size: 12)
                         .foregroundColor(.secondary)
                 }
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
             .padding(.bottom, 12)
-            .background(backgroundColor)
+            .themedSurface()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     if case .location = locationChannelsModel.selectedChannel {
                         GeohashPeopleList(
-                            textColor: textColor,
-                            secondaryTextColor: secondaryTextColor,
                             onTapPerson: {
                                 showSidebar = true
                             }
                         )
                     } else {
                         MeshPeerList(
-                            textColor: textColor,
-                            secondaryTextColor: secondaryTextColor,
                             onTapPeer: { peerID in
                                 peerListModel.startConversation(with: peerID)
                                 showSidebar = true
@@ -302,10 +285,9 @@ private struct ContentPrivateChatSheetView: View {
     var isTextFieldFocused: FocusState<Bool>.Binding
     @ObservedObject var voiceRecordingVM: VoiceRecordingViewModel
     @Binding var autocompleteDebounceTimer: Timer?
+    @Environment(\.appTheme) private var theme
+    @ThemedPalette private var palette
 
-    let backgroundColor: Color
-    let textColor: Color
-    let secondaryTextColor: Color
     let headerHeight: CGFloat
     let onSendMessage: () -> Void
 
@@ -327,7 +309,7 @@ private struct ContentPrivateChatSheetView: View {
                     }) {
                         Image(systemName: "chevron.left")
                             .font(.bitchatSystem(size: 12))
-                            .foregroundColor(textColor)
+                            .foregroundColor(palette.primary)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -341,8 +323,7 @@ private struct ContentPrivateChatSheetView: View {
                     HStack(spacing: 8) {
                         ContentPrivateHeaderInfoButton(
                             headerState: headerState,
-                            headerHeight: headerHeight,
-                            textColor: textColor
+                            headerHeight: headerHeight
                         )
 
                         if headerState.supportsFavoriteToggle {
@@ -351,7 +332,7 @@ private struct ContentPrivateChatSheetView: View {
                             }) {
                                 Image(systemName: headerState.isFavorite ? "star.fill" : "star")
                                     .font(.bitchatSystem(size: 14))
-                                    .foregroundColor(headerState.isFavorite ? Color.yellow : textColor)
+                                    .foregroundColor(headerState.isFavorite ? Color.yellow : palette.primary)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(
@@ -372,7 +353,7 @@ private struct ContentPrivateChatSheetView: View {
                         }
                     }) {
                         Image(systemName: "xmark")
-                            .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                            .bitchatFont(size: 12, weight: .semibold)
                             .frame(width: 32, height: 32)
                     }
                     .buttonStyle(.plain)
@@ -382,7 +363,7 @@ private struct ContentPrivateChatSheetView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 12)
-                .background(backgroundColor)
+                .themedSurface()
             }
 
             MessageListView(
@@ -397,10 +378,12 @@ private struct ContentPrivateChatSheetView: View {
                 showSidebar: $showSidebar,
                 isTextFieldFocused: isTextFieldFocused
             )
-            .background(backgroundColor)
+            .themedSurface()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
+            if !theme.usesGlassChrome {
+                Divider()
+            }
 
             #if os(iOS)
             ContentComposerView(
@@ -408,9 +391,6 @@ private struct ContentPrivateChatSheetView: View {
                 isTextFieldFocused: isTextFieldFocused,
                 voiceRecordingVM: voiceRecordingVM,
                 autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
-                secondaryTextColor: secondaryTextColor,
                 onSendMessage: onSendMessage,
                 showImagePicker: $showImagePicker,
                 imagePickerSourceType: $imagePickerSourceType
@@ -421,16 +401,13 @@ private struct ContentPrivateChatSheetView: View {
                 isTextFieldFocused: isTextFieldFocused,
                 voiceRecordingVM: voiceRecordingVM,
                 autocompleteDebounceTimer: $autocompleteDebounceTimer,
-                backgroundColor: backgroundColor,
-                textColor: textColor,
-                secondaryTextColor: secondaryTextColor,
                 onSendMessage: onSendMessage,
                 showMacImagePicker: $showMacImagePicker
             )
             #endif
         }
-        .background(backgroundColor)
-        .foregroundColor(textColor)
+        .themedSheetBackground()
+        .foregroundColor(palette.primary)
         .highPriorityGesture(
             DragGesture(minimumDistance: 25, coordinateSpace: .local)
                 .onEnded { value in
@@ -448,10 +425,10 @@ private struct ContentPrivateChatSheetView: View {
 
 private struct ContentPrivateHeaderInfoButton: View {
     @EnvironmentObject private var appChromeModel: AppChromeModel
+    @ThemedPalette private var palette
 
     let headerState: PrivateConversationHeaderState
     let headerHeight: CGFloat
-    let textColor: Color
 
     var body: some View {
         Button(action: {
@@ -462,12 +439,12 @@ private struct ContentPrivateHeaderInfoButton: View {
                 case .bluetoothConnected:
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .font(.bitchatSystem(size: 14))
-                        .foregroundColor(textColor)
+                        .foregroundColor(palette.primary)
                         .accessibilityLabel(String(localized: "content.accessibility.connected_mesh", comment: "Accessibility label for mesh-connected peer indicator"))
                 case .meshReachable:
                     Image(systemName: "point.3.filled.connected.trianglepath.dotted")
                         .font(.bitchatSystem(size: 14))
-                        .foregroundColor(textColor)
+                        .foregroundColor(palette.primary)
                         .accessibilityLabel(String(localized: "content.accessibility.reachable_mesh", comment: "Accessibility label for mesh-reachable peer indicator"))
                 case .nostrAvailable:
                     Image(systemName: "globe")
@@ -479,8 +456,8 @@ private struct ContentPrivateHeaderInfoButton: View {
                 }
 
                 Text(headerState.displayName)
-                    .font(.bitchatSystem(size: 16, weight: .medium, design: .monospaced))
-                    .foregroundColor(textColor)
+                    .bitchatFont(size: 16, weight: .medium)
+                    .foregroundColor(palette.primary)
 
                 if let encryptionStatus = headerState.encryptionStatus,
                    let icon = encryptionStatus.icon {
@@ -488,7 +465,7 @@ private struct ContentPrivateHeaderInfoButton: View {
                         .font(.bitchatSystem(size: 14))
                         .foregroundColor(
                             encryptionStatus == .noiseVerified || encryptionStatus == .noiseSecured
-                            ? textColor
+                            ? palette.primary
                             : Color.red
                         )
                         .accessibilityLabel(
