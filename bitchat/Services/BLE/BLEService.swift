@@ -966,6 +966,9 @@ final class BLEService: NSObject {
         let subscribedCentrals = characteristic == nil ? [] : snapshotSubscribedCentrals().centrals
         let connectedPeripheralIDs = connectedStates.map { $0.peripheral.identifier.uuidString }
         let centralIDs = subscribedCentrals.map { $0.identifier.uuidString }
+        let peripheralPeerBindings = Dictionary(uniqueKeysWithValues: connectedStates.compactMap { state in
+            state.peerID.map { (state.peripheral.identifier.uuidString, $0) }
+        })
         let plan = BLEOutboundLinkPlanner.plan(
             packet: packet,
             dataCount: data.count,
@@ -975,6 +978,8 @@ final class BLEService: NSObject {
             centralNotifyLimits: subscribedCentrals.map { $0.maximumUpdateValueLength },
             ingressRecord: ingressRecord,
             excludedLinks: excludedPeerLinks,
+            peripheralPeerBindings: peripheralPeerBindings,
+            centralPeerBindings: snapshotSubscribedCentrals().peerIDsByCentralUUID,
             directedOnlyPeer: directedOnlyPeer
         )
 
@@ -3275,6 +3280,13 @@ extension BLEService {
         // Update scanning duty-cycle based on connectivity
         updateScanningDutyCycle(connectedCount: connectedCount)
         updateRSSIThreshold(connectedCount: connectedCount)
+
+        // Drain the connection candidate queue. Weak-RSSI discoveries are
+        // enqueued rather than connected immediately, and the event-driven
+        // drains (disconnect/failure/timeout) never fire when we're idle —
+        // without this, an isolated node surrounded only by weak (distant)
+        // peers would queue them all and never connect to anyone.
+        tryConnectFromQueue()
         
         // Check peer connectivity every cycle for snappier UI updates
         checkPeerConnectivity()

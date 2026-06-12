@@ -41,13 +41,16 @@ final class BLEConnectionScheduler<Peripheral> {
     private let candidateCap: Int
     private let weakLinkCooldownSeconds: TimeInterval
     private let weakLinkRSSICutoff: Int
-    private let recentTimeoutWindowSeconds: TimeInterval
-    private let recentTimeoutCountThreshold: Int
 
     private var lastGlobalConnectAttempt: Date = .distantPast
     private var candidates: [BLEConnectionCandidate<Peripheral>] = []
     private var failureCounts: [String: Int] = [:]
     private var recentConnectTimeouts: [String: Date] = [:]
+    // Tracked separately from connect timeouts: a peer we held a connection
+    // with and lost (walked out of range) usually comes back, so it only gets
+    // a brief rediscovery ignore — not the timeout backoff/cooldown treatment
+    // reserved for peers that never answered a connect attempt.
+    private var recentDisconnects: [String: Date] = [:]
     private var lastIsolatedAt: Date?
 
     private let initialDynamicRSSIThreshold: Int
@@ -63,8 +66,6 @@ final class BLEConnectionScheduler<Peripheral> {
         candidateCap: Int = TransportConfig.bleConnectionCandidatesMax,
         weakLinkCooldownSeconds: TimeInterval = TransportConfig.bleWeakLinkCooldownSeconds,
         weakLinkRSSICutoff: Int = TransportConfig.bleWeakLinkRSSICutoff,
-        recentTimeoutWindowSeconds: TimeInterval = TransportConfig.bleRecentTimeoutWindowSeconds,
-        recentTimeoutCountThreshold: Int = TransportConfig.bleRecentTimeoutCountThreshold,
         dynamicRSSIThreshold: Int = TransportConfig.bleDynamicRSSIThresholdDefault
     ) {
         self.maxCentralLinks = maxCentralLinks
@@ -72,8 +73,6 @@ final class BLEConnectionScheduler<Peripheral> {
         self.candidateCap = candidateCap
         self.weakLinkCooldownSeconds = weakLinkCooldownSeconds
         self.weakLinkRSSICutoff = weakLinkRSSICutoff
-        self.recentTimeoutWindowSeconds = recentTimeoutWindowSeconds
-        self.recentTimeoutCountThreshold = recentTimeoutCountThreshold
         self.initialDynamicRSSIThreshold = dynamicRSSIThreshold
         self.dynamicRSSIThreshold = dynamicRSSIThreshold
     }
@@ -114,7 +113,12 @@ final class BLEConnectionScheduler<Peripheral> {
         }
 
         if let lastTimeout = recentConnectTimeouts[candidate.peripheralID],
-           now.timeIntervalSince(lastTimeout) < 15 {
+           now.timeIntervalSince(lastTimeout) < TransportConfig.bleTimeoutDiscoveryIgnoreSeconds {
+            return .ignore
+        }
+
+        if let lastDisconnect = recentDisconnects[candidate.peripheralID],
+           now.timeIntervalSince(lastDisconnect) < TransportConfig.bleDisconnectDiscoveryIgnoreSeconds {
             return .ignore
         }
 
@@ -163,6 +167,11 @@ final class BLEConnectionScheduler<Peripheral> {
                 return .retryAfter(delay)
             }
 
+            if let delay = disconnectSettleDelay(for: candidate, now: now) {
+                enqueue(candidate)
+                return .retryAfter(delay)
+            }
+
             if isAlreadyConnectingOrConnected(candidate.peripheralID) {
                 continue
             }
@@ -180,6 +189,7 @@ final class BLEConnectionScheduler<Peripheral> {
     func recordConnectionSuccess(peripheralID: String) {
         failureCounts[peripheralID] = 0
         recentConnectTimeouts.removeValue(forKey: peripheralID)
+        recentDisconnects.removeValue(forKey: peripheralID)
     }
 
     func recordConnectionFailure(peripheralID: String) {
@@ -187,7 +197,7 @@ final class BLEConnectionScheduler<Peripheral> {
     }
 
     func recordDisconnectError(peripheralID: String, at now: Date) {
-        recentConnectTimeouts[peripheralID] = now
+        recentDisconnects[peripheralID] = now
     }
 
     func recordConnectionTimeout(peripheralID: String, at now: Date) {
@@ -197,6 +207,7 @@ final class BLEConnectionScheduler<Peripheral> {
 
     func pruneConnectionTimeouts(before cutoff: Date) {
         recentConnectTimeouts = recentConnectTimeouts.filter { $0.value >= cutoff }
+        recentDisconnects = recentDisconnects.filter { $0.value >= cutoff }
     }
 
     func reset() {
@@ -204,6 +215,7 @@ final class BLEConnectionScheduler<Peripheral> {
         candidates.removeAll()
         failureCounts.removeAll()
         recentConnectTimeouts.removeAll()
+        recentDisconnects.removeAll()
         lastIsolatedAt = nil
         dynamicRSSIThreshold = initialDynamicRSSIThreshold
     }
@@ -225,16 +237,12 @@ final class BLEConnectionScheduler<Peripheral> {
         }
 
         lastIsolatedAt = nil
+        // Flaky links are handled per-peripheral (weak-link cooldown, discovery
+        // ignore window, score bias) — never globally, so one flaky distant peer
+        // can't blind us to every other edge-of-range peer.
         var threshold = TransportConfig.bleDynamicRSSIThresholdDefault
         if connectedOrConnectingLinkCount >= maxCentralLinks || candidates.count >= candidateCap {
             threshold = TransportConfig.bleRSSIConnectedThreshold
-        }
-
-        let recentTimeouts = recentConnectTimeouts.filter {
-            now.timeIntervalSince($0.value) < recentTimeoutWindowSeconds
-        }.count
-        if recentTimeouts >= recentTimeoutCountThreshold {
-            threshold = max(threshold, TransportConfig.bleRSSIHighTimeoutThreshold)
         }
 
         dynamicRSSIThreshold = threshold
@@ -256,6 +264,20 @@ final class BLEConnectionScheduler<Peripheral> {
         guard elapsed < weakLinkCooldownSeconds && candidate.rssi <= weakLinkRSSICutoff else { return nil }
         let remaining = weakLinkCooldownSeconds - elapsed
         return min(max(2.0, remaining), 15.0)
+    }
+
+    // The disconnect settle window must hold on the queue path too: a stale
+    // candidate enqueued while the peripheral was still connected would
+    // otherwise reconnect immediately via the post-disconnect queue drain,
+    // bypassing the window and recreating reconnect/cancel thrash.
+    private func disconnectSettleDelay(
+        for candidate: BLEConnectionCandidate<Peripheral>,
+        now: Date
+    ) -> TimeInterval? {
+        guard let lastDisconnect = recentDisconnects[candidate.peripheralID] else { return nil }
+        let remaining = TransportConfig.bleDisconnectDiscoveryIgnoreSeconds - now.timeIntervalSince(lastDisconnect)
+        guard remaining > 0 else { return nil }
+        return remaining + 0.05
     }
 
     private func score(_ candidate: BLEConnectionCandidate<Peripheral>, now: Date) -> Int {
