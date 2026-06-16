@@ -298,6 +298,41 @@ final class NostrRelayManager: ObservableObject {
         torReadyWaitAttempts = 0
         updateConnectionStatus()
     }
+
+    /// Panic wipe reset: close sockets and drop every user/session-specific
+    /// relay intent without invoking old callbacks. Unlike `disconnect()`, this
+    /// must not preserve subscription replay state because geohash DM handlers
+    /// can capture pre-wipe Nostr private keys.
+    func resetForPanicWipe() {
+        connectionGeneration &+= 1
+        for (_, task) in connections {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        connections.removeAll()
+        subscriptions.removeAll()
+        pendingSubscriptions.removeAll()
+        messageHandlers.removeAll()
+        subscriptionRequestState.removeAll()
+        subscribeCoalesce.removeAll()
+        eoseTrackers.removeAll()
+        pendingEOSECallbacks.removeAll()
+        pendingTorConnectionURLs.removeAll()
+        awaitingTorForConnections = false
+        torReadyWaitAttempts = 0
+        recentInboundEventKeys.removeAll()
+        recentInboundEventKeyOrder.removeAll()
+        duplicateInboundEventDropCount = 0
+        duplicateInboundEventDropCountBySubscription.removeAll()
+        inboundEventLogCount = 0
+        Self.pendingGiftWrapIDs.removeAll()
+
+        messageQueueLock.lock()
+        messageQueue.removeAll()
+        pendingSendDropCount = 0
+        messageQueueLock.unlock()
+
+        updateConnectionStatus()
+    }
     
     /// Ensure connections exist to the given relay URLs (idempotent).
     func ensureConnections(to relayUrls: [String]) {
@@ -1168,6 +1203,18 @@ final class NostrRelayManager: ObservableObject {
     func debugPendingSubscriptionIDs(for relayUrl: String) -> Set<String> {
         guard let map = pendingSubscriptions[relayUrl] else { return [] }
         return Set(map.keys)
+    }
+
+    var debugMessageHandlerCount: Int {
+        messageHandlers.count
+    }
+
+    var debugSubscriptionRequestCount: Int {
+        subscriptionRequestState.count
+    }
+
+    var debugPendingEOSECallbackCount: Int {
+        pendingEOSECallbacks.count
     }
 
     var debugDuplicateInboundEventDropCount: Int {

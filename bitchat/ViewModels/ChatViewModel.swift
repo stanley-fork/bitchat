@@ -1158,13 +1158,25 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         // Clear selected private chat
         selectedPrivateChatPeer = nil
 
+        // Clear live location/geohash session state. Persisted location state
+        // was wiped above, but the running view model can still be scoped to a
+        // geohash channel and hold subscriptions tied to the old Nostr identity.
+        activeChannel = .mesh
+        setGeoChatSubscriptionID(nil)
+        setGeoDmSubscriptionID(nil)
+        _ = clearGeoSamplingSubs()
+        cachedGeohashIdentity = nil
+        nostrKeyMapping.removeAll()
+
         // Clear read receipt tracking
         sentReadReceipts.removeAll()
         deduplicationService.clearAll()
 
         // IMPORTANT: Clear Nostr-related state
-        // Disconnect from Nostr relays and clear subscriptions
-        nostrRelayManager?.disconnect()
+        // Drop relay subscriptions, handlers, pending sends, and replay state.
+        // Geohash DM handlers can capture pre-wipe Nostr identities, so a plain
+        // disconnect is not enough here.
+        NostrRelayManager.shared.resetForPanicWipe()
         nostrRelayManager = nil
 
         // Clear Nostr identity associations
