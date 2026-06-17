@@ -281,6 +281,7 @@ final class NostrRelayManager: ObservableObject {
             task.cancel(with: .goingAway, reason: nil)
         }
         connections.removeAll()
+        markRelaySocketsClosed(resetState: false)
         // Sockets are gone, so per-relay subscription state is cleared — but
         // durable intent (subscriptionRequestState, messageHandlers, parked
         // EOSE callbacks) is kept so REQs replay when relays reconnect
@@ -309,6 +310,7 @@ final class NostrRelayManager: ObservableObject {
             task.cancel(with: .goingAway, reason: nil)
         }
         connections.removeAll()
+        markRelaySocketsClosed(resetState: true)
         subscriptions.removeAll()
         pendingSubscriptions.removeAll()
         messageHandlers.removeAll()
@@ -332,6 +334,24 @@ final class NostrRelayManager: ObservableObject {
         messageQueueLock.unlock()
 
         updateConnectionStatus()
+    }
+
+    private func markRelaySocketsClosed(resetState: Bool) {
+        let now = dependencies.now()
+        for index in relays.indices {
+            relays[index].isConnected = false
+            relays[index].nextReconnectTime = nil
+            if resetState {
+                relays[index].lastError = nil
+                relays[index].lastConnectedAt = nil
+                relays[index].lastDisconnectedAt = nil
+                relays[index].messagesSent = 0
+                relays[index].messagesReceived = 0
+                relays[index].reconnectAttempts = 0
+            } else {
+                relays[index].lastDisconnectedAt = now
+            }
+        }
     }
     
     /// Ensure connections exist to the given relay URLs (idempotent).

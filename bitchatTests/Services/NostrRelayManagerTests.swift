@@ -1371,6 +1371,25 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertEqual(eoseCount, 0)
     }
 
+    func test_resetForPanicWipe_marksConnectedRelaysDisconnected() async {
+        let relayURL = "wss://panic-connected.example"
+        let context = makeContext(permission: .denied)
+
+        context.manager.ensureConnections(to: [relayURL])
+        let connected = await waitUntil {
+            context.manager.isConnected &&
+                context.manager.relays.first(where: { $0.url == relayURL })?.isConnected == true
+        }
+        XCTAssertTrue(connected)
+
+        context.manager.resetForPanicWipe()
+
+        XCTAssertFalse(context.manager.isConnected)
+        XCTAssertEqual(context.manager.relays.first(where: { $0.url == relayURL })?.isConnected, false)
+        XCTAssertEqual(context.manager.relays.first(where: { $0.url == relayURL })?.reconnectAttempts, 0)
+        XCTAssertNil(context.manager.relays.first(where: { $0.url == relayURL })?.lastError)
+    }
+
     func test_reconnectBackoff_appliesJitterWithinConfiguredBounds() async {
         let relayURL = "wss://jitter-bounds.example"
         // Pin the jitter source to the extremes and the midpoint of [0, 1).

@@ -118,6 +118,50 @@ struct NostrProtocol {
         return (content: rumor.content, senderPubkey: seal.pubkey, timestamp: rumor.created_at)
     }
 
+    #if DEBUG
+    static func createPrivateMessageWithInvalidSealSignatureForTesting(
+        content: String,
+        recipientPubkey: String,
+        senderIdentity: NostrIdentity
+    ) throws -> NostrEvent {
+        let rumor = NostrEvent(
+            pubkey: senderIdentity.publicKeyHex,
+            createdAt: Date(),
+            kind: .dm,
+            tags: [],
+            content: content
+        )
+        var seal = try createSeal(
+            rumor: rumor,
+            recipientPubkey: recipientPubkey,
+            senderKey: senderIdentity.schnorrSigningKey()
+        )
+        seal.sig = String(repeating: "0", count: 128)
+        return try createGiftWrap(seal: seal, recipientPubkey: recipientPubkey)
+    }
+
+    static func createPrivateMessageWithMismatchedSealRumorPubkeyForTesting(
+        content: String,
+        recipientPubkey: String,
+        rumorIdentity: NostrIdentity,
+        sealSignerIdentity: NostrIdentity
+    ) throws -> NostrEvent {
+        let rumor = NostrEvent(
+            pubkey: rumorIdentity.publicKeyHex,
+            createdAt: Date(),
+            kind: .dm,
+            tags: [],
+            content: content
+        )
+        let seal = try createSeal(
+            rumor: rumor,
+            recipientPubkey: recipientPubkey,
+            senderKey: sealSignerIdentity.schnorrSigningKey()
+        )
+        return try createGiftWrap(seal: seal, recipientPubkey: recipientPubkey)
+    }
+    #endif
+
     /// Create a geohash-scoped ephemeral public message (kind 20000)
     static func createEphemeralGeohashEvent(
         content: String,
