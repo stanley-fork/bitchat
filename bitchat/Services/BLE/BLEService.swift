@@ -48,12 +48,17 @@ final class BLEService: NSObject {
     private let messageDeduplicator = MessageDeduplicator()
 
     // Courier store-and-forward: envelopes this device carries for offline
-    // third parties, and the trust gate for accepting deposits. Injectable
-    // for tests; main-actor policy because favorites live on the main actor.
+    // third parties, and the trust gate for accepting deposits. The policy
+    // maps (depositor key, announce-verified?) to a quota tier, or nil to
+    // reject. Injectable for tests; main-actor policy because favorites live
+    // on the main actor.
     var courierStore: CourierStore = .shared
-    var courierDepositPolicy: @MainActor (Data) -> Bool = { depositorNoiseKey in
-        FavoritesPersistenceService.shared.isMutualFavorite(depositorNoiseKey)
+    var courierDepositPolicy: @MainActor (Data, Bool) -> CourierDepositTier? = { depositorNoiseKey, isVerifiedPeer in
+        if FavoritesPersistenceService.shared.isMutualFavorite(depositorNoiseKey) { return .favorite }
+        return isVerifiedPeer ? .verified : nil
     }
+    // Local-only store-and-forward counters; nil in unit tests.
+    var sfMetrics: StoreAndForwardMetrics?
 
     #if DEBUG
     // Test-only tap on the outbound pipeline so multi-node tests can ferry
@@ -275,6 +280,7 @@ final class BLEService: NSObject {
             gcsMaxBytes: TransportConfig.syncGCSMaxBytes,
             gcsTargetFpr: TransportConfig.syncGCSTargetFpr,
             maxMessageAgeSeconds: TransportConfig.syncMaxMessageAgeSeconds,
+            publicMessageMaxAgeSeconds: TransportConfig.syncPublicMessageMaxAgeSeconds,
             maintenanceIntervalSeconds: TransportConfig.syncMaintenanceIntervalSeconds,
             stalePeerCleanupIntervalSeconds: TransportConfig.syncStalePeerCleanupIntervalSeconds,
             stalePeerTimeoutSeconds: TransportConfig.syncStalePeerTimeoutSeconds,
@@ -282,10 +288,14 @@ final class BLEService: NSObject {
             fileTransferCapacity: TransportConfig.syncFileTransferCapacity,
             fragmentSyncIntervalSeconds: TransportConfig.syncFragmentIntervalSeconds,
             fileTransferSyncIntervalSeconds: TransportConfig.syncFileTransferIntervalSeconds,
-            messageSyncIntervalSeconds: TransportConfig.syncMessageIntervalSeconds
+            messageSyncIntervalSeconds: TransportConfig.syncMessageIntervalSeconds,
+            responseRateLimitMaxResponses: TransportConfig.syncResponseRateLimitMaxResponses,
+            responseRateLimitWindowSeconds: TransportConfig.syncResponseRateLimitWindowSeconds
         )
-        
-        let manager = GossipSyncManager(myPeerID: myPeerID, config: config, requestSyncManager: requestSyncManager)
+
+        // Only real Bluetooth sessions archive to disk; unit tests stay hermetic.
+        let archive = meshBackgroundEnabled ? GossipMessageArchive() : nil
+        let manager = GossipSyncManager(myPeerID: myPeerID, config: config, requestSyncManager: requestSyncManager, archive: archive)
         manager.delegate = self
         // Only start the periodic sync timers when real Bluetooth exists. In unit
         // tests there is no mesh to sync with, and the periodic sign/broadcast
@@ -2513,7 +2523,8 @@ extension BLEService {
                     epochDay: CourierEnvelope.epochDay(for: now)
                 ),
                 expiry: UInt64((now.timeIntervalSince1970 + CourierEnvelope.maxLifetimeSeconds) * 1000),
-                ciphertext: sealed
+                ciphertext: sealed,
+                copies: TransportConfig.courierInitialCopies
             )
             guard let encoded = envelope.encode() else { return false }
             payload = encoded
@@ -2533,7 +2544,7 @@ extension BLEService {
     }
 
     private func makeCourierPacket(_ payload: Data, to peerID: PeerID) -> BitchatPacket {
-        BitchatPacket(
+        let packet = BitchatPacket(
             type: MessageType.courierEnvelope.rawValue,
             senderID: myPeerIDData,
             recipientID: Data(hexString: peerID.id),
@@ -2542,6 +2553,10 @@ extension BLEService {
             signature: nil,
             ttl: messageTTL
         )
+        // Signed so a courier can authenticate the depositor before carrying
+        // mail under their quota. Handover to the recipient doesn't need the
+        // packet signature — the inner Noise X seal authenticates the sender.
+        return noiseService.signPacket(packet) ?? packet
     }
 
     /// Handles both courier roles for an incoming envelope addressed to us:
@@ -2557,7 +2572,7 @@ extension BLEService {
         if CourierEnvelope.candidateTags(noiseStaticKey: myKey, around: Date()).contains(envelope.recipientTag) {
             openCourierEnvelope(envelope)
         } else {
-            acceptCourierDeposit(envelope, from: peerID)
+            acceptCourierDeposit(envelope, from: peerID, packet: packet)
         }
     }
 
@@ -2587,6 +2602,7 @@ extension BLEService {
             let senderPeerID = isKnownOnMesh ? shortID : PeerID(hexData: senderStaticKey)
             let payload = Data(typedPayload.dropFirst())
             SecureLogger.debug("📦 Opened courier envelope from \(senderPeerID.id.prefix(8))…", category: .session)
+            sfMetrics?.record(.courierOpened)
             notifyUI { [weak self] in
                 self?.deliverTransportEvent(.noisePayloadReceived(
                     peerID: senderPeerID,
@@ -2601,20 +2617,38 @@ extension BLEService {
         }
     }
 
-    private func acceptCourierDeposit(_ envelope: CourierEnvelope, from peerID: PeerID) {
-        guard let depositorKey = collectionsQueue.sync(execute: { peerRegistry.info(for: peerID)?.noisePublicKey }) else {
+    private func acceptCourierDeposit(_ envelope: CourierEnvelope, from peerID: PeerID, packet: BitchatPacket) {
+        // A deposit must come from its depositor over the direct link: the
+        // claimed sender has to be the ingress peer, and the packet signature
+        // has to verify against that peer's announced signing key. Otherwise
+        // an untrusted sender could route an envelope through any trusted
+        // neighbor and have us carry it under the neighbor's quota.
+        guard PeerID(hexData: packet.senderID) == peerID else {
+            SecureLogger.debug("📦 Courier deposit rejected: relayed envelope claims sender \(PeerID(hexData: packet.senderID).id.prefix(8))… but arrived from \(peerID.id.prefix(8))…", category: .security)
+            return
+        }
+        let depositorInfo = collectionsQueue.sync { peerRegistry.info(for: peerID) }
+        guard let depositorKey = depositorInfo?.noisePublicKey else {
             SecureLogger.debug("📦 Courier deposit from unknown peer \(peerID.id.prefix(8))… rejected", category: .session)
             return
         }
+        guard let signingKey = depositorInfo?.signingPublicKey,
+              noiseService.verifyPacketSignature(packet, publicKey: signingKey) else {
+            SecureLogger.debug("📦 Courier deposit from \(peerID.id.prefix(8))… rejected (missing/invalid signature)", category: .security)
+            return
+        }
+        let isVerifiedPeer = depositorInfo?.isVerifiedNickname ?? false
         let store = courierStore
         let policy = courierDepositPolicy
+        let metrics = sfMetrics
         Task { @MainActor in
-            guard policy(depositorKey) else {
-                SecureLogger.debug("📦 Courier deposit from \(peerID.id.prefix(8))… rejected (not a mutual favorite)", category: .session)
+            guard let tier = policy(depositorKey, isVerifiedPeer) else {
+                SecureLogger.debug("📦 Courier deposit from \(peerID.id.prefix(8))… rejected (neither favorite nor verified)", category: .session)
                 return
             }
-            if store.deposit(envelope, from: depositorKey) {
-                SecureLogger.debug("📦 Carrying courier envelope deposited by \(peerID.id.prefix(8))…", category: .session)
+            if store.deposit(envelope, from: depositorKey, tier: tier) {
+                SecureLogger.debug("📦 Carrying courier envelope deposited by \(peerID.id.prefix(8))… (\(tier.rawValue))", category: .session)
+                metrics?.record(.courierAccepted)
             }
         }
     }
@@ -2627,6 +2661,51 @@ extension BLEService {
         for envelope in envelopes {
             guard let payload = envelope.encode() else { continue }
             sendPacketDirected(makeCourierPacket(payload, to: peerID), to: peerID)
+            sfMetrics?.record(.courierHandedOver)
+        }
+    }
+
+    /// Speculative handover toward a recipient heard only via a relayed
+    /// announce: the envelope floods the mesh as a directed packet (relays
+    /// treat it like a directed DM). Non-destructive — the carried copy stays
+    /// until a direct handover or expiry, throttled per envelope so repeated
+    /// announces don't re-flood.
+    private func deliverCourierMailRemotely(to peerID: PeerID, noiseKey: Data) {
+        let envelopes = courierStore.envelopesForRemoteHandover(
+            recipientNoiseKey: noiseKey,
+            cooldown: TransportConfig.courierRemoteHandoverCooldownSeconds
+        )
+        guard !envelopes.isEmpty else { return }
+        SecureLogger.debug("📦 Remote handover: flooding \(envelopes.count) envelope(s) toward \(peerID.id.prefix(8))…", category: .session)
+        for envelope in envelopes {
+            guard let payload = envelope.encode() else { continue }
+            broadcastPacket(makeCourierPacket(payload, to: peerID))
+            sfMetrics?.record(.courierRemoteHandover)
+        }
+    }
+
+    /// Spray-and-wait: split copy budgets with another courier we just
+    /// encountered, so carried mail diffuses through a moving crowd instead
+    /// of riding a single carrier. Only favorites and verified peers qualify,
+    /// mirroring the deposit policy they would apply to us.
+    private func sprayCourierMail(to peerID: PeerID, noiseKey: Data, isVerifiedPeer: Bool) {
+        let store = courierStore
+        let metrics = sfMetrics
+        let sendSpray: ([CourierEnvelope]) -> Void = { [weak self] envelopes in
+            guard let self, !envelopes.isEmpty else { return }
+            SecureLogger.debug("📦 Spraying \(envelopes.count) envelope copy(ies) to courier \(peerID.id.prefix(8))…", category: .session)
+            for envelope in envelopes {
+                guard let payload = envelope.encode() else { continue }
+                self.sendPacketDirected(self.makeCourierPacket(payload, to: peerID), to: peerID)
+                metrics?.record(.courierSprayed)
+            }
+        }
+        let policy = courierDepositPolicy
+        Task { @MainActor in
+            // Same trust gate as deposits: don't hand mail to a peer who
+            // would reject it from us.
+            guard policy(noiseKey, isVerifiedPeer) != nil else { return }
+            sendSpray(store.takeSprayCopies(for: noiseKey))
         }
     }
 
@@ -2753,6 +2832,9 @@ extension BLEService {
             centralManager?.stopScan()
             startScanning()
         }
+        // Backgrounding may precede a kill; flush the public-history archive
+        // outside its 30s maintenance cadence.
+        gossipSyncManager?.persistNow()
         logBluetoothStatus("entered-background")
         scheduleBluetoothStatusSample(after: 15.0, context: "background-15s")
         // No Local Name; nothing to refresh for advertising policy
@@ -3184,16 +3266,23 @@ extension BLEService {
     private func handleAnnounce(_ packet: BitchatPacket, from peerID: PeerID) {
         let result = announceHandler.handle(packet, from: peerID)
 
-        // Courier handover: an announce is the moment we learn a peer's Noise
-        // static key, so check whether we're carrying mail addressed to them.
-        // Direct announces only: envelopes are removed from the store
-        // optimistically, so handover must ride an established link rather
-        // than a speculative multi-hop send toward a relayed announce.
+        // Courier work: an announce is the moment we learn a peer's Noise
+        // static key, so check whether we're carrying mail addressed to them
+        // (or spray-able mail they could carry). Verified announces only.
         guard !courierStore.isEmpty,
               let result,
-              result.isVerified,
-              result.isDirectAnnounce else { return }
-        deliverCourierMail(to: result.peerID, noiseKey: result.announcement.noisePublicKey)
+              result.isVerified else { return }
+        let noiseKey = result.announcement.noisePublicKey
+        if result.isDirectAnnounce {
+            // Established link: destructive handover is safe, and the peer is
+            // close enough to become a courier for other carried mail.
+            deliverCourierMail(to: result.peerID, noiseKey: noiseKey)
+            sprayCourierMail(to: result.peerID, noiseKey: noiseKey, isVerifiedPeer: true)
+        } else {
+            // Relayed announce: recipient is multi-hop away. Push a copy
+            // toward them speculatively; the carried copy stays put.
+            deliverCourierMailRemotely(to: result.peerID, noiseKey: noiseKey)
+        }
     }
 
     /// Builds the announce handler environment. All queue hops stay here so
@@ -3287,6 +3376,26 @@ extension BLEService {
 
     // Handle REQUEST_SYNC: decode payload and respond with missing packets via sync manager
     private func handleRequestSync(_ packet: BitchatPacket, from peerID: PeerID) {
+        // REQUEST_SYNC is link-local by design (always sent with ttl 0): a
+        // nonzero TTL means a crafted or relayed request, and answering one
+        // would let a single small packet fan a full store replay out of
+        // every node it reaches.
+        guard packet.ttl == 0 else {
+            if logRateLimiter.shouldLog(key: "sync-ttl:\(peerID.id)") {
+                SecureLogger.warning("🚫 Dropping REQUEST_SYNC with nonzero TTL from \(peerID.id.prefix(8))…", category: .security)
+            }
+            return
+        }
+        // A response can replay the entire gossip store, so require proof the
+        // requester owns the claimed sender ID: the request must verify
+        // against the signing key from that peer's announce.
+        let signingKey = collectionsQueue.sync { peerRegistry.info(for: peerID)?.signingPublicKey }
+        guard let signingKey, noiseService.verifyPacketSignature(packet, publicKey: signingKey) else {
+            if logRateLimiter.shouldLog(key: "sync-sig:\(peerID.id)") {
+                SecureLogger.warning("🚫 Dropping REQUEST_SYNC without verifiable signature from \(peerID.id.prefix(8))…", category: .security)
+            }
+            return
+        }
         guard let req = RequestSyncPacket.decode(from: packet.payload) else {
             SecureLogger.warning("⚠️ Malformed REQUEST_SYNC from \(peerID.id.prefix(8))…", category: .session)
             return

@@ -64,7 +64,10 @@ final class GossipSyncManager {
         var seenCapacity: Int = 1000          // max packets per sync (cap across types)
         var gcsMaxBytes: Int = 400           // filter size budget (128..1024)
         var gcsTargetFpr: Double = 0.01      // 1%
-        var maxMessageAgeSeconds: TimeInterval = 900  // 15 min - discard older messages
+        var maxMessageAgeSeconds: TimeInterval = 900  // 15 min - fragments/files/announces
+        // Whole public messages stay sync-able much longer so devices carry
+        // the room's recent history between partitions and across restarts.
+        var publicMessageMaxAgeSeconds: TimeInterval = 900
         var maintenanceIntervalSeconds: TimeInterval = 30.0
         var stalePeerCleanupIntervalSeconds: TimeInterval = 60.0
         var stalePeerTimeoutSeconds: TimeInterval = 60.0
@@ -73,29 +76,39 @@ final class GossipSyncManager {
         var fragmentSyncIntervalSeconds: TimeInterval = 30.0
         var fileTransferSyncIntervalSeconds: TimeInterval = 60.0
         var messageSyncIntervalSeconds: TimeInterval = 15.0
+        var responseRateLimitMaxResponses: Int = 8
+        var responseRateLimitWindowSeconds: TimeInterval = 30.0
     }
 
     private let myPeerID: PeerID
     private let config: Config
     private let requestSyncManager: RequestSyncManager
+    private let archive: GossipMessageArchive?
     weak var delegate: Delegate?
 
     // Storage: broadcast packets by type, and latest announce per sender
     private var messages = PacketStore()
     private var fragments = PacketStore()
     private var fileTransfers = PacketStore()
-    private var latestAnnouncementByPeer: [PeerID: (id: String, packet: BitchatPacket)] = [:]
+    private var latestAnnouncementByPeer: [PeerID: BitchatPacket] = [:]
+    private var archiveDirty = false
 
     // Timer
     private var periodicTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "mesh.sync", qos: .utility)
     private var lastStalePeerCleanup: Date = .distantPast
     private var syncSchedules: [SyncSchedule] = []
+    private var responseRateLimiter: SyncResponseRateLimiter
 
-    init(myPeerID: PeerID, config: Config = Config(), requestSyncManager: RequestSyncManager) {
+    init(myPeerID: PeerID, config: Config = Config(), requestSyncManager: RequestSyncManager, archive: GossipMessageArchive? = nil) {
         self.myPeerID = myPeerID
         self.config = config
         self.requestSyncManager = requestSyncManager
+        self.archive = archive
+        self.responseRateLimiter = SyncResponseRateLimiter(
+            maxResponses: config.responseRateLimitMaxResponses,
+            window: config.responseRateLimitWindowSeconds
+        )
         var schedules: [SyncSchedule] = []
         if config.seenCapacity > 0 && config.messageSyncIntervalSeconds > 0 {
             schedules.append(SyncSchedule(types: .publicMessages, interval: config.messageSyncIntervalSeconds, lastSent: .distantPast))
@@ -107,6 +120,12 @@ final class GossipSyncManager {
             schedules.append(SyncSchedule(types: .fileTransfer, interval: config.fileTransferSyncIntervalSeconds, lastSent: .distantPast))
         }
         syncSchedules = schedules
+
+        if archive != nil {
+            queue.async { [weak self] in
+                self?.restoreArchivedMessages()
+            }
+        }
     }
 
     func start() {
@@ -146,10 +165,15 @@ final class GossipSyncManager {
         }
     }
 
-    // Helper to check if a packet is within the age threshold
+    // Helper to check if a packet is within the age threshold. Whole public
+    // messages get the long town-crier window; fragments, file transfers and
+    // announces keep the short one.
     private func isPacketFresh(_ packet: BitchatPacket) -> Bool {
+        let maxAgeSeconds = packet.type == MessageType.message.rawValue
+            ? config.publicMessageMaxAgeSeconds
+            : config.maxMessageAgeSeconds
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        let ageThresholdMs = UInt64(config.maxMessageAgeSeconds * 1000)
+        let ageThresholdMs = UInt64(maxAgeSeconds * 1000)
 
         // If current time is less than threshold, accept all (handle clock issues gracefully)
         guard nowMs >= ageThresholdMs else { return true }
@@ -182,14 +206,14 @@ final class GossipSyncManager {
                 removeState(for: sender)
                 return
             }
-            let idHex = PacketIdUtil.computeId(packet).hexEncodedString()
             let sender = PeerID(hexData: packet.senderID)
-            latestAnnouncementByPeer[sender] = (id: idHex, packet: packet)
+            latestAnnouncementByPeer[sender] = packet
         case .message:
             guard isBroadcastRecipient else { return }
             guard isPacketFresh(packet) else { return }
             let idHex = PacketIdUtil.computeId(packet).hexEncodedString()
             messages.insert(idHex: idHex, packet: packet, capacity: max(1, config.seenCapacity))
+            archiveDirty = true
         case .fragment:
             guard isBroadcastRecipient else { return }
             guard isPacketFresh(packet) else { return }
@@ -265,7 +289,17 @@ final class GossipSyncManager {
     }
 
     private func _handleRequestSync(from peerID: PeerID, request: RequestSyncPacket) {
+        // A response can replay the whole store, so bound how often one peer
+        // can trigger a diff pass regardless of how fast it asks.
+        guard responseRateLimiter.shouldRespond(to: peerID, now: Date()) else {
+            SecureLogger.warning("Rate-limited REQUEST_SYNC from \(peerID.id.prefix(8))…", category: .sync)
+            return
+        }
         let requestedTypes = (request.types ?? .publicMessages)
+        // The requester's filter only covers packets at or after this cursor;
+        // older packets are outside the filter but not missing, and without
+        // the cursor they would be re-sent every round.
+        let since = request.sinceTimestamp
         // Decode GCS into sorted set and prepare membership checker
         let sorted = GCSFilter.decodeToSortedSet(p: request.p, m: request.m, data: request.data)
         func mightContain(_ id: Data) -> Bool {
@@ -273,11 +307,13 @@ final class GossipSyncManager {
             return GCSFilter.contains(sortedValues: sorted, candidate: bucket)
         }
 
+        // Announces are exempt from the since-cursor: they carry the signing
+        // keys needed to verify everything else, and there is at most one per
+        // peer, so the resend cost is negligible.
         if requestedTypes.contains(.announce) {
-            for (_, pair) in latestAnnouncementByPeer {
-                let (idHex, pkt) = pair
+            for (_, pkt) in latestAnnouncementByPeer {
                 guard isPacketFresh(pkt) else { continue }
-                let idBytes = Data(hexString: idHex) ?? Data()
+                let idBytes = PacketIdUtil.computeId(pkt)
                 if !mightContain(idBytes) {
                     var toSend = pkt
                     toSend.ttl = 0
@@ -290,6 +326,7 @@ final class GossipSyncManager {
         if requestedTypes.contains(.message) {
             let toSendMsgs = messages.allPackets(isFresh: isPacketFresh)
             for pkt in toSendMsgs {
+                if let since, pkt.timestamp < since { continue }
                 let idBytes = PacketIdUtil.computeId(pkt)
                 if !mightContain(idBytes) {
                     var toSend = pkt
@@ -303,6 +340,7 @@ final class GossipSyncManager {
         if requestedTypes.contains(.fragment) {
             let frags = fragments.allPackets(isFresh: isPacketFresh)
             for pkt in frags {
+                if let since, pkt.timestamp < since { continue }
                 let idBytes = PacketIdUtil.computeId(pkt)
                 if !mightContain(idBytes) {
                     var toSend = pkt
@@ -316,6 +354,7 @@ final class GossipSyncManager {
         if requestedTypes.contains(.fileTransfer) {
             let files = fileTransfers.allPackets(isFresh: isPacketFresh)
             for pkt in files {
+                if let since, pkt.timestamp < since { continue }
                 let idBytes = PacketIdUtil.computeId(pkt)
                 if !mightContain(idBytes) {
                     var toSend = pkt
@@ -331,8 +370,8 @@ final class GossipSyncManager {
     private func buildGcsPayload(for types: SyncTypeFlags) -> Data {
         var candidates: [BitchatPacket] = []
         if types.contains(.announce) {
-            for (_, pair) in latestAnnouncementByPeer where isPacketFresh(pair.packet) {
-                candidates.append(pair.packet)
+            for (_, pkt) in latestAnnouncementByPeer where isPacketFresh(pkt) {
+                candidates.append(pkt)
             }
         }
         if types.contains(.message) {
@@ -368,40 +407,93 @@ final class GossipSyncManager {
             let req = RequestSyncPacket(p: p, m: 1, data: Data(), types: types)
             return req.encode()
         }
-        let ids: [Data] = candidates.prefix(takeN).map { PacketIdUtil.computeId($0) }
+        let included = Array(candidates.prefix(takeN))
+        let ids: [Data] = included.map { PacketIdUtil.computeId($0) }
         let params = GCSFilter.buildFilter(ids: ids, maxBytes: config.gcsMaxBytes, targetFpr: config.gcsTargetFpr)
-        let req = RequestSyncPacket(p: params.p, m: params.m, data: params.data, types: types)
+        // When the filter can't cover every candidate — either the store
+        // exceeds `takeN` or the encoder trimmed the tail to fit the byte
+        // budget — tell the responder how far back the filter actually
+        // reaches. `includedCount` counts inputs in newest-first order, so the
+        // covered set is a contiguous newest-prefix and the oldest included
+        // timestamp is an exact cursor. Packets older than it are outside the
+        // filter but not missing; without the cursor the responder would
+        // re-send that entire tail every round.
+        let covered = params.includedCount
+        let sinceTimestamp: UInt64? = (covered < candidates.count && covered > 0)
+            ? included[covered - 1].timestamp
+            : nil
+        let req = RequestSyncPacket(p: params.p, m: params.m, data: params.data, types: types, sinceTimestamp: sinceTimestamp)
         return req.encode()
     }
 
     // Periodic cleanup of expired messages and announcements
     private func cleanupExpiredMessages() {
         // Remove expired announcements
-        latestAnnouncementByPeer = latestAnnouncementByPeer.filter { _, pair in
-            isPacketFresh(pair.packet)
+        latestAnnouncementByPeer = latestAnnouncementByPeer.filter { _, pkt in
+            isPacketFresh(pkt)
         }
 
+        let messageCountBefore = messages.packets.count
         messages.removeExpired(isFresh: isPacketFresh)
+        if messages.packets.count != messageCountBefore {
+            archiveDirty = true
+        }
         fragments.removeExpired(isFresh: isPacketFresh)
         fileTransfers.removeExpired(isFresh: isPacketFresh)
+    }
+
+    // MARK: - Archive (public message persistence)
+
+    /// Rebuild the public message store from disk on launch, dropping
+    /// anything that aged out while the app was dead.
+    private func restoreArchivedMessages() {
+        guard let archive else { return }
+        var restored = 0
+        for data in archive.load() {
+            guard let packet = BitchatPacket.from(data),
+                  packet.type == MessageType.message.rawValue,
+                  isPacketFresh(packet) else { continue }
+            let idHex = PacketIdUtil.computeId(packet).hexEncodedString()
+            messages.insert(idHex: idHex, packet: packet, capacity: max(1, config.seenCapacity))
+            restored += 1
+        }
+        if restored > 0 {
+            SecureLogger.debug("Restored \(restored) archived public message(s) for gossip sync", category: .sync)
+            archiveDirty = true
+        }
+    }
+
+    private func persistArchiveIfDirty() {
+        guard archiveDirty, let archive else { return }
+        archiveDirty = false
+        let packets = messages.allPackets(isFresh: isPacketFresh)
+            .compactMap { $0.toBinaryData(padding: false) }
+        archive.save(packets)
+    }
+
+    /// Flush the archive outside the maintenance cadence (app backgrounding).
+    func persistNow() {
+        queue.async { [weak self] in
+            self?.persistArchiveIfDirty()
+        }
     }
 
     private func performPeriodicMaintenance(now: Date = Date()) {
         cleanupExpiredMessages()
         cleanupStaleAnnouncementsIfNeeded(now: now)
+        persistArchiveIfDirty()
         requestSyncManager.cleanup() // Cleanup expired sync requests
+        responseRateLimiter.prune(now: now)
         
-        var dueTypes: SyncTypeFlags = []
+        // One request per due schedule rather than a union filter: each type
+        // group gets the full GCS capacity and its own since-cursor, so heavy
+        // fragment traffic can't crowd messages out of the filter.
         for index in syncSchedules.indices {
             guard syncSchedules[index].interval > 0 else { continue }
             if syncSchedules[index].lastSent == .distantPast || now.timeIntervalSince(syncSchedules[index].lastSent) >= syncSchedules[index].interval {
                 syncSchedules[index].lastSent = now
-                dueTypes.formUnion(syncSchedules[index].types)
+                sendPeriodicSync(for: syncSchedules[index].types)
             }
-        }
-
-        if !dueTypes.isEmpty {
-            sendPeriodicSync(for: dueTypes)
         }
     }
 
@@ -418,8 +510,8 @@ final class GossipSyncManager {
         let nowMs = UInt64(now.timeIntervalSince1970 * 1000)
         guard nowMs >= timeoutMs else { return }
         let cutoff = nowMs - timeoutMs
-        let stalePeerIDs = latestAnnouncementByPeer.compactMap { peerID, pair in
-            pair.packet.timestamp < cutoff ? peerID : nil
+        let stalePeerIDs = latestAnnouncementByPeer.compactMap { peerID, pkt in
+            pkt.timestamp < cutoff ? peerID : nil
         }
         guard !stalePeerIDs.isEmpty else { return }
         for peerKey in stalePeerIDs {
@@ -436,7 +528,11 @@ final class GossipSyncManager {
 
     private func removeState(for peerID: PeerID) {
         _ = latestAnnouncementByPeer.removeValue(forKey: peerID)
+        let messageCountBefore = messages.packets.count
         messages.remove { PeerID(hexData: $0.senderID) == peerID }
+        if messages.packets.count != messageCountBefore {
+            archiveDirty = true
+        }
         fragments.remove { PeerID(hexData: $0.senderID) == peerID }
         fileTransfers.remove { PeerID(hexData: $0.senderID) == peerID }
     }
