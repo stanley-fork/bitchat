@@ -2,17 +2,49 @@ import BitLogger
 import BitFoundation
 import Foundation
 
+/// Trust and identity lookups the router needs to pick couriers. Backed by
+/// the favorites store in production; injectable for tests.
+struct CourierDirectory {
+    /// Noise static key for a peer we can address while they're offline.
+    var noiseKey: (PeerID) -> Data?
+    /// Whether a peer (by Noise static key) may carry our mail.
+    var isTrustedCourier: (Data) -> Bool
+
+    @MainActor
+    static func favoritesBacked() -> CourierDirectory {
+        CourierDirectory(
+            noiseKey: { peerID in
+                // Offline favorites are addressed by the full 64-hex
+                // noise-key ID, which carries the key itself; the favorites
+                // lookup only resolves short 16-hex IDs.
+                peerID.noiseKey
+                    ?? FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID)?.peerNoisePublicKey
+            },
+            isTrustedCourier: { noiseKey in
+                FavoritesPersistenceService.shared.isMutualFavorite(noiseKey)
+            }
+        )
+    }
+}
+
 /// Routes messages using available transports (Mesh, Nostr, etc.)
 @MainActor
 final class MessageRouter {
     private let transports: [Transport]
     private let now: () -> Date
+    private let courierDirectory: CourierDirectory
 
     /// Invoked whenever a retained private message is dropped without a
     /// delivery ack (attempt cap, TTL expiry, or per-peer overflow eviction)
     /// so the UI can surface the failure instead of leaving the message in a
     /// stale "sending/sent" state forever.
     var onMessageDropped: ((_ messageID: String, _ peerID: PeerID) -> Void)?
+
+    /// Invoked when a message with no reachable transport was handed to at
+    /// least one courier (a connected mutual favorite who will physically
+    /// carry the sealed envelope). Delivery stays best-effort: the outbox
+    /// retains the message until an ack arrives.
+    var onMessageCarried: ((_ messageID: String, _ peerID: PeerID) -> Void)?
 
     // Outbox entry with timestamp for TTL-based eviction
     private struct QueuedMessage {
@@ -31,10 +63,17 @@ final class MessageRouter {
     // Bound resends of messages sent on a weak reachability signal that never
     // get a delivery ack (e.g. peer on an old client that doesn't ack).
     private static let maxSendAttempts = 8
+    // Redundant couriers improve delivery odds; receivers dedup by message ID.
+    private static let maxCouriersPerMessage = 3
 
-    init(transports: [Transport], now: @escaping () -> Date = Date.init) {
+    init(
+        transports: [Transport],
+        now: @escaping () -> Date = Date.init,
+        courierDirectory: CourierDirectory? = nil
+    ) {
         self.transports = transports
         self.now = now
+        self.courierDirectory = courierDirectory ?? .favoritesBacked()
 
         // Observe favorites changes to learn Nostr mapping and flush queued messages
         NotificationCenter.default.addObserver(
@@ -89,11 +128,47 @@ final class MessageRouter {
             SecureLogger.debug("Routing PM via \(type(of: transport)) (reachable) to \(peerID.id.prefix(8))… id=\(messageID.prefix(8))…", category: .session)
             transport.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname, messageID: messageID)
             enqueue(message, for: peerID)
+            // "Reachable" without prompt delivery means the send only joined
+            // a queue (Nostr with relays down): also hand a sealed copy to
+            // any connected couriers rather than waiting for internet that
+            // may never come. Double delivery is harmless — receivers dedup
+            // by message ID, and delivered/read acks never downgrade.
+            if !transport.canDeliverPromptly(to: peerID) {
+                attemptCourierDeposit(content: content, messageID: messageID, for: peerID)
+            }
         } else {
             var unsent = message
             unsent.sendAttempts = 0
             enqueue(unsent, for: peerID)
             SecureLogger.debug("Queued PM for \(peerID.id.prefix(8))… (no reachable transport) id=\(messageID.prefix(8))… queue=\(outbox[peerID]?.count ?? 0)", category: .session)
+            attemptCourierDeposit(content: content, messageID: messageID, for: peerID)
+        }
+    }
+
+    /// Last resort when no transport can deliver promptly — the peer is
+    /// unreachable, or only reachable through a send queue waiting on
+    /// internet: seal the message to their known static key and hand it to
+    /// connected mutual favorites who may physically encounter them. The
+    /// queued copy above stays retained, so direct delivery still wins if
+    /// the peer reappears first (receivers dedup by message ID).
+    private func attemptCourierDeposit(content: String, messageID: String, for peerID: PeerID) {
+        guard let recipientKey = courierDirectory.noiseKey(peerID) else { return }
+        for transport in transports {
+            let couriers = transport.currentPeerSnapshots()
+                .filter { snapshot in
+                    guard snapshot.isConnected,
+                          let key = snapshot.noisePublicKey,
+                          key != recipientKey else { return false }
+                    return courierDirectory.isTrustedCourier(key)
+                }
+                .prefix(Self.maxCouriersPerMessage)
+                .map(\.peerID)
+            guard !couriers.isEmpty else { continue }
+            if transport.sendCourierMessage(content, messageID: messageID, recipientNoiseKey: recipientKey, via: Array(couriers)) {
+                SecureLogger.debug("📦 PM \(messageID.prefix(8))… handed to \(couriers.count) courier(s) for \(peerID.id.prefix(8))…", category: .session)
+                onMessageCarried?(messageID, peerID)
+                return
+            }
         }
     }
 

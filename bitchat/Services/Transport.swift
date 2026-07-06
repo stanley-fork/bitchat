@@ -54,6 +54,11 @@ protocol Transport: AnyObject {
     // Connectivity and peers
     func isPeerConnected(_ peerID: PeerID) -> Bool
     func isPeerReachable(_ peerID: PeerID) -> Bool
+    /// Whether a send to this peer is likely to leave the device promptly.
+    /// Distinct from reachability: Nostr claims any favorite with a known
+    /// npub as reachable even with no relay connection, where a send only
+    /// joins a queue waiting for internet that may never come.
+    func canDeliverPromptly(to peerID: PeerID) -> Bool
     func peerNickname(peerID: PeerID) -> String?
     func getPeerNicknames() -> [PeerID: String]
 
@@ -95,6 +100,12 @@ protocol Transport: AnyObject {
     func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String)
     func cancelTransfer(_ transferId: String)
 
+    // Courier store-and-forward (mesh transports only): seal a message to the
+    // recipient's static key and hand it to connected couriers for physical
+    // delivery while the recipient is offline. Returns false when the
+    // transport cannot courier (no connected courier, or unsupported).
+    func sendCourierMessage(_ content: String, messageID: String, recipientNoiseKey: Data, via couriers: [PeerID]) -> Bool
+
     // QR verification (optional for transports)
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data)
@@ -105,6 +116,10 @@ protocol Transport: AnyObject {
 }
 
 extension Transport {
+    // Reachability implies prompt delivery for transports that hand packets
+    // straight to the radio; queue-backed transports override this.
+    func canDeliverPromptly(to peerID: PeerID) -> Bool { isPeerReachable(peerID) }
+
     // Noise identity hooks default to inert for transports that do not carry
     // Noise sessions (e.g. NostrTransport).
     func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? { nil }
@@ -120,6 +135,7 @@ extension Transport {
 
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
+    func sendCourierMessage(_ content: String, messageID: String, recipientNoiseKey: Data, via couriers: [PeerID]) -> Bool { false }
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {}
     func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String) {}
     func cancelTransfer(_ transferId: String) {}

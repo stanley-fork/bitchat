@@ -22,6 +22,9 @@ struct ContentHeaderView: View {
     let headerPeerIconSize: CGFloat
     let headerPeerCountFontSize: CGFloat
 
+    /// Courier envelopes this device is carrying for offline third parties.
+    @State private var carriedMailCount = 0
+
     var body: some View {
         HStack(spacing: 0) {
             Text(verbatim: "bitchat/")
@@ -31,6 +34,16 @@ struct ContentHeaderView: View {
                     appChromeModel.panicClearAllData()
                 }
                 .onTapGesture(count: 1) {
+                    appChromeModel.presentAppInfo()
+                }
+                // This is the only entry point to App Info, but it reads as
+                // static text; surface the tap. (The triple-tap panic wipe
+                // stays undiscoverable on purpose — it's destructive.)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(
+                    String(localized: "content.accessibility.app_info_hint", comment: "Accessibility hint on the bitchat/ logo explaining a tap opens app info")
+                )
+                .accessibilityAction {
                     appChromeModel.presentAppInfo()
                 }
 
@@ -78,6 +91,23 @@ struct ContentHeaderView: View {
             }()
 
             HStack(spacing: 2) {
+                if carriedMailCount > 0 {
+                    Image(systemName: "figure.walk")
+                        .font(.bitchatSystem(size: 12))
+                        .foregroundColor(palette.secondary.opacity(0.8))
+                        .headerTapTarget()
+                        .accessibilityLabel(
+                            String(
+                                format: String(localized: "content.accessibility.carrying_mail", defaultValue: "Carrying %lld sealed messages for friends", comment: "Accessibility label for the courier mail indicator"),
+                                locale: .current,
+                                carriedMailCount
+                            )
+                        )
+                        .help(
+                            String(localized: "content.header.carrying_mail", defaultValue: "Carrying sealed messages for friends to deliver", comment: "Tooltip for the courier mail indicator")
+                        )
+                }
+
                 if appChromeModel.hasUnreadPrivateMessages {
                     Button(action: { appChromeModel.openMostRelevantPrivateChat() }) {
                         Image(systemName: "envelope.fill")
@@ -183,6 +213,13 @@ struct ContentHeaderView: View {
                         headerOtherPeersCount
                     )
                 )
+                // Connected-vs-nobody is otherwise encoded only in the icon's
+                // color; say it.
+                .accessibilityValue(
+                    headerPeersReachable
+                    ? String(localized: "content.accessibility.peers_connected", comment: "Accessibility value when peers are reachable")
+                    : String(localized: "content.accessibility.peers_none", comment: "Accessibility value when no peers are reachable")
+                )
             }
             .layoutPriority(3)
             .sheet(isPresented: $showVerifySheet) {
@@ -190,8 +227,16 @@ struct ContentHeaderView: View {
                     .environmentObject(verificationModel)
             }
         }
+        // Fixed height is load-bearing: children fill the bar with
+        // .frame(maxHeight: .infinity) tap targets, so an open-ended
+        // minHeight lets the header expand to swallow the whole screen.
+        // headerHeight is a @ScaledMetric, so it still grows with Dynamic
+        // Type.
         .frame(height: headerHeight)
         .padding(.horizontal, 12)
+        .onReceive(CourierStore.shared.$carriedCount) { count in
+            carriedMailCount = count
+        }
         .sheet(isPresented: $appChromeModel.isLocationChannelsSheetPresented) {
             LocationChannelsSheet(isPresented: $appChromeModel.isLocationChannelsSheetPresented)
                 .environmentObject(locationChannelsModel)
@@ -266,14 +311,25 @@ private extension ContentHeaderView {
         dynamicTypeSize.isAccessibilitySize ? 2 : 1
     }
 
+    /// Whether anyone is actually reachable on the current channel — the
+    /// state the count icon's color encodes visually.
+    var headerPeersReachable: Bool {
+        switch locationChannelsModel.selectedChannel {
+        case .location:
+            return peerListModel.visibleGeohashPeerCount > 0
+        case .mesh:
+            return peerListModel.connectedMeshPeerCount > 0
+        }
+    }
+
     func channelPeopleCountAndColor() -> (Int, Color) {
         switch locationChannelsModel.selectedChannel {
         case .location:
             let count = peerListModel.visibleGeohashPeerCount
-            return (count, count > 0 ? palette.locationAccent : Color.secondary)
+            return (count, count > 0 ? palette.locationAccent : palette.secondary)
         case .mesh:
             let meshBlue = Color(hue: 0.60, saturation: 0.85, brightness: 0.82)
-            let color: Color = peerListModel.connectedMeshPeerCount > 0 ? meshBlue : Color.secondary
+            let color: Color = peerListModel.connectedMeshPeerCount > 0 ? meshBlue : palette.secondary
             return (peerListModel.reachableMeshPeerCount, color)
         }
     }
@@ -293,16 +349,10 @@ private struct ContentLocationNotesUnavailableView: View {
                 Text("content.notes.title")
                     .bitchatFont(size: 16, weight: .bold)
                 Spacer()
-                Button(action: { showLocationNotes = false }) {
-                    Image(systemName: "xmark")
-                        .bitchatFont(size: 13, weight: .semibold)
-                        .foregroundColor(palette.primary)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "common.close", comment: "Accessibility label for close buttons"))
+                SheetCloseButton { showLocationNotes = false }
+                    .foregroundColor(palette.primary)
             }
-            .frame(height: headerHeight)
+            .frame(minHeight: headerHeight)
             .padding(.horizontal, 12)
             .themedChromePanel(edge: .top)
             Text("content.notes.location_unavailable")
