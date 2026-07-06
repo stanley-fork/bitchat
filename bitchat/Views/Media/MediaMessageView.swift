@@ -11,6 +11,7 @@ import BitFoundation
 struct MediaMessageView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appTheme) private var theme
+    @ThemedPalette private var palette
     @EnvironmentObject private var conversationUIModel: ConversationUIModel
     let message: BitchatMessage
     let media: BitchatMessage.Media
@@ -36,12 +37,14 @@ struct MediaMessageView: View {
         let isFromMe = conversationUIModel.isMediaMessageFromCurrentUser(message)
         let cancelAction: (() -> Void)? = state.canCancel ? { conversationUIModel.cancelMediaSend(messageID: message.id) } : nil
 
-        HStack(alignment: .top, spacing: 0) {
+        // Baseline alignment (via the header text inside the VStack) keeps the
+        // lock on the header line; a fixed top padding left its solid body
+        // hanging below the line's visual center.
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
             if message.isPrivate {
                 Image(systemName: "lock.fill")
                     .font(.bitchatSystem(size: 8))
                     .foregroundColor(Color.orange.opacity(0.75))
-                    .padding(.top, 5)
                     .padding(.trailing, 4)
                     .accessibilityHidden(true)
             }
@@ -81,7 +84,7 @@ struct MediaMessageView: View {
                     } else if showDeliveryDetail {
                         Text(verbatim: status.bitchatDescription)
                             .bitchatFont(size: 11)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(palette.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
