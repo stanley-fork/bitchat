@@ -139,7 +139,7 @@ struct MediaMessageView: View {
                     isSending = true
                     progress = Double(reached) / Double(total)
                 }
-            case .sent, .read, .delivered, .failed:
+            case .sent, .carried, .read, .delivered, .failed:
                 break
             }
         }

@@ -19,6 +19,8 @@ extension DeliveryStatus {
             return String(localized: "content.delivery.sending", comment: "Delivery status description while a private message is being sent")
         case .sent:
             return String(localized: "content.delivery.sent", comment: "Delivery status description for a sent but not yet confirmed private message")
+        case .carried:
+            return String(localized: "content.delivery.carried", defaultValue: "Carried by a friend who may meet them", comment: "Delivery status description for messages handed to a courier for physical delivery")
         case .delivered(let nickname, _):
             return String(
                 format: String(localized: "content.delivery.delivered_to", comment: "Tooltip for delivered private messages"),
@@ -80,6 +82,11 @@ struct DeliveryStatusView: View {
                 .font(.bitchatSystem(size: 10))
                 .foregroundColor(secondaryTextColor.opacity(0.6))
 
+        case .carried:
+            Image(systemName: "figure.walk")
+                .font(.bitchatSystem(size: 10))
+                .foregroundColor(secondaryTextColor.opacity(0.8))
+
         case .delivered:
             HStack(spacing: -2) {
                 Image(systemName: "checkmark")
@@ -120,6 +127,7 @@ struct DeliveryStatusView: View {
     let statuses: [DeliveryStatus] = [
         .sending,
         .sent,
+        .carried,
         .delivered(to: "John Doe", at: Date()),
         .read(by: "Jane Doe", at: Date()),
         .failed(reason: "Offline"),
