@@ -89,7 +89,10 @@ final class NostrTransport: Transport, @unchecked Sendable {
     /// ever hold one item and never pace a burst (flagged by Codex on
     /// #1398). Production wires `sharedAckPacer` via `Dependencies.live`;
     /// tests get an isolated instance per `Dependencies` by default.
-    final class AckPacer {
+    /// @unchecked Sendable: all mutable state (`pending`, `isSending`) is
+    /// confined to the serial `queue`; the class is only touched via
+    /// `enqueue` and the scheduler callback, both of which hop onto it.
+    final class AckPacer: @unchecked Sendable {
         typealias Scheduler = @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
 
         private let queue = DispatchQueue(label: "chat.bitchat.nostr-ack-pacer")
