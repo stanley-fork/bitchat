@@ -26,6 +26,10 @@ public enum MessageType: UInt8 {
     case fileTransfer = 0x22    // Binary file/audio/image payloads
     case boardPost = 0x23       // Signed geohash bulletin-board post or tombstone
 
+    // Mesh diagnostics
+    case ping = 0x26            // Directed echo request (nonce + origin TTL)
+    case pong = 0x27            // Directed echo reply (echoed nonce + origin TTL)
+
     // Gateway mode: signed Nostr event ferried between a mesh-only peer and
     // an internet gateway peer.
     case nostrCarrier = 0x28
@@ -42,6 +46,8 @@ public enum MessageType: UInt8 {
         case .fragment: return "fragment"
         case .fileTransfer: return "fileTransfer"
         case .boardPost: return "boardPost"
+        case .ping: return "ping"
+        case .pong: return "pong"
         case .nostrCarrier: return "nostrCarrier"
         }
     }

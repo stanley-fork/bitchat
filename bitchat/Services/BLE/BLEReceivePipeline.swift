@@ -51,10 +51,15 @@ struct BLEReceivePipeline {
             // Courier envelopes are directed opaque ciphertext like DMs; a
             // remote handover toward a relayed announce rides this same
             // deterministic relay treatment instead of the broadcast clamp.
+            // Ping/pong diagnostics ride it too: probes need the same
+            // deterministic multi-hop relay as DMs (always relay, jitter,
+            // no TTL cap) so RTT and hop counts reflect the real path.
             // Directed nostrCarrier uplinks (mesh-only peer -> gateway) need
             // the same multi-hop treatment to reach a non-adjacent gateway.
             isDirectedEncrypted: (packet.type == MessageType.noiseEncrypted.rawValue
                 || packet.type == MessageType.courierEnvelope.rawValue
+                || packet.type == MessageType.ping.rawValue
+                || packet.type == MessageType.pong.rawValue
                 || packet.type == MessageType.nostrCarrier.rawValue) && packet.recipientID != nil,
             isFragment: packet.type == MessageType.fragment.rawValue,
             isDirectedFragment: packet.type == MessageType.fragment.rawValue && packet.recipientID != nil,

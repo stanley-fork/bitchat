@@ -25,6 +25,8 @@ enum CommandInfo: String, Identifiable {
     case who
     case favorite = "fav"
     case unfavorite = "unfav"
+    case ping
+    case trace
 
     var id: String { rawValue }
 
@@ -32,7 +34,7 @@ enum CommandInfo: String, Identifiable {
 
     var placeholder: String? {
         switch self {
-        case .block, .hug, .message, .slap, .unblock, .favorite, .unfavorite:
+        case .block, .hug, .message, .slap, .unblock, .favorite, .unfavorite, .ping, .trace:
             return "<" + String(localized: "content.input.nickname_placeholder") + ">"
         case .pay:
             return "<" + String(localized: "content.input.token_placeholder") + ">"
@@ -54,6 +56,8 @@ enum CommandInfo: String, Identifiable {
         case .who:          String(localized: "content.commands.who")
         case .favorite:     String(localized: "content.commands.favorite")
         case .unfavorite:   String(localized: "content.commands.unfavorite")
+        case .ping:         String(localized: "content.commands.ping")
+        case .trace:        String(localized: "content.commands.trace")
         }
     }
 
@@ -66,11 +70,11 @@ enum CommandInfo: String, Identifiable {
         if !isGeoPublic {
             commands.append(.pay)
         }
-        // The processor rejects favorites in geohash contexts, so only
-        // suggest them where they actually work: mesh.
+        // The processor rejects favorites and mesh diagnostics in geohash
+        // contexts, so only suggest them where they actually work: mesh.
         if isGeoPublic || isGeoDM {
             return commands
         }
-        return commands + [.favorite, .unfavorite]
+        return commands + [.favorite, .unfavorite, .ping, .trace]
     }
 }
