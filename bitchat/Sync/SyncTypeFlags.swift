@@ -47,6 +47,11 @@ struct SyncTypeFlags: OptionSet {
         // downlinks are rate-budgeted rebroadcasts); replaying them via sync
         // would waste airtime and extend their lifetime.
         case .nostrCarrier: return nil
+        // Prekey bundles gossip like board posts. The bitfield is a
+        // wire-tolerant little-endian UInt64 (1-8 bytes, unknown high bits
+        // ignored by `type(forBit:)`), so bits 8+ need no format change: old
+        // clients decode the wider flags and simply never match the new bits.
+        case .prekeyBundle: return 9
         }
     }
 
@@ -64,6 +69,7 @@ struct SyncTypeFlags: OptionSet {
         // type-aware sync (#853) accept 1-8 bytes and map unknown bits to no
         // known type, so old clients ignore board rounds instead of choking.
         case 8: return .boardPost
+        case 9: return .prekeyBundle
         default:
             return nil
         }
@@ -74,6 +80,7 @@ struct SyncTypeFlags: OptionSet {
     static let fragment = SyncTypeFlags(messageTypes: [.fragment])
     static let fileTransfer = SyncTypeFlags(messageTypes: [.fileTransfer])
     static let board = SyncTypeFlags(messageTypes: [.boardPost])
+    static let prekeyBundle = SyncTypeFlags(messageTypes: [.prekeyBundle])
 
     static let publicMessages = SyncTypeFlags(messageTypes: [.announce, .message])
 

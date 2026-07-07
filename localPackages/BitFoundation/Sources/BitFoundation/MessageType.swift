@@ -16,15 +16,16 @@ public enum MessageType: UInt8 {
     case leave = 0x03           // "I'm leaving"
     case courierEnvelope = 0x04 // Store-and-forward envelope carried by a trusted peer
     case requestSync = 0x21     // GCS filter-based sync request (local-only)
-    
+
     // Noise encryption
     case noiseHandshake = 0x10  // Handshake (init or response determined by payload)
     case noiseEncrypted = 0x11  // All encrypted payloads (messages, receipts, etc.)
-    
+
     // Fragmentation (simplified)
     case fragment = 0x20        // Single fragment type for large messages
     case fileTransfer = 0x22    // Binary file/audio/image payloads
     case boardPost = 0x23       // Signed geohash bulletin-board post or tombstone
+    case prekeyBundle = 0x24    // Signed batch of one-time prekeys (gossiped)
 
     // Mesh diagnostics
     case ping = 0x26            // Directed echo request (nonce + origin TTL)
@@ -46,6 +47,7 @@ public enum MessageType: UInt8 {
         case .fragment: return "fragment"
         case .fileTransfer: return "fileTransfer"
         case .boardPost: return "boardPost"
+        case .prekeyBundle: return "prekeyBundle"
         case .ping: return "ping"
         case .pong: return "pong"
         case .nostrCarrier: return "nostrCarrier"

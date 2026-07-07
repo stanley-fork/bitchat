@@ -1209,6 +1209,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         GossipMessageArchive.wipeDefault()
         StoreAndForwardMetrics.shared.reset()
 
+        // Drop cached peers' prekey bundles (who we could write to is
+        // metadata too). Our own prekey privates are keychain-backed and go
+        // with deleteAllKeychainData above plus the identity reset below.
+        PrekeyBundleStore.shared.wipe()
         // Drop bulletin-board posts and tombstones (memory and disk); board
         // posts are signed with our identity key and persist for days.
         BoardStore.shared.wipe()
