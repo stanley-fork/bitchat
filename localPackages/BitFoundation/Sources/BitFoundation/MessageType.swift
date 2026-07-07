@@ -26,6 +26,10 @@ public enum MessageType: UInt8 {
     case fileTransfer = 0x22    // Binary file/audio/image payloads
     case boardPost = 0x23       // Signed geohash bulletin-board post or tombstone
 
+    // Gateway mode: signed Nostr event ferried between a mesh-only peer and
+    // an internet gateway peer.
+    case nostrCarrier = 0x28
+
     public var description: String {
         switch self {
         case .announce: return "announce"
@@ -38,6 +42,7 @@ public enum MessageType: UInt8 {
         case .fragment: return "fragment"
         case .fileTransfer: return "fileTransfer"
         case .boardPost: return "boardPost"
+        case .nostrCarrier: return "nostrCarrier"
         }
     }
 }
