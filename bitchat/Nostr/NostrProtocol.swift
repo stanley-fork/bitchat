@@ -19,6 +19,7 @@ struct NostrProtocol {
         case giftWrap = 1059 // NIP-59 gift wrap
         case ephemeralEvent = 20000
         case geohashPresence = 20001
+        case deletion = 5 // NIP-09 event deletion request
     }
     
     /// Create a NIP-17 private message
@@ -256,15 +257,21 @@ struct NostrProtocol {
     }
 
     /// Create a persistent location note (kind 1: text note) tagged to a street-level geohash.
+    /// An optional `expiresAt` adds a NIP-40 expiration tag so honoring relays
+    /// drop the note in step with a bridged board post's expiry.
     static func createGeohashTextNote(
         content: String,
         geohash: String,
         senderIdentity: NostrIdentity,
-        nickname: String? = nil
+        nickname: String? = nil,
+        expiresAt: Date? = nil
     ) throws -> NostrEvent {
         var tags = [["g", geohash]]
         if let nickname = nickname?.trimmedOrNilIfEmpty {
             tags.append(["n", nickname])
+        }
+        if let expiresAt {
+            tags.append(["expiration", String(Int(expiresAt.timeIntervalSince1970))])
         }
         let event = NostrEvent(
             pubkey: senderIdentity.publicKeyHex,
@@ -276,7 +283,25 @@ struct NostrProtocol {
         let schnorrKey = try senderIdentity.schnorrSigningKey()
         return try event.sign(with: schnorrKey)
     }
-    
+
+    /// Create a NIP-09 deletion request for one of our own events. Relays that
+    /// honor NIP-09 drop the referenced event; it must be signed by the same
+    /// key that signed the original.
+    static func createDeleteEvent(
+        ofEventID eventID: String,
+        senderIdentity: NostrIdentity
+    ) throws -> NostrEvent {
+        let event = NostrEvent(
+            pubkey: senderIdentity.publicKeyHex,
+            createdAt: Date(),
+            kind: .deletion,
+            tags: [["e", eventID]],
+            content: ""
+        )
+        let schnorrKey = try senderIdentity.schnorrSigningKey()
+        return try event.sign(with: schnorrKey)
+    }
+
     // MARK: - Private Methods
     
     private static func createSeal(
