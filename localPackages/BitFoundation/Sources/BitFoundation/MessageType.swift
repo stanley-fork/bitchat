@@ -26,6 +26,7 @@ public enum MessageType: UInt8 {
     case fileTransfer = 0x22    // Binary file/audio/image payloads
     case boardPost = 0x23       // Signed geohash bulletin-board post or tombstone
     case prekeyBundle = 0x24    // Signed batch of one-time prekeys (gossiped)
+    case groupMessage = 0x25    // Group-encrypted broadcast (cleartext group ID, ChaChaPoly body)
 
     // Mesh diagnostics
     case ping = 0x26            // Directed echo request (nonce + origin TTL)
@@ -48,6 +49,7 @@ public enum MessageType: UInt8 {
         case .fileTransfer: return "fileTransfer"
         case .boardPost: return "boardPost"
         case .prekeyBundle: return "prekeyBundle"
+        case .groupMessage: return "groupMessage"
         case .ping: return "ping"
         case .pong: return "pong"
         case .nostrCarrier: return "nostrCarrier"

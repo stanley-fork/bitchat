@@ -16,6 +16,7 @@ enum CommandInfo: String, Identifiable {
     // suggesting a spelling the processor rejects teaches users dead ends.
     case block
     case clear
+    case group
     case help
     case hug
     case message = "msg"
@@ -36,6 +37,8 @@ enum CommandInfo: String, Identifiable {
         switch self {
         case .block, .hug, .message, .slap, .unblock, .favorite, .unfavorite, .ping, .trace:
             return "<" + String(localized: "content.input.nickname_placeholder") + ">"
+        case .group:
+            return "<" + String(localized: "content.input.group_placeholder") + ">"
         case .pay:
             return "<" + String(localized: "content.input.token_placeholder") + ">"
         case .clear, .help, .who:
@@ -47,6 +50,7 @@ enum CommandInfo: String, Identifiable {
         switch self {
         case .block:        String(localized: "content.commands.block")
         case .clear:        String(localized: "content.commands.clear")
+        case .group:        String(localized: "content.commands.group")
         case .help:         String(localized: "content.commands.help")
         case .hug:          String(localized: "content.commands.hug")
         case .message:      String(localized: "content.commands.message")
@@ -70,11 +74,11 @@ enum CommandInfo: String, Identifiable {
         if !isGeoPublic {
             commands.append(.pay)
         }
-        // The processor rejects favorites and mesh diagnostics in geohash
-        // contexts, so only suggest them where they actually work: mesh.
+        // The processor rejects favorites, groups, and mesh diagnostics in
+        // geohash contexts, so only suggest them where they work: mesh.
         if isGeoPublic || isGeoDM {
             return commands
         }
-        return commands + [.favorite, .unfavorite, .ping, .trace]
+        return commands + [.favorite, .unfavorite, .ping, .trace, .group]
     }
 }

@@ -157,6 +157,18 @@ private final class MockChatTransportEventContext: ChatTransportEventContext {
         verifyResponsePayloads.append((peerID, payload))
     }
 
+    // Group payloads
+    private(set) var groupInvitePayloads: [(peerID: PeerID, payload: Data)] = []
+    private(set) var groupKeyUpdatePayloads: [(peerID: PeerID, payload: Data)] = []
+
+    func handleGroupInvitePayload(from peerID: PeerID, payload: Data) {
+        groupInvitePayloads.append((peerID, payload))
+    }
+
+    func handleGroupKeyUpdatePayload(from peerID: PeerID, payload: Data) {
+        groupKeyUpdatePayloads.append((peerID, payload))
+    }
+
     private(set) var vouchPayloads: [(peerID: PeerID, payload: Data)] = []
 
     func handleVouchPayload(from peerID: PeerID, payload: Data) {

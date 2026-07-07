@@ -37,6 +37,13 @@ struct SyncTypeFlags: OptionSet {
         case .requestSync: return 6
         case .fileTransfer: return 7
         case .boardPost: return 8
+        // Extended bits are compat-safe by construction: `toData()` encodes
+        // the bitfield little-endian with trailing zero bytes trimmed (bit 10
+        // widens the wire form from 1 to 2 bytes inside the length-prefixed
+        // REQUEST_SYNC TLV 0x04), and `decode(_:)` accepts 1...8 bytes while
+        // `type(forBit:)` maps unknown bits to nil — so old clients simply
+        // ignore the group bit and answer with the types they know.
+        case .groupMessage: return 10
         // Courier envelopes are directed deposits between trusted peers and
         // must never spread via gossip sync.
         case .courierEnvelope: return nil
@@ -70,6 +77,7 @@ struct SyncTypeFlags: OptionSet {
         // known type, so old clients ignore board rounds instead of choking.
         case 8: return .boardPost
         case 9: return .prekeyBundle
+        case 10: return .groupMessage
         default:
             return nil
         }
@@ -81,6 +89,7 @@ struct SyncTypeFlags: OptionSet {
     static let fileTransfer = SyncTypeFlags(messageTypes: [.fileTransfer])
     static let board = SyncTypeFlags(messageTypes: [.boardPost])
     static let prekeyBundle = SyncTypeFlags(messageTypes: [.prekeyBundle])
+    static let groupMessage = SyncTypeFlags(messageTypes: [.groupMessage])
 
     static let publicMessages = SyncTypeFlags(messageTypes: [.announce, .message])
 
