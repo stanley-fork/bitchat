@@ -180,6 +180,9 @@ enum TransportConfig {
     static let uiArchivedEchoLoadDelaySeconds: TimeInterval = 1.5
     // Dead drops: location notes left via /drop expire after this long.
     static let locationDropExpirySeconds: TimeInterval = 24 * 60 * 60
+    // Poll cadence while geo notes wait for a relay connection (Tor warming
+    // up); re-subscribes as soon as one comes up.
+    static let uiGeoNotesConnectivityRetrySeconds: TimeInterval = 3.0
 
     // Message deduplication
     static let messageDedupMaxAgeSeconds: TimeInterval = 300
