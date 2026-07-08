@@ -1082,185 +1082,6 @@
         }
       }
     },
-    "app_info.close" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "إغلاق"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "বন্ধ করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "schließen"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "close"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "cerrar"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "isara"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "fermer"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "סגור"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "बंद करें"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tutup"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "chiudi"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "閉じる"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "닫기"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tutup"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "बन्द"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "sluiten"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "zamknij"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "fechar"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "fechar"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "закрыть"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "stäng"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "மூடு"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ปิด"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "kapat"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "закрити"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "بند کریں"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "đóng"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关闭"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "關閉"
-          }
-        }
-      }
-    },
     "app_info.done" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4310,175 +4131,175 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• اضغط أيقونة الأشخاص لفتح الشريط الجانبي"
+            "value" : "• اضغط أيقونة الأشخاص لفتح القائمة"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• সাইডবার খুলতে মানুষ আইকনে ট্যাপ করুন"
+            "value" : "• তালিকা খুলতে মানুষ আইকনে ট্যাপ করুন"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tippe auf das personen-icon, um die seitenleiste zu öffnen"
+            "value" : "• tippe auf das personen-icon für die liste"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tap people icon for sidebar"
+            "value" : "• tap people icon for list"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toca el ícono de personas para abrir la barra lateral"
+            "value" : "• toca el ícono de personas para ver la lista"
           }
         },
         "fil" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• i-tap ang icon ng tao para buksan ang sidebar"
+            "value" : "• i-tap ang icon ng tao para sa listahan"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tape sur l'icône personnes pour ouvrir la barre latérale"
+            "value" : "• tape sur l'icône personnes pour la liste"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• הקש על אייקון האנשים כדי לפתוח סרגל צד"
+            "value" : "• הקש על אייקון האנשים כדי לפתוח את הרשימה"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• साइडबार खोलने के लिए लोगों वाले आइकन पर टैप करें"
+            "value" : "• सूची खोलने के लिए लोगों वाले आइकन पर टैप करें"
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ketuk ikon orang untuk membuka sidebar"
+            "value" : "• ketuk ikon orang untuk membuka daftar"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tocca l'icona persone per aprire la barra laterale"
+            "value" : "• tocca l'icona persone per aprire la lista"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 人アイコンをタップしてサイドバーを開く"
+            "value" : "• 人アイコンをタップして一覧を開く"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 사람 아이콘을 탭하여 사이드바를 엽니다"
+            "value" : "• 사람 아이콘을 탭하여 목록을 엽니다"
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ketuk ikon orang untuk membuka sidebar"
+            "value" : "• ketuk ikon orang untuk membuka senarai"
           }
         },
         "ne" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• साइडबार खोल्न मान्छे आइकन ट्याप गर"
+            "value" : "• सूची खोल्न मान्छे आइकन ट्याप गर"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tik op het personen-icoon om de zijbalk te openen"
+            "value" : "• tik op het personen-icoon voor de lijst"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• stuknij ikonę osób, aby otworzyć panel boczny"
+            "value" : "• stuknij ikonę osób, aby otworzyć listę"
           }
         },
         "pt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toca no ícone das pessoas para abrir a barra lateral"
+            "value" : "• toca no ícone das pessoas para abrir a lista"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toque o ícone de pessoas para abrir a barra lateral"
+            "value" : "• toque o ícone de pessoas para abrir a lista"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• нажми на иконку людей, чтобы открыть боковое меню"
+            "value" : "• нажми на иконку людей, чтобы открыть список"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tryck på personikonen för att öppna sidomenyn"
+            "value" : "• tryck på personikonen för att öppna listan"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• பக்கப்பட்டியைத் திறக்க மனிதர் சின்னத்தைத் தட்டுங்கள்"
+            "value" : "• பட்டியலைத் திறக்க மனிதர் சின்னத்தைத் தட்டுங்கள்"
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• แตะไอคอนคนเพื่อเปิดแถบด้านข้าง"
+            "value" : "• แตะไอคอนคนเพื่อเปิดรายชื่อ"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• kenar çubuğunu açmak için insan simgesine dokunun"
+            "value" : "• listeyi açmak için insan simgesine dokunun"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• торкни піктограму людей, щоб відкрити бічну панель"
+            "value" : "• торкни піктограму людей, щоб відкрити список"
           }
         },
         "ur" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• سائیڈ بار کھولنے کیلئے لوگوں کا آئیکن ٹیپ کریں"
+            "value" : "• فہرست کھولنے کیلئے لوگوں کا آئیکن ٹیپ کریں"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• chạm biểu tượng người để mở thanh bên"
+            "value" : "• chạm biểu tượng người để mở danh sách"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 轻点人物图标打开侧栏"
+            "value" : "• 轻点人物图标打开列表"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 輕點人物圖示打開側欄"
+            "value" : "• 輕點人物圖示打開列表"
           }
         }
       }
@@ -4668,175 +4489,175 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• اضغط اسم القرين لبدء رسائل خاصة"
+            "value" : "• اضغط اسم شخص لبدء رسائل خاصة"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ডিএম শুরু করতে পিয়ারের নাম ট্যাপ করুন"
+            "value" : "• ডিএম শুরু করতে কোনো ব্যক্তির নাম ট্যাপ করুন"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tippe auf den namen eines peers, um eine pn zu starten"
+            "value" : "• tippe auf den namen einer person, um eine pn zu starten"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tap a peer's name to start a DM"
+            "value" : "• tap a person's name to start a DM"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toca el nombre de un participante para iniciar un MD"
+            "value" : "• toca el nombre de una persona para iniciar un MD"
           }
         },
         "fil" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• i-tap ang pangalan ng peer para magsimula ng DM"
+            "value" : "• i-tap ang pangalan ng isang tao para magsimula ng DM"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tape sur le nom d'un pair pour démarrer un mp"
+            "value" : "• tape sur le nom d'une personne pour démarrer un mp"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• הקש על שם עמית כדי להתחיל הודעה פרטית"
+            "value" : "• הקש על שם של אדם כדי להתחיל הודעה פרטית"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• किसी पीयर का नाम टैप करके DM शुरू करें"
+            "value" : "• किसी व्यक्ति का नाम टैप करके DM शुरू करें"
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ketuk nama peer untuk mulai dm"
+            "value" : "• ketuk nama seseorang untuk mulai dm"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tocca il nome di un peer per avviare un dm"
+            "value" : "• tocca il nome di una persona per avviare un dm"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ピアの名前をタップしてdm開始"
+            "value" : "• 人の名前をタップしてdm開始"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 피어의 이름을 탭하여 DM을 시작합니다"
+            "value" : "• 상대방의 이름을 탭하여 DM을 시작합니다"
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• ketuk nama peer untuk mulai dm"
+            "value" : "• ketuk nama seseorang untuk mulai dm"
           }
         },
         "ne" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• dm सुरु गर्न कुनै सहकर्मीको नाम ट्याप गर"
+            "value" : "• dm सुरु गर्न कुनै व्यक्तिको नाम ट्याप गर"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tik op de naam van een peer om een DM te starten"
+            "value" : "• tik op de naam van een persoon om een DM te starten"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• stuknij nazwę peera, aby rozpocząć DM"
+            "value" : "• stuknij czyjeś imię, aby rozpocząć DM"
           }
         },
         "pt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toca no nome de um par para iniciar um DM"
+            "value" : "• toca no nome de uma pessoa para iniciar um DM"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• toque o nome de um par para iniciar um dm"
+            "value" : "• toque o nome de uma pessoa para iniciar um dm"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• нажми имя пользователя, чтобы начать лс"
+            "value" : "• нажми имя человека, чтобы начать лс"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• tryck på en peers namn för att starta ett DM"
+            "value" : "• tryck på en persons namn för att starta ett DM"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• peer பெயரைத் தட்டி DM தொடங்கவும்"
+            "value" : "• ஒருவரின் பெயரைத் தட்டி DM தொடங்கவும்"
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• แตะชื่อเพียร์เพื่อเริ่ม DM"
+            "value" : "• แตะชื่อบุคคลเพื่อเริ่ม DM"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• bir eşin adına dokunarak DM başlatın"
+            "value" : "• bir kişinin adına dokunarak DM başlatın"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• торкни ім'я піра, щоб почати приватний чат"
+            "value" : "• торкни ім'я людини, щоб почати приватний чат"
           }
         },
         "ur" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• DM شروع کرنے کیلئے کسی ہم منصب کے نام پر ٹیپ کریں"
+            "value" : "• DM شروع کرنے کیلئے کسی شخص کے نام پر ٹیپ کریں"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• chạm tên một nút ngang hàng để mở DM"
+            "value" : "• chạm tên một người để mở DM"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 轻点同伴名字开始 dm"
+            "value" : "• 轻点某人名字开始 dm"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "• 輕點同伴名字開始 dm"
+            "value" : "• 輕點某人名字開始 dm"
           }
         }
       }
@@ -9512,360 +9333,539 @@
         }
       }
     },
-    "app_info.warning.message" : {
-      "extractionState" : "manual",
+    "app_info.voice.live.description" : {
+      "comment" : "Description of the live voice messages setting",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "أمان الرسائل الخاصة لم يتم تدقيقه بالكامل بعد. لا تستخدمها في الحالات الحرجة حتى يختفي هذا التحذير."
+            "value" : "بث الرسائل الصوتية أثناء التحدث عندما يكون المستلم متاحًا؛ يتم تشغيل الصوت المباشر الوارد تلقائيًا في المحادثة المفتوحة"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ব্যক্তিগত বার্তার নিরাপত্তা এখনো সম্পূর্ণ অডিট হয়নি। এই সতর্কতা না থাকা পর্যন্ত জরুরি পরিস্থিতিতে ব্যবহার করবেন না।"
+            "value" : "প্রাপক নাগালের মধ্যে থাকলে কথা বলার সাথে সাথে ভয়েস বার্তা স্ট্রিম হয়; খোলা চ্যাটে আগত লাইভ ভয়েস স্বয়ংক্রিয়ভাবে চলে"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "die sicherheit privater nachrichten wurde noch nicht vollständig geprüft. nutze sie nicht für kritische situationen, solange dieser hinweis erscheint."
+            "value" : "sprachnachrichten werden beim sprechen live übertragen, wenn der empfänger erreichbar ist; eingehende live-stimme wird im geöffneten chat automatisch abgespielt"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "private message security has not yet been fully audited. do not use for critical situations until this warning disappears."
+            "value" : "stream voice messages as you speak when the recipient is reachable; incoming live voice plays automatically in the open chat"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "la seguridad de los mensajes privados aún no ha sido auditada por completo. no lo uses en situaciones críticas hasta que este aviso desaparezca."
+            "value" : "transmite mensajes de voz mientras hablas cuando el destinatario está disponible; la voz en vivo entrante se reproduce automáticamente en el chat abierto"
           }
         },
         "fil" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "hindi pa ganap na na-audit ang seguridad ng pribadong mensahe. huwag gamitin para sa kritikal na sitwasyon hangga't hindi nawawala ang babalang ito."
+            "value" : "ini-stream ang mga voice message habang nagsasalita kapag maaabot ang tatanggap; awtomatikong tumutugtog ang papasok na live na boses sa bukas na chat"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "la sécurité des messages privés n'a pas encore été entièrement auditée. n'utilise pas pour des situations critiques tant que cet avertissement reste."
+            "value" : "diffuse les messages vocaux pendant que vous parlez lorsque le destinataire est joignable ; la voix en direct entrante est lue automatiquement dans la discussion ouverte"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "אבטחת ההודעות הפרטיות עדיין לא נבדקה במלואה. אל תשתמש למצבים קריטיים עד שהאזהרה תיעלם."
+            "value" : "משדר הודעות קוליות בזמן שאתה מדבר כשהנמען זמין; קול חי נכנס מושמע אוטומטית בצ'אט הפתוח"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "निजी संदेश सुरक्षा का अभी पूरा ऑडिट नहीं हुआ है। यह चेतावनी हटने तक गंभीर स्थितियों में उपयोग न करें।"
+            "value" : "प्राप्तकर्ता पहुंच में होने पर बोलते समय वॉयस संदेश स्ट्रीम होते हैं; खुली चैट में आने वाली लाइव आवाज़ अपने आप चलती है"
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "keamanan pesan pribadi belum diaudit sepenuhnya. jangan dipakai untuk situasi kritis sampai peringatan ini hilang."
+            "value" : "streaming pesan suara saat Anda berbicara ketika penerima terjangkau; suara langsung yang masuk diputar otomatis di obrolan yang terbuka"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "la sicurezza dei messaggi privati non è stata ancora auditata completamente. non usarli in situazioni critiche finché questo avviso resta."
+            "value" : "trasmette i messaggi vocali mentre parli quando il destinatario è raggiungibile; la voce in diretta in arrivo viene riprodotta automaticamente nella chat aperta"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "プライベートメッセージの安全性はまだ完全に監査されていません。この警告が消えるまで重要な場面では使わないでください。"
+            "value" : "受信者に到達可能なとき、話しながら音声メッセージをライブ配信します。受信したライブ音声は開いているチャットで自動再生されます"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "비공개 메시지 보안은 아직 완전히 감사받지 않았습니다. 이 경고가 사라질 때까지 중요한 상황에서는 사용하지 마세요."
+            "value" : "상대방이 연결되어 있으면 말하는 동안 음성 메시지가 실시간 전송됩니다. 수신된 라이브 음성은 열려 있는 채팅에서 자동 재생됩니다"
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "keamanan pesan pribadi belum diaudit sepenuhnya. jangan diguna untuk situasi kritis sampai peringatan ini hilang."
+            "value" : "strim mesej suara semasa anda bercakap apabila penerima boleh dihubungi; suara langsung masuk dimainkan secara automatik dalam sembang terbuka"
           }
         },
         "ne" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "व्यक्तिगत सन्देशको सुरक्षा पूर्ण रूपमा अडिट भएको छैन। यो चेतावनी हट्दासम्म गम्भीर अवस्थामा प्रयोग नगर्नु।"
+            "value" : "प्रापक पहुँचयोग्य हुँदा बोल्दै गर्दा भ्वाइस सन्देशहरू स्ट्रिम हुन्छन्; खुला च्याटमा आगमन लाइभ आवाज स्वतः बज्छ"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "de beveiliging van privéberichten is nog niet volledig geaudit. gebruik dit niet in kritieke situaties totdat deze melding verdwijnt."
+            "value" : "streamt spraakberichten terwijl je praat wanneer de ontvanger bereikbaar is; inkomende live spraak wordt automatisch afgespeeld in de geopende chat"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "bezpieczeństwo wiadomości prywatnych nie zostało jeszcze w pełni sprawdzone. nie używaj w sytuacjach krytycznych, dopóki to ostrzeżenie nie zniknie."
+            "value" : "przesyła wiadomości głosowe na żywo podczas mówienia, gdy odbiorca jest osiągalny; przychodzący głos na żywo odtwarza się automatycznie w otwartym czacie"
           }
         },
         "pt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "a segurança das mensagens privadas ainda não foi totalmente auditada. não uses em situações críticas até este aviso desaparecer."
+            "value" : "transmite mensagens de voz enquanto fala quando o destinatário está acessível; a voz ao vivo recebida é reproduzida automaticamente na conversa aberta"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "a segurança das mensagens privadas ainda não foi totalmente auditada. não use em situações críticas até que este aviso desapareça."
+            "value" : "transmite mensagens de voz enquanto você fala quando o destinatário está acessível; a voz ao vivo recebida toca automaticamente na conversa aberta"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "безопасность приватных сообщений ещё не прошла полный аудит. не используй для критичных случаев, пока предупреждение не исчезнет."
+            "value" : "передаёт голосовые сообщения в реальном времени, пока вы говорите, если получатель доступен; входящий живой голос автоматически воспроизводится в открытом чате"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "säkerheten för privata meddelanden är ännu inte fullständigt granskad. använd inte i kritiska situationer förrän detta meddelande försvinner."
+            "value" : "strömmar röstmeddelanden medan du pratar när mottagaren är nåbar; inkommande live-röst spelas upp automatiskt i den öppna chatten"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "தனிப்பட்ட செய்தி பாதுகாப்பு இன்னும் முழுமையாக ஆய்வு செய்யப்படவில்லை. இந்த எச்சரிக்கை மறையும் வரை முக்கிய அவசரங்களுக்கு பயன்படுத்தாதீர்கள்."
+            "value" : "பெறுநர் அணுகக்கூடியதாக இருக்கும்போது நீங்கள் பேசும்போதே குரல் செய்திகள் நேரலையாக அனுப்பப்படும்; உள்வரும் நேரலை குரல் திறந்த அரட்டையில் தானாக ஒலிக்கும்"
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ความปลอดภัยของข้อความส่วนตัวยังไม่ได้รับการตรวจสอบทั้งหมด อย่าใช้ในสถานการณ์วิกฤติจนกว่าคำเตือนนี้จะหายไป"
+            "value" : "สตรีมข้อความเสียงขณะพูดเมื่อติดต่อผู้รับได้ เสียงสดขาเข้าจะเล่นอัตโนมัติในแชทที่เปิดอยู่"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "özel mesaj güvenliği henüz tamamen denetlenmedi. bu uyarı kaybolana kadar kritik durumlarda kullanmayın."
+            "value" : "alıcı erişilebilir olduğunda sesli mesajlar siz konuşurken canlı iletilir; gelen canlı ses açık sohbette otomatik çalınır"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "безпека приватних повідомлень ще не пройшла повний аудит. не використовуй для критичних ситуацій, поки це попередження не зникне."
+            "value" : "передає голосові повідомлення наживо, поки ви говорите, якщо одержувач доступний; вхідний живий голос автоматично відтворюється у відкритому чаті"
           }
         },
         "ur" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "نجی پیغامات کی سیکیورٹی کا ابھی مکمل آڈٹ نہیں ہوا۔ اس انتباہ کے ختم ہونے تک اسے اہم حالات میں استعمال نہ کریں۔"
+            "value" : "جب وصول کنندہ قابل رسائی ہو تو بولتے وقت صوتی پیغامات لائیو نشر ہوتے ہیں؛ موصول ہونے والی لائیو آواز کھلی چیٹ میں خود بخود چلتی ہے"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "bảo mật tin nhắn riêng tư vẫn chưa được kiểm toán đầy đủ. đừng dùng cho tình huống quan trọng cho tới khi cảnh báo này biến mất."
+            "value" : "phát trực tiếp tin nhắn thoại khi bạn nói nếu người nhận trong tầm kết nối; giọng nói trực tiếp đến sẽ tự phát trong cuộc trò chuyện đang mở"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "私信安全尚未完全审计。在此警告消失前不要用于关键情境。"
+            "value" : "当接收方可达时，语音消息会在你说话的同时实时传输；收到的实时语音会在打开的聊天中自动播放"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "私信安全尚未完全審計。在此警告消失前不要用於關鍵情境。"
+            "value" : "當接收方可達時，語音訊息會在你說話的同時即時傳輸；收到的即時語音會在開啟的聊天中自動播放"
           }
         }
       }
     },
-    "app_info.warning.title" : {
-      "extractionState" : "manual",
+    "app_info.voice.live.title" : {
+      "comment" : "Title of the live voice messages setting",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "تحذير"
+            "value" : "رسائل صوتية مباشرة"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "সতর্কতা"
+            "value" : "লাইভ ভয়েস বার্তা"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "WARNUNG"
+            "value" : "live-sprachnachrichten"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "WARNING"
+            "value" : "live voice messages"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ADVERTENCIA"
+            "value" : "mensajes de voz en vivo"
           }
         },
         "fil" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BABALA"
+            "value" : "live na mga voice message"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AVERTISSEMENT"
+            "value" : "messages vocaux en direct"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "אזהרה"
+            "value" : "הודעות קוליות חיות"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "चेतावनी"
+            "value" : "लाइव वॉयस संदेश"
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "PERINGATAN"
+            "value" : "pesan suara langsung"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AVVISO"
+            "value" : "messaggi vocali in diretta"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "警告"
+            "value" : "ライブ音声メッセージ"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "경고"
+            "value" : "라이브 음성 메시지"
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "PERINGATAN"
+            "value" : "mesej suara langsung"
           }
         },
         "ne" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "चेतावनी"
+            "value" : "लाइभ भ्वाइस सन्देशहरू"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "WAARSCHUWING"
+            "value" : "live spraakberichten"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "OSTRZEŻENIE"
+            "value" : "wiadomości głosowe na żywo"
           }
         },
         "pt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AVISO"
+            "value" : "mensagens de voz ao vivo"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AVISO"
+            "value" : "mensagens de voz ao vivo"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ПРЕДУПРЕЖДЕНИЕ"
+            "value" : "живые голосовые сообщения"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VARNING"
+            "value" : "live-röstmeddelanden"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "எச்சரிக்கை"
+            "value" : "நேரலை குரல் செய்திகள்"
           }
         },
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "คำเตือน"
+            "value" : "ข้อความเสียงสด"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "UYARI"
+            "value" : "canlı sesli mesajlar"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ПОПЕРЕДЖЕННЯ"
+            "value" : "живі голосові повідомлення"
           }
         },
         "ur" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "انتباہ"
+            "value" : "لائیو صوتی پیغامات"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "CẢNH BÁO"
+            "value" : "tin nhắn thoại trực tiếp"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "警告"
+            "value" : "实时语音消息"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "警告"
+            "value" : "即時語音訊息"
+          }
+        }
+      }
+    },
+    "app_info.voice.title" : {
+      "comment" : "Section header for voice settings in the app info sheet",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الصوت"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ভয়েস"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AUDIO"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOICE"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOZ"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BOSES"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOIX"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "קול"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "वॉयस"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SUARA"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOCE"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ボイス"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "음성"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SUARA"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आवाज"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SPRAAK"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GŁOS"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOZ"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VOZ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ГОЛОС"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "RÖST"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "குரல்"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "เสียง"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SES"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ГОЛОС"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آواز"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GIỌNG NÓI"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语音"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "語音"
           }
         }
       }
@@ -13457,6 +13457,186 @@
         }
       }
     },
+    "content.accessibility.gateway_hint" : {
+      "comment" : "Accessibility hint for the internet gateway indicator explaining a tap opens the channel sheet",
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "يفتح إعدادات القنوات لتشغيل البوابة أو إيقافها"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "গেটওয়ে চালু বা বন্ধ করতে চ্যানেল সেটিংস খোলে"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Öffnet die kanaleinstellungen, um das gateway ein- oder auszuschalten"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opens channel settings to turn the gateway on or off"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Abre los ajustes de canales para activar o desactivar la puerta de enlace"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Binubuksan ang mga setting ng channel para i-on o i-off ang gateway"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ouvre les réglages des canaux pour activer ou désactiver la passerelle"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "פותח את הגדרות הערוצים כדי להפעיל או לכבות את השער"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "गेटवे चालू या बंद करने के लिए चैनल सेटिंग्स खोलता है"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Membuka pengaturan kanal untuk menyalakan atau mematikan gateway"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Apre le impostazioni dei canali per attivare o disattivare il gateway"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "チャンネル設定を開いてゲートウェイのオン/オフを切り替えます"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "채널 설정을 열어 게이트웨이를 켜거나 끕니다"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Membuka tetapan saluran untuk menghidupkan atau mematikan gateway"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "गेटवे खोल्न वा बन्द गर्न च्यानल सेटिङहरू खोल्छ"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Opent kanaalinstellingen om de gateway aan of uit te zetten"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Otwiera ustawienia kanałów, aby włączyć lub wyłączyć bramę"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Abre as definições de canais para ligar ou desligar o gateway"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Abre as configurações de canais para ligar ou desligar o gateway"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Открывает настройки каналов, чтобы включить или выключить шлюз"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Öppnar kanalinställningar för att slå på eller av gatewayen"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "கேட்வேயை இயக்க அல்லது அணைக்க சேனல் அமைப்புகளைத் திறக்கிறது"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "เปิดการตั้งค่าช่องเพื่อเปิดหรือปิดเกตเวย์"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ağ geçidini açmak veya kapatmak için kanal ayarlarını açar"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Відкриває налаштування каналів, щоб увімкнути або вимкнути шлюз"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "گیٹ وے کو آن یا آف کرنے کے لیے چینل کی ترتیبات کھولتا ہے"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Mở cài đặt kênh để bật hoặc tắt gateway"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "打开频道设置以开启或关闭网关"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "開啟頻道設定以開啟或關閉閘道"
+          }
+        }
+      }
+    },
     "content.accessibility.group_chat" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13991,185 +14171,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "位置頻道"
-          }
-        }
-      }
-    },
-    "content.accessibility.location_notes" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ملاحظات الموقع لهذا المكان"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "এই স্থানের লোকেশন নোট"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "standortnotizen für diesen ort"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "location notes for this place"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas de ubicación de este lugar"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "mga tala para sa lugar na ito"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notes de localisation pour cet endroit"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "הערות מיקום למקום הזה"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "इस स्थान के लोकेशन नोट"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "catatan lokasi untuk tempat ini"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "note di posizione per questo posto"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "この場所のロケーションノート"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "이 장소의 위치 노트"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "catatan lokasi untuk tempat ini"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "यस ठाउँका स्थान नोटहरू"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "locatienotities voor deze plek"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notatki lokalizacyjne dla tego miejsca"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas de localização deste lugar"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas de localização deste lugar"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "заметки для этого места"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "platsanteckningar för den här platsen"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "இந்த இடத்திற்கான குறிப்புகள்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "บันทึกตำแหน่งสำหรับสถานที่นี้"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "bu yer için konum notları"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "замітки про це місце"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اس جگہ کیلئے لوکیشن نوٹس"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ghi chú vị trí cho nơi này"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此位置的笔记"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此位置的筆記"
           }
         }
       }
@@ -17250,6 +17251,185 @@
         }
       }
     },
+    "content.accessibility.someone_speaking" : {
+      "comment" : "Accessibility value on the mic button naming who is talking live in the public channel",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ يتحدث الآن"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ কথা বলছেন"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ spricht gerade"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ is speaking"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ está hablando"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "nagsasalita si %@"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ est en train de parler"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ מדבר כעת"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ बोल रहे हैं"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ sedang berbicara"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ sta parlando"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@が話しています"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 님이 말하는 중"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ sedang bercakap"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ बोल्दै हुनुहुन्छ"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ is aan het spreken"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ mówi"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ está a falar"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ está falando"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ говорит"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ pratar"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ பேசுகிறார்"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ กำลังพูด"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ konuşuyor"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ говорить"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ بول رہے ہیں"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ đang nói"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 正在讲话"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 正在說話"
+          }
+        }
+      }
+    },
     "content.accessibility.take_photo" : {
       "comment" : "Accessibility action name for taking a photo with the camera",
       "extractionState" : "manual",
@@ -17605,185 +17785,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "切換 #%@ 的書簽"
-          }
-        }
-      }
-    },
-    "content.accessibility.toggle_favorite_hint" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اضغط مرتين لتبديل حالة المفضلة"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "প্রিয় অবস্থা বদলাতে দুইবার ট্যাপ করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "doppelt tippen, um favoritenstatus zu wechseln"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "double tap to toggle favorite status"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "toca dos veces para alternar el estado de favorito"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "i-double tap para i-toggle ang paborito"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tape deux fois pour basculer le statut favori"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "הקש פעמיים כדי להחליף מצב מועדפים"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "पसंदीदा स्थिति बदलने के लिए डबल टैप करें"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ketuk dua kali untuk mengubah status favorit"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tocca due volte per cambiare stato preferito"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ダブルタップでお気に入り状態を切り替え"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "두 번 탭하여 즐겨찾기 상태 토글"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ketuk dua kali untuk mengubah status favorit"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "मनपर्ने स्थिति बदल्न दोहोरो ट्याप गर"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "dubbelklikken om favoriet te schakelen"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "stuknij dwukrotnie, aby zmienić stan ulubionych"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "toca duas vezes para alternar o estado de favorito"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "toque duas vezes para alternar status de favorito"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "дважды тапни, чтобы переключить статус избранного"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "dubbeltryck för att växla favoritstatus"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "பிரியப்பட்ட நிலையை மாற்ற இருமுறை தட்டவும்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "แตะสองครั้งเพื่อสลับสถานะรายการโปรด"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "favori durumunu değiştirmek için çift dokunun"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "торкни двічі, щоб змінити статус вибраного"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "پسندیدہ حالت بدلنے کیلئے دو بار ٹیپ کریں"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "chạm hai lần để chuyển trạng thái yêu thích"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "双击切换收藏状态"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "雙擊切換收藏狀態"
           }
         }
       }
@@ -29806,185 +29807,6 @@
         }
       }
     },
-    "content.notes.title" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ملاحظات"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "নোট"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notizen"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notes"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "mga tala"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notes"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "הערות"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "नोट्स"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "catatan"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "note"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ノート"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "노트"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "catatan"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "नोट"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notities"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notatki"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notas"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "заметки"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "anteckningar"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "குறிப்புகள்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "บันทึก"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notlar"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "замітки"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "نوٹس"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ghi chú"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "笔记"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "筆記"
-          }
-        }
-      }
-    },
     "content.payment.cashu" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -38326,6 +38148,185 @@
         }
       }
     },
+    "live %@" : {
+      "comment" : "Recording HUD label while a voice message streams live to the recipient",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مباشر %@"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "লাইভ %@"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "live %@"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "live %@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "en vivo %@"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "live %@"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "en direct %@"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "שידור חי %@"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लाइव %@"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "langsung %@"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "in diretta %@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライブ %@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "라이브 %@"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "langsung %@"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लाइभ %@"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "live %@"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "na żywo %@"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ao vivo %@"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ao vivo %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "в эфире %@"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "live %@"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "நேரலை %@"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สด %@"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "canlı %@"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "наживо %@"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لائیو %@"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "trực tiếp %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播 %@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播 %@"
+          }
+        }
+      }
+    },
     "location_channels.accessibility.add_bookmark" : {
       "comment" : "Accessibility action name for bookmarking a channel",
       "extractionState" : "manual",
@@ -44085,364 +44086,6 @@
         }
       }
     },
-    "location_notes.empty_subtitle" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "كن أول من يضيف هنا."
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "এই জায়গার জন্য প্রথম নোট যোগ করুন।"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "sei die erste person, die hier eine notiz hinterlässt."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "be the first to add one for this spot."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "sé la primera persona en añadir una en este lugar."
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "maging unang magdagdag para sa puntong ito"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "sois la première personne à en ajouter ici."
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "היה הראשון להוסיף כאן."
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "इस जगह के लिए पहला नोट आप जोड़ें।"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "jadilah orang pertama yang menambahkannya di sini."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "fai tu la prima nota qui."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ここで最初のノートを残そう。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "이 장소에 첫 번째 노트를 남겨보세요."
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "jadilah orang pertama yang menambahkannya di sini."
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "यस ठाउँमा नोट थप्ने पहिलो व्यक्ती बन।"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "wees de eerste die er hier een toevoegt"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "dodaj pierwszą notatkę dla tego miejsca"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "sê o primeiro a adicionar uma nota para este sítio."
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "seja a primeira pessoa a adicionar uma aqui."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "стань первым, кто добавит здесь заметку."
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "var först med en anteckning här"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "இந்த இடத்திற்கு முதலில் ஒரு குறிப்பைச் சேர்க்கவும்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เป็นคนแรกที่เพิ่มบันทึกให้จุดนี้"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "bu yer için ilk notu sen ekle."
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "стань першим, хто додасть тут замітку."
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اس مقام کیلئے پہلا نوٹ آپ شامل کریں"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "hãy là người đầu tiên thêm ghi chú tại đây"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "成为这里的第一条笔记。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "成為這裡的第一條筆記。"
-          }
-        }
-      }
-    },
-    "location_notes.empty_title" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "لا توجد ملاحظات بعد"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "এখনও কোনো নোট নেই"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "noch keine notizen"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "no notes yet"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "aún no hay notas"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "wala pang tala"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "pas encore de notes"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "אין הערות עדיין"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "अभी कोई नोट नहीं"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "belum ada catatan"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ancora nessuna nota"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ノートはまだありません"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "아직 노트가 없습니다"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "belum ada catatan"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "अहिले नोट छैन"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nog geen notities"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "brak notatek"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ainda sem notas"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nenhuma nota ainda"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "заметок пока нет"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "inga anteckningar än"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "இன்னும் குறிப்புகள் இல்லை"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ยังไม่มีบันทึก"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "henüz not yok"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "заміток ще немає"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ابھی تک کوئی نوٹس نہیں"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "chưa có ghi chú"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "尚无笔记"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "尚無筆記"
-          }
-        }
-      }
-    },
     "location_notes.error.failed_to_send" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -44801,569 +44444,6 @@
         }
       }
     },
-    "location_notes.header" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "few" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظات"
-                    }
-                  },
-                  "many" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظة"
-                    }
-                  },
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظة"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظة"
-                    }
-                  },
-                  "two" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظتان"
-                    }
-                  },
-                  "zero" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d ملاحظات"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notiz"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notizen"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d note"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notes"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d nota"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notas"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d note"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notes"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "many" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d הערות"
-                    }
-                  },
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d הערה"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d הערות"
-                    }
-                  },
-                  "two" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d הערות"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d catatan"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d catatan"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d nota"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d note"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d件のノート"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d件のノート"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d개의 노트"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d नोट"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d नोटहरू"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d nota"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d notas"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "few" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d заметки"
-                    }
-                  },
-                  "many" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d заметок"
-                    }
-                  },
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d заметка"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d заметки"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "few" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d замітки"
-                    }
-                  },
-                  "many" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d заміток"
-                    }
-                  },
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d замітка"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d замітки"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          },
-          "substitutions" : {
-            "note_count" : {
-              "argNum" : 2,
-              "formatSpecifier" : "lld",
-              "variations" : {
-                "plural" : {
-                  "one" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d 条笔记"
-                    }
-                  },
-                  "other" : {
-                    "stringUnit" : {
-                      "state" : "translated",
-                      "value" : "%d 条笔记"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "#%1$@ • %2$#@note_count@"
-          }
-        }
-      }
-    },
     "location_notes.loading_notes" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -45543,185 +44623,6 @@
         }
       }
     },
-    "location_notes.loading_recent" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "جار تحميل الملاحظات الحديثة…"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "সাম্প্রতিক নোট লোড হচ্ছে…"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "aktuelle notizen werden geladen…"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "loading recent notes…"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "cargando notas recientes…"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nagse-load ng pinakahuling mga tala…"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "chargement des notes récentes…"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "טוען הערות אחרונות…"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "हाल के नोट लोड हो रहे हैं…"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "memuat catatan terbaru…"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "caricamento note recenti…"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最新ノートを読み込み中…"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "최근 노트 로딩 중…"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "memuat catatan terbaru…"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "हालैका नोट लोड गर्दै…"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "recentste notities laden…"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ładowanie ostatnich notatek…"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "a carregar notas recentes…"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "carregando notas recentes…"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "загрузка свежих заметок…"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "laddar senaste anteckningar…"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "சமீபத்திய குறிப்புகள் ஏற்றப்படுகின்றன…"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "กำลังโหลดบันทึกล่าสุด…"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "son notlar yükleniyor…"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "завантаження свіжих заміток…"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "حالیہ نوٹس لوڈ ہو رہے ہیں…"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "đang tải ghi chú gần đây…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在加载最新笔记…"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在加載最新筆記…"
-          }
-        }
-      }
-    },
     "location_notes.no_relays_nearby" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -45897,364 +44798,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "附近沒有地理中繼"
-          }
-        }
-      }
-    },
-    "location_notes.placeholder" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "أضف ملاحظة لهذا المكان"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "এই স্থানের জন্য একটি নোট যোগ করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "notiz für diesen ort hinzufügen"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "add a note for this place"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "añade una nota para este lugar"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "magdagdag ng tala para sa lugar na ito"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ajoute une note pour cet endroit"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "הוסף הערה למקום הזה"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "इस स्थान के लिए नोट जोड़ें"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tambahkan catatan untuk tempat ini"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "aggiungi una nota per questo posto"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "この場所のノートを追加"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "이 장소에 대한 노트 추가"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "tambahkan catatan untuk tempat ini"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "यस स्थानका लागि नोट थप"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "voeg een notitie toe voor deze plek"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "dodaj notatkę do tego miejsca"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "adiciona uma nota para este local"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "adicione uma nota para este lugar"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "добавь заметку для этого места"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "lägg till en anteckning för den här platsen"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "இந்த இடத்திற்கான ஒரு குறிப்பைச் சேர்க்கவும்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "เพิ่มบันทึกให้สถานที่นี้"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "bu yer için bir not ekleyin"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "додай замітку для цього місця"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اس جگہ کیلئے نوٹ شامل کریں"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "thêm ghi chú cho nơi này"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "为此地点添加笔记"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "為此地點添加筆記"
-          }
-        }
-      }
-    },
-    "location_notes.relays_paused" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "المرحلات الجغرافية غير متاحة؛ الملاحظات متوقفة"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "জিও রিলে অনুপলব্ধ; নোট স্থগিত"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo-relays nicht verfügbar; notizen pausiert"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo relays unavailable; notes paused"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relays geográficos no disponibles; notas en pausa"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "hindi magagamit ang mga geo relay; naka-pause ang mga tala"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relais géo indisponibles ; notes en pause"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ממסרי geo אינם זמינים; הערות הושהו"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "जियो रिले अनुपलब्ध; नोट रुके हैं"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relay geo tidak tersedia; catatan dijeda"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relay geo non disponibili; note in pausa"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ジオリレーが利用不可: ノート一時停止"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo 릴레이를 사용할 수 없습니다; 노트가 일시 중지됩니다"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relay geo tidak tersedia; catatan dijeda"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "georelay उपलब्ध छैन; नोट रोकिएको"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo-relays niet beschikbaar; notities gepauzeerd"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo relay niedostępne; notatki wstrzymane"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relés geográficos indisponíveis; notas em pausa"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relays geográficos indisponíveis; notas pausadas"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "геореле недоступны; заметки приостановлены"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo-reläer otillgängliga; anteckningar pausade"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo relay கிடைக்கவில்லை; குறிப்புகள் இடைநிறுத்தப்பட்டுள்ளன"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo relay ไม่พร้อมใช้งาน บันทึกถูกหยุดชั่วคราว"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo röleler kullanılamıyor; notlar durduruldu"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "гео-релеї недоступні; замітки призупинено"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "geo relay دستیاب نہیں؛ نوٹس موقوف"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "relay địa lý không sẵn có; ghi chú bị tạm dừng"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "地理中继不可用；笔记已暂停"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "地理中繼不可用；筆記已暫停"
           }
         }
       }
@@ -48958,6 +47501,185 @@
         }
       }
     },
+    "media.voice.accessibility.live" : {
+      "comment" : "Accessibility label announcing a live incoming voice message",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رسالة صوتية مباشرة واردة"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "আগত লাইভ ভয়েস বার্তা"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "eingehende live-sprachnachricht"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "incoming live voice message"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "mensaje de voz en vivo entrante"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "papasok na live na voice message"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "message vocal en direct entrant"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "הודעה קולית חיה נכנסת"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आने वाला लाइव वॉयस संदेश"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "pesan suara langsung masuk"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "messaggio vocale in diretta in arrivo"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライブ音声メッセージを受信中"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "수신 중인 라이브 음성 메시지"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "mesej suara langsung masuk"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आगमन लाइभ भ्वाइस सन्देश"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "inkomend live spraakbericht"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "przychodząca wiadomość głosowa na żywo"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "mensagem de voz ao vivo a chegar"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "mensagem de voz ao vivo chegando"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "входящее живое голосовое сообщение"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "inkommande live-röstmeddelande"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "உள்வரும் நேரலை குரல் செய்தி"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ข้อความเสียงสดขาเข้า"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "gelen canlı sesli mesaj"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "вхідне живе голосове повідомлення"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "موصول ہونے والا لائیو صوتی پیغام"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "tin nhắn thoại trực tiếp đang đến"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在接收实时语音消息"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在接收即時語音訊息"
+          }
+        }
+      }
+    },
     "media.voice.accessibility.pause" : {
       "comment" : "Accessibility label for pausing voice note playback",
       "extractionState" : "manual",
@@ -49314,6 +48036,185 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "播放語音訊息"
+          }
+        }
+      }
+    },
+    "media.voice.live_badge" : {
+      "comment" : "Badge on a voice message that is currently streaming in live",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مباشر"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "লাইভ"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "EN VIVO"
+          }
+        },
+        "fil" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DIRECT"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "חי"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लाइव"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LANGSUNG"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライブ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "라이브"
+          }
+        },
+        "ms" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LANGSUNG"
+          }
+        },
+        "ne" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लाइभ"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "NA ŻYWO"
+          }
+        },
+        "pt" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AO VIVO"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AO VIVO"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ЭФИР"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LIVE"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "நேரலை"
+          }
+        },
+        "th" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "สด"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CANLI"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "НАЖИВО"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لائیو"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TRỰC TIẾP"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播"
           }
         }
       }
@@ -53449,185 +52350,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法與 %@ 開始聊天：離線訊息需要互相關注。"
-          }
-        }
-      }
-    },
-    "system.common.user" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "مستخدم"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ব্যবহারকারী"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nutzer"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "user"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "usuario"
-          }
-        },
-        "fil" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "user"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "utilisateur"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "משתמש"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "उपयोगकर्ता"
-          }
-        },
-        "id" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "pengguna"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "utente"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ユーザー"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "사용자"
-          }
-        },
-        "ms" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "pengguna"
-          }
-        },
-        "ne" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "प्रयोगकर्ता"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "gebruiker"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "użytkownik"
-          }
-        },
-        "pt" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "utilizador"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "usuário"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "пользователь"
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "användare"
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "பயனர்"
-          }
-        },
-        "th" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ผู้ใช้"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "kullanıcı"
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "користувач"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "صارف"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "người dùng"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "用户"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "使用者"
           }
         }
       }

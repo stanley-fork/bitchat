@@ -84,7 +84,6 @@ import SwiftUI
 import Combine
 import CommonCrypto
 import CoreBluetooth
-import Tor
 #if os(iOS)
 import UIKit
 #endif
@@ -178,6 +177,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     lazy var privateConversationCoordinator = ChatPrivateConversationCoordinator(context: self)
     lazy var nostrCoordinator = ChatNostrCoordinator(context: self)
     lazy var mediaTransferCoordinator = ChatMediaTransferCoordinator(context: self)
+    lazy var liveVoiceCoordinator = ChatLiveVoiceCoordinator(context: self)
     lazy var verificationCoordinator = ChatVerificationCoordinator(context: self)
     lazy var groupCoordinator = ChatGroupCoordinator(context: self)
     lazy var vouchCoordinator = ChatVouchCoordinator(context: self)
@@ -186,6 +186,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     var connectedPeers: Set<PeerID> { unifiedPeerService.connectedPeerIDs }
     @Published var allPeers: [BitchatPeer] = []
+    /// Nickname of whoever is talking live in the public mesh channel right
+    /// now (floor-courtesy indicator on the composer mic), nil when nobody.
+    @Published var activePublicVoiceTalker: String?
 
     /// Read-only derived view of all direct conversations in the
     /// `ConversationStore`, keyed by routing peer ID. Serves the coordinator
@@ -218,12 +221,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         conversations.unreadDirectRoutingPeerIDs()
     }
 
-    /// Check if there are any unread messages (including from temporary Nostr peer IDs)
-    @MainActor
-    var hasAnyUnreadMessages: Bool {
-        !unreadPrivateMessages.isEmpty
-    }
-
     /// Open the most relevant private chat when tapping the toolbar unread icon.
     /// Prefers the most recently active unread conversation, otherwise the most recent PM.
     @MainActor
@@ -239,20 +236,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     var selectedPrivateChatFingerprint: String? {
         get { peerIdentityStore.selectedPrivateChatFingerprint }
         set { peerIdentityStore.setSelectedPrivateChatFingerprint(newValue) }
-    }
-
-    // Resolve full Noise key for a peer's short ID (used by UI header rendering)
-    @MainActor
-    private func getNoiseKeyForShortID(_ shortPeerID: PeerID) -> PeerID? {
-        if let mapped = peerIdentityStore.stablePeerID(forShortID: shortPeerID) { return mapped }
-        // Fallback: derive from active Noise session if available
-        if shortPeerID.id.count == 16,
-           let key = meshService.noiseSessionPublicKeyData(for: shortPeerID) {
-            let stable = PeerID(hexData: key)
-            peerIdentityStore.setStablePeerID(stable, forShortID: shortPeerID)
-            return stable
-        }
-        return nil
     }
 
     // Resolve short mesh ID (16-hex) from a full Noise public key hex (64-hex)
@@ -351,17 +334,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     // MARK: - Social Features (Delegated to PeerStateManager)
 
     @MainActor
-    var favoritePeers: Set<String> { unifiedPeerService.favoritePeers }
-    @MainActor
     var blockedUsers: Set<String> { unifiedPeerService.blockedUsers }
 
     // MARK: - Encryption and Security
 
-    // Noise Protocol encryption status
-    var peerEncryptionStatus: [PeerID: EncryptionStatus] {
-        get { peerIdentityStore.encryptionStatuses }
-        set { peerIdentityStore.replaceEncryptionStatuses(newValue) }
-    }
     var verifiedFingerprints: Set<String> {
         get { peerIdentityStore.verifiedFingerprints }
         set { peerIdentityStore.setVerifiedFingerprints(newValue) }
@@ -955,11 +931,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
 
     // MARK: - Public helpers
 
-    /// Published geohash people list for SwiftUI observation
-    var geohashPeople: [GeoPerson] {
-        participantTracker.visiblePeople
-    }
-
     /// Return the current, pruned, sorted people list for the active geohash without mutating state.
     @MainActor
     func visibleGeohashPeople() -> [GeoPerson] {
@@ -1052,14 +1023,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         publicConversationCoordinator.displayNameForNostrPubkey(pubkeyHex)
     }
 
-    // MARK: - Media Transfers
-
-    private enum MediaSendError: Error {
-        case encodingFailed
-        case tooLarge
-        case copyFailed
-    }
-
     func currentPublicSender() -> (name: String, peerID: PeerID) {
         publicConversationCoordinator.currentPublicSender()
     }
@@ -1121,7 +1084,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     }
 
     @MainActor
-    @objc func handlePeerStatusUpdate(_ notification: Notification) {
+    @objc func handlePeerStatusUpdate(_: Notification) {
         peerIdentityCoordinator.handlePeerStatusUpdate()
     }
 
@@ -1153,15 +1116,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func markPrivateMessagesAsRead(from peerID: PeerID) {
         lifecycleCoordinator.markPrivateMessagesAsRead(from: peerID)
-    }
-
-    func getMessages(for peerID: PeerID?) -> [BitchatMessage] {
-        lifecycleCoordinator.getMessages(for: peerID)
-    }
-
-    @MainActor
-    func getPrivateChatMessages(for peerID: PeerID) -> [BitchatMessage] {
-        lifecycleCoordinator.getPrivateChatMessages(for: peerID)
     }
 
     @MainActor
@@ -1623,6 +1577,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         }
     }
 
+    func didReceivePublicVoiceFrame(from peerID: PeerID, nickname: String, payload: Data, timestamp: Date) {
+        Task { @MainActor [weak self] in
+            self?.liveVoiceCoordinator.handlePublicVoiceFramePayload(
+                from: peerID,
+                nickname: nickname,
+                payload: payload,
+                timestamp: timestamp
+            )
+        }
+    }
+
     // MARK: - QR Verification API
     @MainActor
     func beginQRVerification(with qr: VerificationService.VerificationQR) -> Bool {
@@ -1775,6 +1740,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     /// Handle incoming public message
     @MainActor
     func handlePublicMessage(_ message: BitchatMessage) {
+        // A finalized voice note whose burst already streamed in live swaps
+        // into the existing bubble instead of appearing twice.
+        if liveVoiceCoordinator.absorbFinalizedVoiceNote(message) { return }
         publicConversationCoordinator.handlePublicMessage(message)
     }
 

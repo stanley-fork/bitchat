@@ -11,8 +11,6 @@ struct ContentPeopleSheetView: View {
     @EnvironmentObject private var privateConversationModel: PrivateConversationModel
     @EnvironmentObject private var verificationModel: VerificationModel
     @EnvironmentObject private var conversationUIModel: ConversationUIModel
-    @EnvironmentObject private var locationChannelsModel: LocationChannelsModel
-    @EnvironmentObject private var peerListModel: PeerListModel
 
     @Binding var showSidebar: Bool
     @Binding var messageText: String
@@ -79,8 +77,7 @@ struct ContentPeopleSheetView: View {
                     #endif
                 } else {
                     ContentPeopleListView(
-                        showSidebar: $showSidebar,
-                        headerHeight: headerHeight
+                        showSidebar: $showSidebar
                     )
                 }
             }
@@ -141,8 +138,6 @@ private struct ContentPeopleListView: View {
     @ThemedPalette private var palette
 
     @Binding var showSidebar: Bool
-
-    let headerHeight: CGFloat
 
     @State private var showVerifySheet = false
 
@@ -285,7 +280,6 @@ private extension ContentPeopleListView {
 }
 
 private struct ContentPrivateChatSheetView: View {
-    @EnvironmentObject private var appChromeModel: AppChromeModel
     @EnvironmentObject private var privateConversationModel: PrivateConversationModel
 
     @Binding var showSidebar: Bool
@@ -393,6 +387,11 @@ private struct ContentPrivateChatSheetView: View {
             )
             .themedSurface()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Swipe-right-to-leave lives on the message list only. On the
+            // whole sheet it preempted the composer's press-and-hold mic
+            // gesture (a high-priority ancestor drag cancels child gestures
+            // within milliseconds — same starvation as the image-reveal bug).
+            .highPriorityGesture(swipeToLeaveGesture)
 
             if !theme.usesGlassChrome {
                 Divider()
@@ -423,18 +422,19 @@ private struct ContentPrivateChatSheetView: View {
         }
         .themedSheetBackground()
         .foregroundColor(palette.primary)
-        .highPriorityGesture(
-            DragGesture(minimumDistance: 25, coordinateSpace: .local)
-                .onEnded { value in
-                    let horizontal = value.translation.width
-                    let vertical = abs(value.translation.height)
-                    guard horizontal > 80, vertical < 60 else { return }
-                    withAnimation(.easeInOut(duration: TransportConfig.uiAnimationMediumSeconds)) {
-                        showSidebar = true
-                        privateConversationModel.endConversation()
-                    }
+    }
+
+    private var swipeToLeaveGesture: some Gesture {
+        DragGesture(minimumDistance: 25, coordinateSpace: .local)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = abs(value.translation.height)
+                guard horizontal > 80, vertical < 60 else { return }
+                withAnimation(.easeInOut(duration: TransportConfig.uiAnimationMediumSeconds)) {
+                    showSidebar = true
+                    privateConversationModel.endConversation()
                 }
-        )
+            }
     }
 
     /// Persistent one-line reminder that this composer feeds a private
