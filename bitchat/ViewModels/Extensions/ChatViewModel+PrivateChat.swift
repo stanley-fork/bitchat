@@ -6,6 +6,7 @@
 //
 
 import BitFoundation
+import BitLogger
 import Foundation
 import SwiftUI
 
@@ -69,6 +70,41 @@ extension ChatViewModel {
         mediaTransferCoordinator.sendVoiceNote(at: url)
     }
 
+    /// Picks the capture backend for the composer's hold-to-record gesture:
+    /// live push-to-talk when the selected DM peer can hear it now (mesh
+    /// reachable + established Noise session), otherwise the classic
+    /// record-then-send voice note. Either way the release delivers a normal
+    /// voice note through `sendVoiceNote(at:)`.
+    @MainActor
+    func makeVoiceCaptureSession() -> VoiceCaptureSession {
+        guard PTTSettings.liveVoiceEnabled,
+              let selectedPeer = selectedPrivateChatPeer,
+              !selectedPeer.isGeoDM, !selectedPeer.isGeoChat, !selectedPeer.isGroup
+        else {
+            return VoiceNoteCaptureSession()
+        }
+        // A conversation can be selected under the stable 64-hex Noise key
+        // (e.g. after migration on disconnect), but Noise sessions are keyed
+        // by the 16-hex routing ID — normalize once and send to that same
+        // short ID, like the private-message/file paths do.
+        let peerID = selectedPeer.toShort()
+        guard meshService.isPeerReachable(peerID),
+              case .established = meshService.getNoiseSessionState(for: peerID)
+        else {
+            SecureLogger.debug("PTT: live unavailable for \(peerID.id.prefix(8))… (reachable=\(meshService.isPeerReachable(peerID))) — using classic voice note", category: .session)
+            return VoiceNoteCaptureSession()
+        }
+        return PTTLiveVoiceSession(sendPacket: { [meshService] packet in
+            meshService.sendVoiceFrame(packet, to: peerID)
+        })
+    }
+
+    /// Inbound handler for `NoisePayloadType.voiceFrame`.
+    @MainActor
+    func handleVoiceFramePayload(from peerID: PeerID, payload: Data, timestamp: Date) {
+        liveVoiceCoordinator.handleVoiceFramePayload(from: peerID, payload: payload, timestamp: timestamp)
+    }
+
     #if os(iOS)
     func processThenSendImage(_ image: UIImage?) {
         mediaTransferCoordinator.processThenSendImage(image)
@@ -129,6 +165,9 @@ extension ChatViewModel {
 
     @MainActor
     func handlePrivateMessage(_ message: BitchatMessage) {
+        // A finalized voice note whose burst already streamed in live swaps
+        // into the existing bubble instead of appearing (and notifying) twice.
+        if liveVoiceCoordinator.absorbFinalizedVoiceNote(message) { return }
         privateConversationCoordinator.handlePrivateMessage(message)
     }
 
