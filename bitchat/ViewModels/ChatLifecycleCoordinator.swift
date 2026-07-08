@@ -215,23 +215,22 @@ final class ChatLifecycleCoordinator {
         }
 
         var noiseKeyHex: PeerID?
-        var peerNostrPubkey: String?
 
         if let noiseKey = Data(hexString: peerID.id),
-           let favoriteStatus = context.favoriteRelationship(forNoiseKey: noiseKey) {
+           context.favoriteRelationship(forNoiseKey: noiseKey) != nil {
             noiseKeyHex = peerID
-            peerNostrPubkey = favoriteStatus.peerNostrPublicKey
         } else if let peer = context.unifiedPeer(for: peerID) {
             noiseKeyHex = PeerID(hexData: peer.noisePublicKey)
-            let favoriteStatus = context.favoriteRelationship(forNoiseKey: peer.noisePublicKey)
-            peerNostrPubkey = favoriteStatus?.peerNostrPublicKey
 
             if let noiseKeyHex, context.unreadPrivateMessages.contains(noiseKeyHex) {
                 context.markPrivateChatRead(noiseKeyHex)
             }
         }
 
-        guard peerNostrPubkey != nil else { return }
+        // No Nostr-key gate here: the router picks whatever transport can
+        // reach the peer (mesh included), so read receipts must flow for
+        // non-favorite mesh peers too. `sentReadReceipts` dedups against the
+        // PrivateChatManager path; the router drops receipts it can't route.
 
         for message in getPrivateChatMessages(for: peerID) {
             guard (message.senderPeerID == peerID || message.senderPeerID == noiseKeyHex) && !message.isRelay else {

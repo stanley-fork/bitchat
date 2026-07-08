@@ -52,6 +52,53 @@ final class MessageRouter {
     /// message until an ack arrives.
     var onMessageCarried: ((_ messageID: String, _ peerID: PeerID) -> Void)?
 
+    /// Parallel deposit into the internet bridge: park a sealed copy on
+    /// relays as a courier drop, so delivery stops requiring a physical
+    /// courier encounter. No-op unless the bridge is enabled. Runs alongside
+    /// (not instead of) mesh couriers; receivers dedup by message ID.
+    /// Returns true when a fresh drop was sealed, so the sender's message
+    /// can show the "carried" state instead of sitting on "sending" forever
+    /// (the delivery ack has no radio route back until the peers next share
+    /// a transport).
+    var bridgeCourierDeposit: ((_ content: String, _ messageID: String, _ recipientNoiseKey: Data) -> Bool)?
+
+    /// Re-attempts bridge drops for retained messages whose recipient no
+    /// transport can promptly reach anymore. Covers sends that raced the BLE
+    /// reachability retention window: a peer stays "reachable" for a minute
+    /// after its radio disappears, so the original send trusted the mesh and
+    /// skipped the deposit — and nothing else ever retried (field-found).
+    /// Safe to call often: the drop layer dedups by message ID.
+    func retryBridgeCourierDeposits() {
+        guard bridgeCourierDeposit != nil else { return }
+        for (peerID, queue) in outbox {
+            guard let recipientKey = courierDirectory.noiseKey(peerID) else { continue }
+            let promptlyDeliverable = transports.contains {
+                $0.isPeerReachable(peerID) && $0.canDeliverPromptly(to: peerID)
+            }
+            guard !promptlyDeliverable else { continue }
+            for message in queue where now().timeIntervalSince(message.timestamp) <= Self.messageTTLSeconds {
+                if bridgeCourierDeposit?(message.content, message.messageID, recipientKey) == true {
+                    onMessageCarried?(message.messageID, peerID)
+                }
+            }
+        }
+    }
+
+    /// Arms the periodic sweep behind `retryBridgeCourierDeposits`. Called
+    /// once by the bootstrapper after the deposit closure is wired; separate
+    /// from init so tests drive the retry directly.
+    func startBridgeDepositSweep(interval: TimeInterval = 120) {
+        bridgeSweepTask?.cancel()
+        bridgeSweepTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                self?.retryBridgeCourierDeposits()
+            }
+        }
+    }
+
+    private var bridgeSweepTask: Task<Void, Never>?
+
     private var outbox: [PeerID: [QueuedMessage]] = [:]
 
     // Outbox limits to prevent unbounded memory growth
@@ -160,6 +207,11 @@ final class MessageRouter {
     private func attemptCourierDeposit(messageID: String, for peerID: PeerID) {
         guard let recipientKey = courierDirectory.noiseKey(peerID),
               let entry = queuedMessage(messageID, for: peerID) else { return }
+        // The bridge drop needs no connected courier — only the recipient
+        // key — so it runs before the courier-slot bookkeeping.
+        if bridgeCourierDeposit?(entry.content, messageID, recipientKey) == true {
+            onMessageCarried?(messageID, peerID)
+        }
         let remainingSlots = Self.maxCouriersPerMessage - entry.depositedCourierKeys.count
         guard remainingSlots > 0 else { return }
 

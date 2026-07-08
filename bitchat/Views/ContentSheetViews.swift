@@ -174,32 +174,13 @@ private struct ContentPeopleListView: View {
                     }
                 }
 
-                let activeText = String.localizedStringWithFormat(
-                    String(localized: "%@ active", comment: "Count of active users in the people sheet"),
-                    "\(peopleSheetActiveCount)"
-                )
-
-                if let subtitle = peopleSheetSubtitle {
-                    let subtitleColor: Color = {
-                        switch locationChannelsModel.selectedChannel {
-                        case .mesh:
-                            return palette.accentBlue
-                        case .location:
-                            return palette.locationAccent
-                        }
-                    }()
-
-                    HStack(spacing: 6) {
-                        Text(subtitle)
-                            .foregroundColor(subtitleColor)
-                        Text(activeText)
-                            .foregroundColor(palette.secondary)
-                    }
-                    .bitchatFont(size: 12)
-                } else {
-                    Text(activeText)
+                // The mesh sheet titles its sections inline (#mesh / across
+                // the bridge / groups) — no subtitle or count up here.
+                // Location channels keep their geohash subtitle.
+                if case .location(let channel) = locationChannelsModel.selectedChannel {
+                    Text(verbatim: "#\(channel.geohash.lowercased())")
                         .bitchatFont(size: 12)
-                        .foregroundColor(palette.secondary)
+                        .foregroundColor(palette.locationAccent)
                 }
             }
             .padding(.horizontal, 16)
@@ -208,7 +189,10 @@ private struct ContentPeopleListView: View {
             .themedSurface()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+                // spacing 0: every section supplies its own rhythm (header
+                // top 12 / bottom 4, rows vertical 4), so inter-child spacing
+                // here would make the first section's gap read differently.
+                VStack(alignment: .leading, spacing: 0) {
                     if case .location = locationChannelsModel.selectedChannel {
                         GeohashPeopleList(
                             onTapPerson: {
@@ -216,12 +200,10 @@ private struct ContentPeopleListView: View {
                             }
                         )
                     } else {
-                        GroupChatList(
-                            groups: peerListModel.groupRows,
-                            onTapGroup: { peerID in
-                                peerListModel.startConversation(with: peerID)
-                                showSidebar = true
-                            }
+                        PeopleSectionHeader(
+                            icon: "antenna.radiowaves.left.and.right",
+                            iconColor: palette.accentBlue,
+                            title: "#mesh"
                         )
                         MeshPeerList(
                             onTapPeer: { peerID in
@@ -242,9 +224,24 @@ private struct ContentPeopleListView: View {
                                 }
                             }
                         )
+                        // People in this area but beyond radio range, and
+                        // private groups: one sheet for the whole room.
+                        BridgePeopleList()
+                        GroupChatList(
+                            groups: peerListModel.groupRows,
+                            onTapGroup: { peerID in
+                                peerListModel.startConversation(with: peerID)
+                                showSidebar = true
+                            }
+                        )
                     }
                 }
                 .padding(.top, 4)
+                // Full width even when every row is narrow (empty mesh, no
+                // groups): without this the VStack hugs its widest child and
+                // the ScrollView centers it — headers and empty states
+                // floated mid-screen on iPhone.
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .id(peerListModel.renderID)
             }
         }
@@ -260,23 +257,6 @@ private extension ContentPeopleListView {
         String(localized: "content.header.people", comment: "Title for the people list sheet").lowercased()
     }
 
-    var peopleSheetSubtitle: String? {
-        switch locationChannelsModel.selectedChannel {
-        case .mesh:
-            return "#mesh"
-        case .location(let channel):
-            return "#\(channel.geohash.lowercased())"
-        }
-    }
-
-    var peopleSheetActiveCount: Int {
-        switch locationChannelsModel.selectedChannel {
-        case .mesh:
-            return peerListModel.reachableMeshPeerCount
-        case .location:
-            return peerListModel.visibleGeohashPeerCount
-        }
-    }
 }
 
 private struct ContentPrivateChatSheetView: View {
@@ -542,10 +522,14 @@ private struct ContentPrivateHeaderInfoButton: View {
                             .foregroundColor(.purple)
                             .accessibilityLabel(String(localized: "content.accessibility.available_nostr", comment: "Accessibility label for Nostr-available peer indicator"))
                     case .offline:
-                        // Absence of a glyph was the only offline signal; say it.
-                        Text("mesh_peers.state.offline")
-                            .bitchatFont(size: 11)
+                        // Slashed variant of the connected glyph — offline as
+                        // the negation of connected, no text label (a leading
+                        // one read as part of the name: "sin conexión bob").
+                        // VoiceOver still says it.
+                        Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                            .font(.bitchatSystem(size: 14))
                             .foregroundColor(palette.secondary)
+                            .accessibilityLabel(String(localized: "mesh_peers.state.offline", comment: "State label for a peer that is not currently reachable"))
                     }
                 }
 
@@ -580,6 +564,7 @@ private struct ContentPrivateHeaderInfoButton: View {
                             )
                         )
                 }
+
             }
         }
         .buttonStyle(.plain)
