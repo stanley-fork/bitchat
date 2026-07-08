@@ -120,14 +120,21 @@ struct AppInfoView: View {
 
         enum HowToUse {
             static let title: LocalizedStringKey = "app_info.how_to_use.title"
-            static let instructions: [LocalizedStringKey] = [
-                "app_info.how_to_use.set_nickname",
-                "app_info.how_to_use.change_channels",
-                "app_info.how_to_use.open_sidebar",
-                "app_info.how_to_use.start_dm",
-                "app_info.how_to_use.clear_chat",
-                "app_info.how_to_use.commands"
-            ]
+            /// The instruction strings flowed into one comma-separated
+            /// paragraph. The translations carry their legacy bullet-list
+            /// prefix ("• "), so it is stripped here.
+            static var paragraph: String {
+                [
+                    String(localized: "app_info.how_to_use.set_nickname"),
+                    String(localized: "app_info.how_to_use.change_channels"),
+                    String(localized: "app_info.how_to_use.open_sidebar"),
+                    String(localized: "app_info.how_to_use.start_dm"),
+                    String(localized: "app_info.how_to_use.clear_chat"),
+                    String(localized: "app_info.how_to_use.commands")
+                ]
+                .map { $0.hasPrefix("• ") ? String($0.dropFirst(2)) : $0 }
+                .joined(separator: ", ")
+            }
         }
 
     }
@@ -196,6 +203,16 @@ struct AppInfoView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical)
 
+            // How to Use
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHeader(Strings.HowToUse.title)
+
+                Text(verbatim: Strings.HowToUse.paragraph)
+                    .bitchatFont(size: 14)
+                    .foregroundColor(textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Appearance — single row: label left, theme chips right
             HStack(spacing: 12) {
                 SectionHeader(Strings.appearanceTitle)
@@ -220,17 +237,19 @@ struct AppInfoView: View {
                 }
             }
 
-            // How to Use
+            // Voice
             VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(Strings.HowToUse.title)
+                SectionHeader(Strings.Voice.title)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(Strings.HowToUse.instructions.enumerated()), id: \.offset) { _, instruction in
-                        Text(instruction)
-                    }
+                HStack(spacing: 0) {
+                    FeatureRow(info: Strings.Voice.live)
+                    Toggle(Strings.Voice.live.title, isOn: $liveVoiceEnabled)
+                        .labelsHidden()
+                        .tint(palette.accent)
+                        .onChange(of: liveVoiceEnabled) { newValue in
+                            PTTSettings.liveVoiceEnabled = newValue
+                        }
                 }
-                .bitchatFont(size: 14)
-                .foregroundColor(textColor)
             }
 
             // Voice
@@ -286,6 +305,17 @@ struct AppInfoView: View {
                 FeatureRow(info: Strings.Features.mentions)
             }
 
+            // Privacy
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHeader(Strings.Privacy.title)
+
+                FeatureRow(info: Strings.Privacy.noTracking)
+
+                FeatureRow(info: Strings.Privacy.ephemeral)
+
+                FeatureRow(info: Strings.Privacy.panic)
+            }
+
             // Symbols legend
             VStack(alignment: .leading, spacing: 10) {
                 SectionHeader(Strings.Legend.title)
@@ -306,17 +336,6 @@ struct AppInfoView: View {
                     }
                     .accessibilityElement(children: .combine)
                 }
-            }
-
-            // Privacy
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(Strings.Privacy.title)
-
-                FeatureRow(info: Strings.Privacy.noTracking)
-
-                FeatureRow(info: Strings.Privacy.ephemeral)
-
-                FeatureRow(info: Strings.Privacy.panic)
             }
         }
         .padding()

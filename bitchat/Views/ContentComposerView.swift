@@ -241,10 +241,28 @@ private extension ContentComposerView {
         }
     }
 
+    /// Floor courtesy: someone else is talking live in the public channel.
+    /// Only advisory — a decentralized mesh has no floor arbiter, so holding
+    /// the mic still works; the tint just discourages talk-over.
+    var busyTalker: String? {
+        guard privateConversationModel.selectedPeerID == nil else { return nil }
+        return conversationUIModel.activeLiveVoiceTalker
+    }
+
+    /// Recording > floor-busy > default accent. Whether the hold streams
+    /// live or records a classic note is signaled by the recording HUD's
+    /// LIVE treatment, not the idle button color.
+    var micColor: Color {
+        if voiceRecordingVM.state.isActive { return .red }
+        if busyTalker != nil { return Color.red.opacity(0.6) }
+        return composerAccentColor
+    }
+
     var micButtonView: some View {
         Image(systemName: "mic.circle.fill")
             .font(.bitchatSystem(size: 24))
-            .foregroundColor(voiceRecordingVM.state.isActive ? Color.red : composerAccentColor)
+            .foregroundColor(micColor)
+            .modifier(PulsingOpacityModifier(active: busyTalker != nil && !voiceRecordingVM.state.isActive))
             .frame(width: 36, height: 36)
             .contentShape(Circle())
             .overlay(
@@ -266,7 +284,13 @@ private extension ContentComposerView {
             .accessibilityValue(
                 voiceRecordingVM.state.isActive
                 ? String(localized: "content.accessibility.recording", comment: "Accessibility value announced while a voice note is recording")
-                : ""
+                : busyTalker.map {
+                    String(
+                        format: String(localized: "content.accessibility.someone_speaking", comment: "Accessibility value on the mic button naming who is talking live in the public channel"),
+                        locale: .current,
+                        $0
+                    )
+                } ?? ""
             )
             .accessibilityHint(
                 String(localized: "content.accessibility.record_voice_hint", comment: "Accessibility hint explaining double-tap toggles voice recording")
