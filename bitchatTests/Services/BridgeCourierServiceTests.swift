@@ -24,6 +24,7 @@ struct BridgeCourierServiceTests {
         var localPeers: [(peerID: PeerID, noiseKey: Data)] = []
         var held: [CourierEnvelope] = []
         var sealResult: CourierEnvelope?
+        var deliverResult = true
 
         private(set) var publishedEvents: [NostrEvent] = []
         private(set) var openedSubscriptions: [[String]] = []
@@ -35,8 +36,8 @@ struct BridgeCourierServiceTests {
 
         let service: BridgeCourierService
 
-        init() {
-            service = BridgeCourierService()
+        init(dedupStore: BridgeDropDedupStore? = nil) {
+            service = BridgeCourierService(dedupStore: dedupStore)
             service.bridgeEnabled = { [weak self] in self?.bridgeOn ?? false }
             service.relaysConnected = { [weak self] in self?.relaysConnected ?? false }
             service.publishEvent = { [weak self] event in self?.publishedEvents.append(event) }
@@ -49,7 +50,10 @@ struct BridgeCourierServiceTests {
                 return self?.sealResult
             }
             service.openEnvelope = { [weak self] envelope in self?.openedEnvelopes.append(envelope) }
-            service.deliverToPeer = { [weak self] envelope, peer in self?.delivered.append((envelope, peer)) }
+            service.deliverToPeer = { [weak self] envelope, peer in
+                self?.delivered.append((envelope, peer))
+                return self?.deliverResult ?? false
+            }
             service.heldEnvelopes = { [weak self] cooldown in
                 self?.heldCooldowns.append(cooldown)
                 return self?.held ?? []
@@ -131,6 +135,176 @@ struct BridgeCourierServiceTests {
         fixture.service.flushPendingDrops()
         #expect(fixture.publishedEvents.count == 1)
         #expect(fixture.service.pendingDrops.isEmpty)
+    }
+
+    @Test func evictedPendingDropStaysRetryable() {
+        // Regression: a drop queued while relays are down but then evicted
+        // (oldest-out at capacity) before it ever published must release its
+        // sender-side dedup slot, or the router marks it "carried" and can
+        // never re-deposit it.
+        let fixture = Fixture()
+        fixture.relaysConnected = false
+        let key = Fixture.randomKey()
+        fixture.sealResult = makeEnvelope(recipientKey: key)
+
+        let firstID = UUID().uuidString
+        #expect(fixture.service.depositDrop(content: "0", messageID: firstID, recipientNoiseKey: key))
+        // Fill past capacity so the first drop is evicted.
+        for i in 1...BridgeCourierService.Limits.maxPendingDrops {
+            fixture.service.depositDrop(content: "\(i)", messageID: UUID().uuidString, recipientNoiseKey: key)
+        }
+        #expect(fixture.service.pendingDrops.count == BridgeCourierService.Limits.maxPendingDrops)
+
+        // The evicted first drop is deposit-able again (slot released).
+        #expect(fixture.service.depositDrop(content: "0-retry", messageID: firstID, recipientNoiseKey: key))
+    }
+
+    @Test func oversizeDropConsumesSlotInsteadOfChurning() {
+        // An envelope that encodes over the size cap fails identically on
+        // every attempt; the dedup slot must be consumed so the retry sweep
+        // doesn't re-run Noise sealing forever.
+        let fixture = Fixture()
+        let key = Fixture.randomKey()
+        fixture.sealResult = makeEnvelope(
+            recipientKey: key,
+            ciphertext: Data(repeating: 7, count: BridgeCourierService.Limits.maxDropEnvelopeBytes + 1)
+        )
+        let messageID = UUID().uuidString
+
+        #expect(!fixture.service.depositDrop(content: "big", messageID: messageID, recipientNoiseKey: key))
+        #expect(fixture.publishedEvents.isEmpty)
+
+        // The retry sweep must not seal the same payload again.
+        #expect(!fixture.service.depositDrop(content: "big", messageID: messageID, recipientNoiseKey: key))
+        #expect(fixture.sealRequests.count == 1)
+    }
+
+    @Test func publishedDropDedupSurvivesRelaunch() throws {
+        // Regression (field-verified amplification storm): the outbox that
+        // drives re-deposits is persisted, but the sender-side drop dedup was
+        // in-memory only — every relaunch republished the same undelivered
+        // message as a fresh drop, and relays hold each for 24h.
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-dedup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let recipientKey = Fixture.randomKey()
+        let messageID = UUID().uuidString
+
+        let fixture = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        fixture.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(fixture.service.depositDrop(content: "hello", messageID: messageID, recipientNoiseKey: recipientKey))
+        #expect(fixture.publishedEvents.count == 1)
+        // Persistence is coalesced; a real launch flushes within a second or
+        // on backgrounding — tests flush explicitly.
+        fixture.service.flushDedupSnapshot()
+
+        // "Relaunch": a fresh service over the same store must refuse to
+        // publish the same message ID again (before even re-sealing it).
+        let relaunched = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        relaunched.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(!relaunched.service.depositDrop(content: "hello", messageID: messageID, recipientNoiseKey: recipientKey))
+        #expect(relaunched.publishedEvents.isEmpty)
+        #expect(relaunched.sealRequests.isEmpty)
+    }
+
+    @Test func seenDropEventDedupSurvivesRelaunch() throws {
+        // Same storm, gateway side: relays redeliver the whole 24h drop
+        // backlog on every launch; a relaunch must not re-open (and re-ack)
+        // events it already handled.
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-dedup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let fixture = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        let myKey = try #require(fixture.myKey)
+        fixture.service.refresh()
+        let event = try makeDropEvent(for: makeEnvelope(recipientKey: myKey))
+        fixture.service.handleDropEvent(event)
+        #expect(fixture.openedEnvelopes.count == 1)
+        fixture.service.flushDedupSnapshot()
+
+        let relaunched = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        relaunched.myKey = myKey
+        relaunched.service.refresh()
+        relaunched.service.handleDropEvent(event)
+        #expect(relaunched.openedEnvelopes.isEmpty)
+    }
+
+    @Test func offlineQueuedDropStaysRedepositableAfterRelaunch() throws {
+        // A deposit made while relays are down only joins the in-memory
+        // pending queue. Its dedup key must NOT be durable yet: if the app is
+        // killed before relays connect, the relaunch loses the queued drop —
+        // a persisted key would then block every 120s re-deposit for 24h and
+        // the message would silently never reach a relay.
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-dedup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let recipientKey = Fixture.randomKey()
+        let messageID = UUID().uuidString
+
+        let fixture = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        fixture.relaysConnected = false
+        fixture.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(fixture.service.depositDrop(content: "later", messageID: messageID, recipientNoiseKey: recipientKey))
+        #expect(fixture.publishedEvents.isEmpty)
+        // Even a flush while the drop is still pending must exclude its key.
+        fixture.service.flushDedupSnapshot()
+
+        // "App killed before relays connected": pendingDrops were memory-only.
+        let relaunched = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        relaunched.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(relaunched.service.depositDrop(content: "later", messageID: messageID, recipientNoiseKey: recipientKey))
+        #expect(relaunched.publishedEvents.count == 1)
+    }
+
+    @Test func publishedPendingDropBecomesDurableAfterFlush() throws {
+        // Counterpart: once the queued drop actually publishes on reconnect,
+        // its key becomes durable and a relaunch must not republish.
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-dedup-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let recipientKey = Fixture.randomKey()
+        let messageID = UUID().uuidString
+
+        let fixture = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        fixture.relaysConnected = false
+        fixture.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(fixture.service.depositDrop(content: "later", messageID: messageID, recipientNoiseKey: recipientKey))
+        fixture.relaysConnected = true
+        fixture.service.flushPendingDrops()
+        #expect(fixture.publishedEvents.count == 1)
+        fixture.service.flushDedupSnapshot()
+
+        let relaunched = Fixture(dedupStore: BridgeDropDedupStore(fileURL: fileURL))
+        relaunched.sealResult = makeEnvelope(recipientKey: recipientKey)
+        #expect(!relaunched.service.depositDrop(content: "later", messageID: messageID, recipientNoiseKey: recipientKey))
+        #expect(relaunched.publishedEvents.isEmpty)
+    }
+
+    @Test func failedGatewayHandoffReleasesSeenSlot() throws {
+        // A gateway's deliverToPeer handoff is best-effort: when it fails
+        // (the peer walked away between relay fetch and mesh send), the drop
+        // event must stay retryable — for a single-gateway mesh island this
+        // gateway is the recipient's only carrier.
+        let fixture = Fixture()
+        let peerKey = Fixture.randomKey()
+        let peer = PeerID(str: "aabbccdd00112233")
+        fixture.localPeers = [(peer, peerKey)]
+        fixture.service.refresh()
+        let event = try makeDropEvent(for: makeEnvelope(recipientKey: peerKey))
+
+        fixture.deliverResult = false
+        fixture.service.handleDropEvent(event)
+        #expect(fixture.delivered.count == 1)
+
+        // Redelivery (relaunch/backlog re-fetch) retries the handoff …
+        fixture.deliverResult = true
+        fixture.service.handleDropEvent(event)
+        #expect(fixture.delivered.count == 2)
+
+        // … and a successful handoff consumes the event for good.
+        fixture.service.handleDropEvent(event)
+        #expect(fixture.delivered.count == 2)
     }
 
     @Test func distinctDropsUseDistinctThrowawayKeys() {
