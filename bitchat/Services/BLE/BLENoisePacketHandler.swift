@@ -2,6 +2,16 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+struct BLENoiseHandshakeHandlingResult {
+    let processed: Bool
+    let didEstablishAuthenticatedSession: Bool
+}
+
+struct BLENoiseDecryptionResult {
+    let plaintext: Data
+    let sessionGeneration: UUID
+}
+
 /// Narrow environment for `BLENoisePacketHandler`.
 ///
 /// All queue hops (collections barrier writes, main-actor UI notification)
@@ -16,8 +26,11 @@ struct BLENoisePacketHandlerEnvironment {
     let messageTTL: UInt8
     /// Current time source.
     let now: () -> Date
-    /// Processes an inbound handshake message, returning an optional response payload (crypto).
-    let processHandshakeMessage: (_ peerID: PeerID, _ message: Data) throws -> Data?
+    /// Processes an inbound handshake message, returning its optional response
+    /// and whether that exact candidate authenticated (crypto).
+    let processHandshakeMessage:
+        (_ peerID: PeerID, _ message: Data) throws
+            -> NoiseHandshakeProcessingResult
     /// Whether any Noise session (established or pending) exists for the peer (crypto).
     let hasNoiseSession: (PeerID) -> Bool
     /// Initiates a fresh Noise handshake with the peer (crypto + send).
@@ -27,9 +40,16 @@ struct BLENoisePacketHandlerEnvironment {
     /// Updates the registry last-seen timestamp for the peer (async barrier write).
     let updatePeerLastSeen: (PeerID) -> Void
     /// Decrypts an encrypted payload from the peer (crypto).
-    let decrypt: (_ payload: Data, _ peerID: PeerID) throws -> Data
+    let decrypt: (_ payload: Data, _ peerID: PeerID) throws -> BLENoiseDecryptionResult
     /// Clears the peer's Noise session after an unrecoverable decrypt failure (crypto).
     let clearSession: (PeerID) -> Void
+    /// Consumes session-authenticated protocol state inside the transport. It
+    /// must never escape to UI or Nostr payload dispatch.
+    let handleAuthenticatedPeerState: (
+        _ peerID: PeerID,
+        _ payload: Data,
+        _ sessionGeneration: UUID
+    ) -> Void
     /// Delivers `.noisePayloadReceived` to the UI as one main-actor hop.
     let deliverNoisePayload: (
         _ peerID: PeerID,
@@ -49,13 +69,28 @@ final class BLENoisePacketHandler {
         self.environment = environment
     }
 
-    func handleHandshake(_ packet: BitchatPacket, from peerID: PeerID) {
+    /// Returns true when the handshake message was processed successfully.
+    /// Callers use this to distinguish an authenticated replacement completion
+    /// from a rejected candidate while an older session remains established.
+    @discardableResult
+    func handleHandshake(_ packet: BitchatPacket, from peerID: PeerID) -> Bool {
+        handleHandshakeWithResult(packet, from: peerID).processed
+    }
+
+    func handleHandshakeWithResult(
+        _ packet: BitchatPacket,
+        from peerID: PeerID
+    ) -> BLENoiseHandshakeHandlingResult {
         let env = environment
         // Use NoiseEncryptionService for handshake processing
         if PeerID(hexData: packet.recipientID) == env.localPeerID() {
             // Handshake is for us
             do {
-                if let response = try env.processHandshakeMessage(peerID, packet.payload) {
+                let result = try env.processHandshakeMessage(
+                    peerID,
+                    packet.payload
+                )
+                if let response = result.response {
                     // Send response
                     let responsePacket = BitchatPacket(
                         type: MessageType.noiseHandshake.rawValue,
@@ -72,14 +107,39 @@ final class BLENoisePacketHandler {
 
                 // Session establishment will trigger onPeerAuthenticated callback
                 // which will send any pending messages at the right time
+                return BLENoiseHandshakeHandlingResult(
+                    processed: true,
+                    didEstablishAuthenticatedSession:
+                        result.didEstablishAuthenticatedSession
+                )
+            } catch NoiseSessionError.peerIdentityMismatch {
+                // The candidate was already discarded by the session manager.
+                // Do not let a spoofed claimed ID trigger a fresh outbound
+                // handshake or recreate state for the attacker-selected ID.
+                SecureLogger.warning(
+                    "Rejected Noise handshake whose static key does not match \(peerID.id.prefix(8))…",
+                    category: .security
+                )
+                return BLENoiseHandshakeHandlingResult(
+                    processed: false,
+                    didEstablishAuthenticatedSession: false
+                )
             } catch {
                 SecureLogger.error("Failed to process handshake: \(error)")
                 // Try initiating a new handshake
                 if !env.hasNoiseSession(peerID) {
                     env.initiateHandshake(peerID)
                 }
+                return BLENoiseHandshakeHandlingResult(
+                    processed: false,
+                    didEstablishAuthenticatedSession: false
+                )
             }
         }
+        return BLENoiseHandshakeHandlingResult(
+            processed: false,
+            didEstablishAuthenticatedSession: false
+        )
     }
 
     func handleEncrypted(_ packet: BitchatPacket, from peerID: PeerID) {
@@ -98,19 +158,29 @@ final class BLENoisePacketHandler {
         env.updatePeerLastSeen(peerID)
 
         do {
-            let decrypted = try env.decrypt(packet.payload, peerID)
+            let decryption = try env.decrypt(packet.payload, peerID)
+            let decrypted = decryption.plaintext
             guard decrypted.count > 0 else { return }
 
             // First byte indicates the payload type
             let payloadType = decrypted[0]
             let payloadData = decrypted.dropFirst()
 
-            guard let noisePayloadType = NoisePayloadType(rawValue: payloadType) else {
+            guard let noisePayloadType = NoisePayloadType.decoded(rawValue: payloadType) else {
                 SecureLogger.warning("⚠️ Unknown noise payload type: \(payloadType)")
                 return
             }
 
             SecureLogger.debug("🔐 Decrypted noise payload type \(noisePayloadType.description) from \(peerID.id.prefix(8))…", category: .session)
+
+            if noisePayloadType == .authenticatedPeerState {
+                env.handleAuthenticatedPeerState(
+                    peerID,
+                    Data(payloadData),
+                    decryption.sessionGeneration
+                )
+                return
+            }
 
             let ts = Date(timeIntervalSince1970: Double(packet.timestamp) / 1000)
             env.deliverNoisePayload(peerID, noisePayloadType, Data(payloadData), ts)

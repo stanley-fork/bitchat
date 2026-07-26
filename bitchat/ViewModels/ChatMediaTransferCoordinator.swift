@@ -6,6 +6,19 @@ import Foundation
 import UIKit
 #endif
 
+struct LegacyPrivateMediaConsentRequest: Identifiable, Equatable {
+    let id: UUID
+    let peerID: PeerID
+    let peerName: String
+    let transferId: String
+    let messageID: String
+}
+
+struct PendingLegacyPrivateMediaConsent {
+    let request: LegacyPrivateMediaConsentRequest
+    let completion: @MainActor (Bool) -> Void
+}
+
 /// The narrow surface `ChatMediaTransferCoordinator` needs from its owner.
 ///
 /// Follows the `ChatDeliveryContext` exemplar: the coordinator depends on the
@@ -43,7 +56,24 @@ protocol ChatMediaTransferContext: AnyObject {
     func recordContentKey(_ key: String, timestamp: Date)
 
     // MARK: Mesh file transfer
-    func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String)
+    func privateMediaSendPolicy(to peerID: PeerID) -> PrivateMediaSendPolicy
+    func resolvePrivateMediaSendPolicy(
+        to peerID: PeerID,
+        completion: @escaping @MainActor (PrivateMediaSendPolicy) -> Void
+    )
+    func requestLegacyPrivateMediaConsent(
+        for peerID: PeerID,
+        transferId: String,
+        messageID: String,
+        completion: @escaping @MainActor (Bool) -> Void
+    )
+    func cancelLegacyPrivateMediaConsent(transferId: String, messageID: String)
+    func sendFilePrivate(
+        _ packet: BitchatFilePacket,
+        to peerID: PeerID,
+        transferId: String,
+        allowLegacyFallback: Bool
+    )
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String)
     func cancelTransfer(_ transferId: String)
 }
@@ -59,8 +89,50 @@ extension ChatViewModel: ChatMediaTransferContext {
     // other contexts or satisfied by existing `ChatViewModel` members. The
     // members below flatten mesh service accesses.
 
-    func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String) {
-        meshService.sendFilePrivate(packet, to: peerID, transferId: transferId)
+    func privateMediaSendPolicy(to peerID: PeerID) -> PrivateMediaSendPolicy {
+        meshService.privateMediaSendPolicy(to: peerID)
+    }
+
+    func resolvePrivateMediaSendPolicy(
+        to peerID: PeerID,
+        completion: @escaping @MainActor (PrivateMediaSendPolicy) -> Void
+    ) {
+        meshService.resolvePrivateMediaSendPolicy(to: peerID, completion: completion)
+    }
+
+    func requestLegacyPrivateMediaConsent(
+        for peerID: PeerID,
+        transferId: String,
+        messageID: String,
+        completion: @escaping @MainActor (Bool) -> Void
+    ) {
+        enqueueLegacyPrivateMediaConsent(
+            for: peerID,
+            transferId: transferId,
+            messageID: messageID,
+            completion: completion
+        )
+    }
+
+    func cancelLegacyPrivateMediaConsent(transferId: String, messageID: String) {
+        invalidateLegacyPrivateMediaConsent(
+            transferId: transferId,
+            messageID: messageID
+        )
+    }
+
+    func sendFilePrivate(
+        _ packet: BitchatFilePacket,
+        to peerID: PeerID,
+        transferId: String,
+        allowLegacyFallback: Bool
+    ) {
+        meshService.sendFilePrivate(
+            packet,
+            to: peerID,
+            transferId: transferId,
+            allowLegacyFallback: allowLegacyFallback
+        )
     }
 
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {
@@ -72,15 +144,103 @@ extension ChatViewModel: ChatMediaTransferContext {
     }
 }
 
+/// Synchronous boundary between detached image writers and panic deletion.
+///
+/// Invalidation closes admission before waiting for writers that already
+/// entered. Those writers never need the main actor while inside the boundary,
+/// so a synchronous panic transaction can safely join them and then delete
+/// every output before reporting completion.
+private final class ImagePreparationBarrier: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var generation: UInt64 = 0
+    private var activeOperations = 0
+
+    var currentGeneration: UInt64 {
+        condition.lock()
+        defer { condition.unlock() }
+        return generation
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return generation == candidate
+    }
+
+    func performIfCurrent<T>(
+        generation candidate: UInt64,
+        operation: () throws -> T
+    ) rethrows -> T? {
+        condition.lock()
+        guard generation == candidate else {
+            condition.unlock()
+            return nil
+        }
+        activeOperations += 1
+        condition.unlock()
+
+        defer {
+            condition.lock()
+            activeOperations -= 1
+            if activeOperations == 0 {
+                condition.broadcast()
+            }
+            condition.unlock()
+        }
+        return try operation()
+    }
+
+    func invalidateAndWait() {
+        condition.lock()
+        generation &+= 1
+        while activeOperations > 0 {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+}
+
+/// Runs synchronous media encoding and file I/O on a dispatch worker.
+///
+/// These operations can legitimately block. Keeping them off Swift's
+/// cooperative executor preserves forward progress when several transfers or
+/// test doubles wait at the same time.
+private func runBlockingMediaPreparation<T>(
+    _ operation: @escaping @Sendable () throws -> T
+) async throws -> T {
+    try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                continuation.resume(returning: try operation())
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+}
+
 @MainActor
 final class ChatMediaTransferCoordinator {
     private unowned let context: any ChatMediaTransferContext
+    private let prepareImagePacket: @Sendable (URL) throws -> ChatPreparedImage
+    private let imagePreparationBarrier = ImagePreparationBarrier()
+    private let prepareVoiceNotePacket: @Sendable (URL) throws -> BitchatFilePacket
 
     private(set) var transferIdToMessageIDs: [String: [String]] = [:]
     private(set) var messageIDToTransferId: [String: String] = [:]
 
-    init(context: any ChatMediaTransferContext) {
+    init(
+        context: any ChatMediaTransferContext,
+        prepareImagePacket: @escaping @Sendable (URL) throws -> ChatPreparedImage = {
+            try ChatMediaPreparation.prepareImagePacket(from: $0)
+        },
+        prepareVoiceNotePacket: @escaping @Sendable (URL) throws -> BitchatFilePacket = {
+            try ChatMediaPreparation.prepareVoiceNotePacket(at: $0)
+        }
+    ) {
         self.context = context
+        self.prepareImagePacket = prepareImagePacket
+        self.prepareVoiceNotePacket = prepareVoiceNotePacket
     }
 
     func sendVoiceNote(at url: URL) {
@@ -98,16 +258,33 @@ final class ChatMediaTransferCoordinator {
         )
         let messageID = message.id
         let transferId = makeTransferID(messageID: messageID)
+        // Own the transfer before detached preparation begins. Cancel/delete
+        // must be able to invalidate this exact invocation even while file I/O
+        // is still running off the main actor.
+        registerTransfer(transferId: transferId, messageID: messageID)
+        let prepareVoiceNotePacket = self.prepareVoiceNotePacket
+        let barrier = imagePreparationBarrier
+        let generation = barrier.currentGeneration
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self, barrier] in
             do {
-                let packet = try ChatMediaPreparation.prepareVoiceNotePacket(at: url)
+                let packet = try await runBlockingMediaPreparation {
+                    try prepareVoiceNotePacket(url)
+                }
 
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.registerTransfer(transferId: transferId, messageID: messageID)
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation),
+                          self.isRegisteredTransfer(transferId, messageID: messageID) else {
+                        return
+                    }
                     if let peerID = targetPeer {
-                        self.context.sendFilePrivate(packet, to: peerID, transferId: transferId)
+                        self.beginPrivateMediaSend(
+                            packet,
+                            to: peerID,
+                            transferId: transferId,
+                            messageID: messageID
+                        )
                     } else {
                         self.context.sendFileBroadcast(packet, transferId: transferId)
                     }
@@ -115,14 +292,22 @@ final class ChatMediaTransferCoordinator {
             } catch ChatMediaPreparationError.voiceNoteTooLarge(let size) {
                 SecureLogger.warning("Voice note exceeds size limit (\(size) bytes)", category: .session)
                 try? FileManager.default.removeItem(at: url)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation),
+                          self.isRegisteredTransfer(transferId, messageID: messageID) else {
+                        return
+                    }
                     self.handleMediaSendFailure(messageID: messageID, reason: String(localized: "content.delivery.reason.voice_too_large", comment: "Failure reason shown when a voice note exceeds the size limit"))
                 }
             } catch {
                 SecureLogger.error("Voice note send failed: \(error)", category: .session)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation),
+                          self.isRegisteredTransfer(transferId, messageID: messageID) else {
+                        return
+                    }
                     self.handleMediaSendFailure(messageID: messageID, reason: String(localized: "content.delivery.reason.voice_send_failed", comment: "Failure reason shown when a voice note could not be sent"))
                 }
             }
@@ -132,11 +317,27 @@ final class ChatMediaTransferCoordinator {
     #if os(iOS)
     func processThenSendImage(_ image: UIImage?) {
         guard let image else { return }
-        Task.detached { [weak self] in
+        let generation = imagePreparationBarrier.currentGeneration
+        let barrier = imagePreparationBarrier
+        Task.detached(priority: .userInitiated) { [weak self, barrier] in
             do {
-                let processedURL = try ImageUtils.processImage(image)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                let processedURL = try await runBlockingMediaPreparation {
+                    try barrier.performIfCurrent(
+                        generation: generation,
+                        operation: {
+                            try ImageUtils.processImage(image)
+                        }
+                    )
+                }
+                guard let processedURL else {
+                    return
+                }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation) else {
+                        try? FileManager.default.removeItem(at: processedURL)
+                        return
+                    }
                     self.sendImage(from: processedURL)
                 }
             } catch {
@@ -147,11 +348,27 @@ final class ChatMediaTransferCoordinator {
     #elseif os(macOS)
     func processThenSendImage(from url: URL?) {
         guard let url else { return }
-        Task.detached { [weak self] in
+        let generation = imagePreparationBarrier.currentGeneration
+        let barrier = imagePreparationBarrier
+        Task.detached(priority: .userInitiated) { [weak self, barrier] in
             do {
-                let processedURL = try ImageUtils.processImage(at: url)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                let processedURL = try await runBlockingMediaPreparation {
+                    try barrier.performIfCurrent(
+                        generation: generation,
+                        operation: {
+                            try ImageUtils.processImage(at: url)
+                        }
+                    )
+                }
+                guard let processedURL else {
+                    return
+                }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation) else {
+                        try? FileManager.default.removeItem(at: processedURL)
+                        return
+                    }
                     self.sendImage(from: processedURL)
                 }
             } catch {
@@ -170,6 +387,7 @@ final class ChatMediaTransferCoordinator {
         }
 
         let targetPeer = context.selectedPrivateChatPeer
+        let generation = imagePreparationBarrier.currentGeneration
 
         do {
             try ImageUtils.validateImageSource(at: sourceURL)
@@ -179,12 +397,28 @@ final class ChatMediaTransferCoordinator {
             return
         }
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let prepareImagePacket = self.prepareImagePacket
+        let barrier = imagePreparationBarrier
+        Task.detached(priority: .userInitiated) { [weak self, barrier] in
             do {
-                let prepared = try ChatMediaPreparation.prepareImagePacket(from: sourceURL)
+                let prepared = try await runBlockingMediaPreparation {
+                    try barrier.performIfCurrent(
+                        generation: generation,
+                        operation: {
+                            try prepareImagePacket(sourceURL)
+                        }
+                    )
+                }
+                guard let prepared else {
+                    return
+                }
 
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation) else {
+                        try? FileManager.default.removeItem(at: prepared.outputURL)
+                        return
+                    }
                     let message = self.enqueueMediaMessage(
                         content: "\(MimeType.Category.image.messagePrefix)\(prepared.outputURL.lastPathComponent)",
                         targetPeer: targetPeer
@@ -193,21 +427,32 @@ final class ChatMediaTransferCoordinator {
                     let transferId = self.makeTransferID(messageID: messageID)
                     self.registerTransfer(transferId: transferId, messageID: messageID)
                     if let peerID = targetPeer {
-                        self.context.sendFilePrivate(prepared.packet, to: peerID, transferId: transferId)
+                        self.beginPrivateMediaSend(
+                            prepared.packet,
+                            to: peerID,
+                            transferId: transferId,
+                            messageID: messageID
+                        )
                     } else {
                         self.context.sendFileBroadcast(prepared.packet, transferId: transferId)
                     }
                 }
             } catch ChatMediaPreparationError.imageTooLarge(let size) {
                 SecureLogger.warning("Processed image exceeds size limit (\(size) bytes)", category: .session)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation) else {
+                        return
+                    }
                     self.context.addSystemMessage("Image is too large to send.")
                 }
             } catch {
                 SecureLogger.error("Image send preparation failed: \(error)", category: .session)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
+                await MainActor.run { [weak self, barrier] in
+                    guard let self,
+                          barrier.isCurrent(generation) else {
+                        return
+                    }
                     self.context.addSystemMessage("Failed to prepare image for sending.")
                 }
             }
@@ -253,9 +498,115 @@ final class ChatMediaTransferCoordinator {
         return message
     }
 
+    private func beginPrivateMediaSend(
+        _ packet: BitchatFilePacket,
+        to peerID: PeerID,
+        transferId: String,
+        messageID: String
+    ) {
+        continuePrivateMediaSend(
+            packet,
+            to: peerID,
+            transferId: transferId,
+            messageID: messageID,
+            policy: context.privateMediaSendPolicy(to: peerID)
+        )
+    }
+
+    private func continuePrivateMediaSend(
+        _ packet: BitchatFilePacket,
+        to peerID: PeerID,
+        transferId: String,
+        messageID: String,
+        policy: PrivateMediaSendPolicy
+    ) {
+        switch policy {
+        case .encrypted:
+            context.sendFilePrivate(
+                packet,
+                to: peerID,
+                transferId: transferId,
+                allowLegacyFallback: false
+            )
+
+        case .awaitingCapabilityProof:
+            context.resolvePrivateMediaSendPolicy(to: peerID) { [weak self] resolvedPolicy in
+                guard let self,
+                      self.isRegisteredTransfer(transferId, messageID: messageID) else {
+                    return
+                }
+                guard resolvedPolicy != .awaitingCapabilityProof else {
+                    self.handleMediaSendFailure(
+                        messageID: messageID,
+                        reason: String(
+                            localized: "content.delivery.reason.private_media_capability_unresolved",
+                            defaultValue: "Could not confirm encrypted media support",
+                            comment: "Failure reason when private-media capability negotiation did not resolve"
+                        )
+                    )
+                    return
+                }
+                self.continuePrivateMediaSend(
+                    packet,
+                    to: peerID,
+                    transferId: transferId,
+                    messageID: messageID,
+                    policy: resolvedPolicy
+                )
+            }
+
+        case .legacyRequiresConsent:
+            context.requestLegacyPrivateMediaConsent(
+                for: peerID,
+                transferId: transferId,
+                messageID: messageID
+            ) { [weak self] approved in
+                guard let self else { return }
+                // Consent belongs to this exact placeholder/transfer. A late
+                // dialog callback after cancel/delete must never resurrect it.
+                guard self.messageIDToTransferId[messageID] == transferId,
+                      self.transferIdToMessageIDs[transferId]?.contains(messageID) == true else {
+                    return
+                }
+                guard approved else {
+                    self.handleMediaSendFailure(
+                        messageID: messageID,
+                        reason: String(
+                            localized: "content.delivery.reason.legacy_media_declined",
+                            defaultValue: "Not sent without end-to-end encryption",
+                            comment: "Failure reason after declining the warning for a legacy clear private-media send"
+                        )
+                    )
+                    return
+                }
+                self.context.sendFilePrivate(
+                    packet,
+                    to: peerID,
+                    transferId: transferId,
+                    allowLegacyFallback: true
+                )
+            }
+
+        case .blockedDowngrade:
+            handleMediaSendFailure(
+                messageID: messageID,
+                reason: String(
+                    localized: "content.delivery.reason.private_media_downgrade_blocked",
+                    defaultValue: "Encrypted media required; ask this contact to upgrade",
+                    comment: "Failure reason when a peer that previously supported encrypted media appears to downgrade"
+                )
+            )
+        }
+    }
+
     func registerTransfer(transferId: String, messageID: String) {
         transferIdToMessageIDs[transferId, default: []].append(messageID)
         messageIDToTransferId[messageID] = transferId
+    }
+
+    private func isRegisteredTransfer(_ transferId: String, messageID: String) -> Bool {
+        messageIDToTransferId[messageID] == transferId
+            && transferIdToMessageIDs[transferId]?.contains(messageID) == true
     }
 
     func makeTransferID(messageID: String) -> String {
@@ -264,6 +615,10 @@ final class ChatMediaTransferCoordinator {
 
     func clearTransferMapping(for messageID: String) {
         guard let transferId = messageIDToTransferId.removeValue(forKey: messageID) else { return }
+        context.cancelLegacyPrivateMediaConsent(
+            transferId: transferId,
+            messageID: messageID
+        )
         guard var queue = transferIdToMessageIDs[transferId] else { return }
 
         if !queue.isEmpty {
@@ -298,6 +653,9 @@ final class ChatMediaTransferCoordinator {
             guard let messageID = transferIdToMessageIDs[id]?.first else { return }
             clearTransferMapping(for: messageID)
             context.removeMessage(withID: messageID, cleanupFile: true)
+        case .rejected(let id, let reason):
+            guard let messageID = transferIdToMessageIDs[id]?.first else { return }
+            handleMediaSendFailure(messageID: messageID, reason: reason)
         }
     }
 
@@ -338,8 +696,29 @@ final class ChatMediaTransferCoordinator {
     }
 
     func deleteMediaMessage(messageID: String) {
+        // Delete is also a send cancellation. In particular, an approved
+        // legacy-clear send may still be waiting on BLEService.messageQueue;
+        // removing only the UI mapping would let that deferred work transmit.
+        if let transferId = messageIDToTransferId[messageID],
+           transferIdToMessageIDs[transferId]?.first == messageID {
+            context.cancelTransfer(transferId)
+        }
         clearTransferMapping(for: messageID)
         context.removeMessage(withID: messageID, cleanupFile: true)
+    }
+
+    /// Invalidates detached preparation work and cancels every transfer that
+    /// reached the transport. Closing image-preparation admission and joining
+    /// active synchronous writers ensures the following panic media deletion
+    /// is the last filesystem mutation before the transaction can complete.
+    func resetForPanic() {
+        imagePreparationBarrier.invalidateAndWait()
+        let transferIDs = Set(transferIdToMessageIDs.keys)
+        transferIdToMessageIDs.removeAll(keepingCapacity: false)
+        messageIDToTransferId.removeAll(keepingCapacity: false)
+        for transferID in transferIDs {
+            context.cancelTransfer(transferID)
+        }
     }
 }
 

@@ -33,6 +33,7 @@ struct BLEFileTransferHandlerTests {
                 recorder.signatureVerifyCount += 1
                 return recorder.signatureVerifies
             },
+            localSigningPublicKey: { [sampleSigningKey] in sampleSigningKey },
             signedSenderDisplayName: { _, peerID in
                 recorder.signedNameQueries.append(peerID)
                 return recorder.signedName
@@ -92,12 +93,11 @@ struct BLEFileTransferHandlerTests {
     @Test
     func selfEchoIsDropped() throws {
         let recorder = Recorder()
+        recorder.signatureVerifies = true
         let handler = makeHandler(recorder: recorder)
         let packet = try makeFileTransferPacket(sender: localPeerID, mimeType: "application/pdf", content: Data("%PDF-1.7".utf8), ttl: 3)
 
-        // The relay pipeline already suppresses self-originated packets, so the
-        // handler reports "relayable" rather than treating the echo as forged.
-        #expect(handler.handle(packet, from: localPeerID))
+        #expect(!handler.handle(packet, from: localPeerID))
 
         expectNoSideEffects(recorder)
     }
@@ -120,7 +120,12 @@ struct BLEFileTransferHandlerTests {
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Bob", isVerified: false, isConnected: true)]
         let handler = makeHandler(recorder: recorder)
-        let packet = try makeFileTransferPacket(sender: remotePeerID, mimeType: "application/pdf", content: Data("%PDF-1.7".utf8))
+        let packet = try makeFileTransferPacket(
+            sender: remotePeerID,
+            mimeType: "application/pdf",
+            content: Data("%PDF-1.7".utf8),
+            hasSignature: false
+        )
 
         // Failed sender authentication must also stop the packet from being
         // relayed to downstream nodes.
@@ -129,7 +134,7 @@ struct BLEFileTransferHandlerTests {
         // Broadcast files carry an attacker-controllable senderID, so — like
         // public messages — a connected-but-unverified peer must present a valid
         // packet signature. No signing key + no signed identity means dropped.
-        #expect(recorder.signedNameQueries == [remotePeerID])
+        #expect(recorder.signedNameQueries.isEmpty)
         #expect(recorder.trackedPackets.isEmpty)
         #expect(recorder.deliveredMessages.isEmpty)
     }
@@ -153,12 +158,11 @@ struct BLEFileTransferHandlerTests {
     }
 
     @Test
-    func selfBroadcastReplayIsDeliveredWithoutSignatureCheck() throws {
-        // Our own broadcast file replayed via gossip sync arrives with ttl==0
-        // (so it is not treated as a self-echo) and cannot be verified against
-        // the peer registry — it must still be accepted, matching
-        // BLEPublicMessageHandler's self exemption.
+    func signedSelfBroadcastReplayIsDelivered() throws {
+        // Our own broadcast file replayed via gossip sync arrives with ttl==0;
+        // it is verified against our local signing key before delivery.
         let recorder = Recorder()
+        recorder.signatureVerifies = true
         let handler = makeHandler(recorder: recorder)
         let packet = try makeFileTransferPacket(
             sender: localPeerID,
@@ -169,7 +173,7 @@ struct BLEFileTransferHandlerTests {
 
         #expect(handler.handle(packet, from: localPeerID))
 
-        #expect(recorder.signatureVerifyCount == 0)
+        #expect(recorder.signatureVerifyCount == 1)
         #expect(recorder.signedNameQueries.isEmpty)
         #expect(recorder.deliveredMessages.count == 1)
         #expect(recorder.deliveredMessages.first?.sender == "Me")
@@ -205,7 +209,8 @@ struct BLEFileTransferHandlerTests {
             sender: remotePeerID,
             mimeType: "audio/mp4",
             content: m4a,
-            fileName: "voice_1122334455667788"
+            fileName: "voice_1122334455667788",
+            hasSignature: false
         )
 
         // The spoofed note must be dropped locally AND not relayed onward.
@@ -215,7 +220,7 @@ struct BLEFileTransferHandlerTests {
     }
 
     @Test
-    func privateFileFromConnectedUnverifiedPeerIsAccepted() throws {
+    func rawDirectedFileWithoutVerifiableSignatureIsDroppedWithoutWriteOrRelay() throws {
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Bob", isVerified: false, isConnected: true)]
         let handler = makeHandler(recorder: recorder)
@@ -223,23 +228,25 @@ struct BLEFileTransferHandlerTests {
             sender: remotePeerID,
             mimeType: "application/pdf",
             content: Data("%PDF-1.7".utf8),
-            recipientID: Data(hexString: localPeerID.id)
+            recipientID: Data(hexString: localPeerID.id),
+            hasSignature: false
         )
 
-        #expect(handler.handle(packet, from: remotePeerID))
+        #expect(!handler.handle(packet, from: remotePeerID))
 
-        // Directed transfers keep the lenient connected-peer path (no broadcast
-        // exposure); no signature check is required.
         #expect(recorder.signatureVerifyCount == 0)
         #expect(recorder.signedNameQueries.isEmpty)
-        #expect(recorder.deliveredMessages.count == 1)
-        #expect(recorder.deliveredMessages.first?.isPrivate == true)
+        #expect(recorder.trackedPackets.isEmpty)
+        #expect(recorder.quotaReservations.isEmpty)
+        #expect(recorder.saveCalls.isEmpty)
+        #expect(recorder.deliveredMessages.isEmpty)
     }
 
     @Test
     func fileDirectedToAnotherPeerIsIgnored() throws {
         let recorder = Recorder()
-        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true, signingPublicKey: sampleSigningKey)]
+        recorder.signatureVerifies = true
         let handler = makeHandler(recorder: recorder)
         let packet = try makeFileTransferPacket(
             sender: remotePeerID,
@@ -260,7 +267,8 @@ struct BLEFileTransferHandlerTests {
     @Test
     func privateFileUpdatesLastSeenAndDeliversPrivateMessage() throws {
         let recorder = Recorder()
-        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true, signingPublicKey: sampleSigningKey)]
+        recorder.signatureVerifies = true
         let handler = makeHandler(recorder: recorder)
         let packet = try makeFileTransferPacket(
             sender: remotePeerID,
@@ -283,6 +291,56 @@ struct BLEFileTransferHandlerTests {
     }
 
     @Test
+    func decryptedPrivateFileUsesValidationQuotaAndPrivateDeliveryWithoutRawSignature() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let file = BitchatFilePacket(
+            fileName: "secret.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+        let timestamp = Date(timeIntervalSince1970: 1_234)
+
+        #expect(handler.handlePrivatePayload(payload, from: remotePeerID, timestamp: timestamp))
+
+        #expect(recorder.signatureVerifyCount == 0)
+        #expect(recorder.signedNameQueries.isEmpty)
+        #expect(recorder.trackedPackets.isEmpty)
+        #expect(recorder.quotaReservations == [content.count])
+        #expect(recorder.saveCalls.first?.data == content)
+        #expect(recorder.lastSeenUpdates == [remotePeerID])
+        #expect(recorder.deliveredMessages.count == 1)
+        #expect(recorder.deliveredMessages.first?.isPrivate == true)
+        #expect(recorder.deliveredMessages.first?.timestamp == timestamp)
+    }
+
+    @Test
+    func decryptedPrivateFileOverPayloadCapIsRejectedBeforeQuotaOrDiskWrite() {
+        let recorder = Recorder()
+        let handler = makeHandler(recorder: recorder)
+        let oversizedCount = FileTransferLimits.maxPayloadBytes + 1
+        var length = UInt32(oversizedCount).bigEndian
+        var payload = Data([0x04]) // BitchatFilePacket CONTENT TLV
+        withUnsafeBytes(of: &length) { payload.append(contentsOf: $0) }
+        payload.append(Data(repeating: 0x41, count: oversizedCount))
+
+        #expect(!handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+
+        #expect(recorder.quotaReservations.isEmpty)
+        #expect(recorder.saveCalls.isEmpty)
+        #expect(recorder.lastSeenUpdates.isEmpty)
+        #expect(recorder.deliveredMessages.isEmpty)
+    }
+
+    @Test
     func malformedPayloadIsTrackedForSyncButDropped() {
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true, signingPublicKey: sampleSigningKey)]
@@ -294,7 +352,7 @@ struct BLEFileTransferHandlerTests {
             recipientID: nil,
             timestamp: 900_000,
             payload: Data([0x01, 0x02, 0x03]),
-            signature: nil,
+            signature: Data(repeating: 0x5A, count: 64),
             ttl: TransportConfig.messageTTLDefault
         )
 
@@ -370,6 +428,132 @@ struct BLEFileTransferHandlerTests {
         #expect(!FileManager.default.fileExists(atPath: evictable.path))
     }
 
+    @Test
+    func panicWipeDeletesEveryManagedMediaFileAndRecreatesEmptyDirectories() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("panic-media-wipe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = BLEIncomingFileStore(baseDirectory: base)
+        let subdirectories = [
+            "voicenotes/incoming",
+            "voicenotes/outgoing",
+            "images/incoming",
+            "images/outgoing",
+            "files/incoming",
+            "files/outgoing"
+        ]
+
+        for subdirectory in subdirectories {
+            let directory = base
+                .appendingPathComponent("files", isDirectory: true)
+                .appendingPathComponent(subdirectory, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("secret".utf8).write(to: directory.appendingPathComponent("artifact.bin"))
+        }
+        let unmanaged = base.appendingPathComponent("files/legacy/secret.bin")
+        try FileManager.default.createDirectory(at: unmanaged.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("legacy".utf8).write(to: unmanaged)
+
+        try store.panicWipe()
+
+        #expect(!FileManager.default.fileExists(atPath: unmanaged.path))
+        for subdirectory in subdirectories {
+            let directory = base
+                .appendingPathComponent("files", isDirectory: true)
+                .appendingPathComponent(subdirectory, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            #expect(FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory))
+            #expect(isDirectory.boolValue)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        }
+    }
+
+    @Test
+    func panicWipeAttemptsDeletionWhenMarkerPersistenceFails() throws {
+        enum MarkerFailure: Error { case unavailable }
+
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "panic-marker-failure-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: base) }
+        let secret = base
+            .appendingPathComponent("files/images/outgoing", isDirectory: true)
+            .appendingPathComponent("secret.jpg")
+        try FileManager.default.createDirectory(
+            at: secret.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("secret".utf8).write(to: secret)
+        let store = BLEIncomingFileStore(
+            baseDirectory: base,
+            panicMarkerWriter: { _, _ in throw MarkerFailure.unavailable }
+        )
+
+        do {
+            try store.panicWipe(hasDurablePendingMarker: false)
+            Issue.record("Expected the missing durable marker to fail closed")
+        } catch {
+            // The marker error is reported only after the deletion attempt.
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: secret.path))
+        #expect(
+            FileManager.default.fileExists(
+                atPath: secret.deletingLastPathComponent().path
+            )
+        )
+    }
+
+    @Test
+    func externalMarkerAllowsDeletionToCommitWhenFileMarkerFails() throws {
+        enum MarkerFailure: Error { case unavailable }
+
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "panic-external-marker-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: base) }
+        let secret = base
+            .appendingPathComponent("files/voicenotes/incoming", isDirectory: true)
+            .appendingPathComponent("secret.m4a")
+        try FileManager.default.createDirectory(
+            at: secret.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("secret".utf8).write(to: secret)
+        let store = BLEIncomingFileStore(
+            baseDirectory: base,
+            panicMarkerWriter: { _, _ in throw MarkerFailure.unavailable }
+        )
+
+        try store.panicWipe(hasDurablePendingMarker: true)
+
+        #expect(!FileManager.default.fileExists(atPath: secret.path))
+    }
+
+    @Test
+    func panicRecoveryMarkerPersistsUntilExplicitCommit() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "panic-recovery-marker-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = BLEIncomingFileStore(baseDirectory: base)
+
+        try store.markPanicRecoveryPending()
+        #expect(try store.isPanicRecoveryPending())
+        try store.panicWipe(hasDurablePendingMarker: true)
+        #expect(try store.isPanicRecoveryPending())
+
+        try store.completePanicRecovery()
+
+        #expect(try !store.isPanicRecoveryPending())
+    }
+
     private func expectNoSideEffects(_ recorder: Recorder) {
         #expect(recorder.signedNameQueries.isEmpty)
         #expect(recorder.trackedPackets.isEmpty)
@@ -403,7 +587,8 @@ struct BLEFileTransferHandlerTests {
         content: Data,
         ttl: UInt8 = TransportConfig.messageTTLDefault,
         recipientID: Data? = nil,
-        fileName: String = "sample"
+        fileName: String = "sample",
+        hasSignature: Bool = true
     ) throws -> BitchatPacket {
         let filePacket = BitchatFilePacket(
             fileName: fileName,
@@ -418,7 +603,7 @@ struct BLEFileTransferHandlerTests {
             recipientID: recipientID,
             timestamp: 900_000,
             payload: payload,
-            signature: nil,
+            signature: hasSignature ? Data(repeating: 0x5A, count: 64) : nil,
             ttl: ttl
         )
     }

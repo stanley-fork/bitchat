@@ -17,12 +17,12 @@ bitchat is designed for private, account-free communication. This policy describ
 
 1. **Identity and cryptographic keys**
    - Noise, signing, group, prekey, and optional Nostr identity material is generated locally.
-   - Secret keys are stored in the system keychain. Public keys are shared when required for messaging, verification, groups, or Nostr events.
-   - Keys remain until they are rotated, removed by the relevant feature, erased with panic wipe, or removed with the app.
+   - Secret keys are stored in the system keychain as device-only items. Public keys are shared when required for messaging, verification, groups, or Nostr events.
+   - Keys remain until they are rotated, removed by the relevant feature, or erased with panic wipe. Because operating-system keychains can outlive an uninstall, bitchat records a non-secret install marker and deletes surviving app keys before use after a later reinstall.
 
 2. **Nickname, preferences, and relationships**
    - Your nickname, settings, favorites, petnames, read-receipt identifiers, and bounded operational metadata are stored locally.
-   - The share extension briefly places content you choose to share in the app-group preferences so the main app can import it.
+   - The share extension can retain one item you choose to share in the app-group preferences for up to 24 hours. The app shows the destination and a preview for review; it does not send the item automatically. The item is cleared when you add it to the composer, cancel, panic-wipe, or it expires.
 
 3. **Private group state**
    - Group names, rosters, creator identity, and key epoch are stored as protected files in Application Support.
@@ -73,7 +73,7 @@ Private group members receive the group's name, roster, key epoch, and encrypted
 
 Internet-backed features are optional. When enabled or used:
 
-- Private fallback messages use encrypted NIP-17 gift wraps. Relays can observe event and network metadata but not the message plaintext.
+- Private fallback messages use BitChat's app-specific encrypted envelopes. This format is not NIP-17, NIP-44, or NIP-59 compatible. Relays can observe the recipient public-key tag, event timing and size, and network metadata, but not the message plaintext or stable sender identity.
 - Public location-channel messages, notes, notices, and presence include a geohash tag, event kind, timestamp, and a public key. A geohash reveals an approximate area; finer precision reveals a smaller area.
 - The optional mesh bridge publishes bridge-enabled public mesh messages and presence to a neighborhood rendezvous cell. Those messages are public to participants and relays for that cell. A per-message “nearby only” choice prevents that message from crossing the bridge.
 - Bridge courier drops contain opaque end-to-end encrypted envelopes and a rotating recipient tag. Relays still observe timing and network metadata.
@@ -103,7 +103,7 @@ Private and public features use different protections:
 
 - Mesh private sessions use Noise XX with X25519, ChaCha20-Poly1305, and SHA-256.
 - Private group messages use ChaCha20-Poly1305; group state and relevant mesh packets use Ed25519 signatures.
-- Nostr events use secp256k1 Schnorr signatures. NIP-44 v2 private payloads use secp256k1 key agreement, HKDF-SHA256, and XChaCha20-Poly1305.
+- Nostr events use secp256k1 Schnorr signatures. BitChat private envelopes use secp256k1 key agreement, HKDF-SHA256, and XChaCha20-Poly1305. The envelope format is proprietary, only interoperates with BitChat clients, and does not provide forward secrecy against later compromise of the recipient's static Nostr private key.
 - The persistent private-message outbox uses ChaCha20-Poly1305 with a key held in the keychain. Some other protected local identity state uses AES-GCM.
 - Public mesh, bridge, geohash, and board content is signed or authenticated as appropriate but is intentionally not confidential.
 
@@ -121,7 +121,7 @@ No cryptographic system can protect content after a recipient reads, copies, scr
 
 ## Your Controls
 
-- **Panic wipe:** Triple-tap the logo to clear local keys, sessions, preferences, groups, queues, carried mail, public archives, board data, and media managed by the app.
+- **Panic wipe:** Triple-tap the logo to synchronously cancel in-flight media work and clear local keys, sessions, preferences, groups, queues, carried mail, public archives, board data, and media managed by the app.
 - **Feature controls:** Location channels, mesh bridge, internet gateway, and related internet behaviors can be disabled in the app. Some already-published relay data cannot be recalled.
 - **System permissions:** Bluetooth, location, microphone, camera, and photo-library access can be revoked in system settings.
 - **No account:** The project operates no account record for you to request or export.

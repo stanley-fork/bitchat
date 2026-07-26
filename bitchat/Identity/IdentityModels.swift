@@ -161,24 +161,24 @@ struct VouchRecord: Codable, Equatable {
 struct IdentityCache: Codable {
     // Fingerprint -> Social mapping
     var socialIdentities: [String: SocialIdentity] = [:]
-    
+
     // Nickname -> [Fingerprints] reverse index
     // Multiple fingerprints can claim same nickname
     var nicknameIndex: [String: Set<String>] = [:]
-    
+
     // Verified fingerprints (cryptographic proof)
     var verifiedFingerprints: Set<String> = []
-    
+
     // Last interaction timestamps (privacy: optional)
-    var lastInteractions: [String: Date] = [:] 
-    
+    var lastInteractions: [String: Date] = [:]
+
     // Blocked Nostr pubkeys (lowercased hex) for geohash chats
     var blockedNostrPubkeys: Set<String> = []
 
     // Vouching (transitive verification). All three fields are Optional so
-    // caches persisted before this feature decode cleanly — the synthesized
-    // decoder uses decodeIfPresent for optionals, and a missing key must not
-    // trip the "unreadable cache" recovery path that discards everything.
+    // caches persisted before this feature decode cleanly — decodeIfPresent
+    // is used below, and a missing key must not trip the "unreadable cache"
+    // recovery path that discards everything.
 
     // Vouchee fingerprint -> accepted vouches (capped per vouchee)
     var vouchesByVouchee: [String: [VouchRecord]]? = nil
@@ -189,6 +189,50 @@ struct IdentityCache: Codable {
     // Fingerprint -> when we verified it (orders outgoing vouch batches;
     // entries verified before this field exists sort as oldest)
     var verifiedAt: [String: Date]? = nil
+
+    // Stable Noise fingerprints that proved encrypted private-media support
+    // inside an authenticated Noise session. Optional for decoding caches
+    // written before this migration. Entries are monotonic until a panic wipe
+    // so an old/replayed announce cannot silently downgrade a peer.
+    var privateMediaCapableFingerprints: Set<String>? = nil
+
+    // Noise-fingerprint -> Ed25519 announcement key, learned only from the
+    // authenticated peer-state payload. This prevents a self-signed announce
+    // containing a copied public Noise key from replacing a previously bound
+    // public-message signing identity. Optional for old cache compatibility.
+    var authenticatedSigningKeysByFingerprint: [String: Data]? = nil
+
+    // Fingerprint -> Cryptographic identity (noise + pinned signing key).
+    // Persisting the signing-key pin is security-critical: it must survive
+    // app restarts so an attacker cannot replay a known peer's
+    // noiseKey/peerID with their own signing key and be treated as first
+    // contact (TOFU downgrade).
+    var cryptographicIdentities: [String: CryptographicIdentity] = [:]
+
+    // Schema version for future migrations
+    var version: Int = 1
+
+    init() {}
+
+    // Custom decoding so caches written by older builds (missing newer keys
+    // such as `cryptographicIdentities` or the vouching fields) still load
+    // instead of being discarded. Every field uses decodeIfPresent so a
+    // missing key falls back to its default rather than throwing.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        socialIdentities = try container.decodeIfPresent([String: SocialIdentity].self, forKey: .socialIdentities) ?? [:]
+        nicknameIndex = try container.decodeIfPresent([String: Set<String>].self, forKey: .nicknameIndex) ?? [:]
+        verifiedFingerprints = try container.decodeIfPresent(Set<String>.self, forKey: .verifiedFingerprints) ?? []
+        lastInteractions = try container.decodeIfPresent([String: Date].self, forKey: .lastInteractions) ?? [:]
+        blockedNostrPubkeys = try container.decodeIfPresent(Set<String>.self, forKey: .blockedNostrPubkeys) ?? []
+        vouchesByVouchee = try container.decodeIfPresent([String: [VouchRecord]].self, forKey: .vouchesByVouchee)
+        vouchBatchSentAt = try container.decodeIfPresent([String: Date].self, forKey: .vouchBatchSentAt)
+        verifiedAt = try container.decodeIfPresent([String: Date].self, forKey: .verifiedAt)
+        privateMediaCapableFingerprints = try container.decodeIfPresent(Set<String>.self, forKey: .privateMediaCapableFingerprints)
+        authenticatedSigningKeysByFingerprint = try container.decodeIfPresent([String: Data].self, forKey: .authenticatedSigningKeysByFingerprint)
+        cryptographicIdentities = try container.decodeIfPresent([String: CryptographicIdentity].self, forKey: .cryptographicIdentities) ?? [:]
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+    }
 }
 
 //

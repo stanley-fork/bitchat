@@ -100,6 +100,95 @@ struct BLEServiceCoreTests {
     }
 
     @Test
+    func unsignedAndBadSignatureLeaveDoNotEvictOrRelayClaimedPeer() async throws {
+        let ble = makeService()
+        let alice = NoiseEncryptionService(keychain: MockKeychain())
+        let mallory = NoiseEncryptionService(keychain: MockKeychain())
+        let alicePeerID = PeerID(publicKey: alice.getStaticPublicKeyData())
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+
+        let unsigned = makeLeavePacket(sender: alicePeerID, marker: "unsigned")
+        ble._test_handlePacket(
+            unsigned,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let unsignedRelayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) > 0 },
+            timeout: TestConstants.shortTimeout
+        )
+        #expect(!unsignedRelayed)
+        #expect(ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID })
+
+        let badSignature = try #require(
+            mallory.signPacket(makeLeavePacket(sender: alicePeerID, marker: "bad-signature"))
+        )
+        ble._test_handlePacket(
+            badSignature,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let badSignatureRelayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) > 0 },
+            timeout: TestConstants.shortTimeout
+        )
+        #expect(!badSignatureRelayed)
+        #expect(ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID })
+    }
+
+    @Test
+    func validSignedLeaveEvictsSessionAndRelays() async throws {
+        let ble = makeService()
+        let alice = NoiseEncryptionService(keychain: MockKeychain())
+        let alicePeerID = PeerID(publicKey: alice.getStaticPublicKeyData())
+
+        // Establish a real session so the leave regression also verifies that
+        // stale secure-delivery state is retired, not just the peer-list row.
+        let message1 = try ble._test_noiseInitiateHandshake(with: alicePeerID)
+        let message2 = try #require(
+            try alice.processHandshakeMessage(from: ble.myPeerID, message: message1)
+        )
+        let message3 = try #require(
+            try ble._test_noiseProcessHandshakeMessage(from: alicePeerID, message: message2)
+        )
+        _ = try alice.processHandshakeMessage(from: ble.myPeerID, message: message3)
+        #expect(ble.canDeliverSecurely(to: alicePeerID))
+        let centralUUID = "central-valid-leave"
+        ble._test_bindCentral(centralUUID, to: alicePeerID)
+        ble._test_markNoiseAuthenticatedCentral(centralUUID, to: alicePeerID)
+        #expect(ble._test_isNoiseAuthenticatedCentral(centralUUID, for: alicePeerID))
+
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+        let signedLeave = try #require(
+            alice.signPacket(makeLeavePacket(sender: alicePeerID, marker: "valid"))
+        )
+        ble._test_handlePacket(
+            signedLeave,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let evicted = await TestHelpers.waitUntil(
+            {
+                !ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID }
+                    && !ble.canDeliverSecurely(to: alicePeerID)
+                    && !ble._test_isNoiseAuthenticatedCentral(centralUUID, for: alicePeerID)
+            },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(evicted)
+        let relayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) == 1 },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(relayed)
+    }
+
+    @Test
     func ingressAllowsRelayedSenderOnBoundLink() async throws {
         let ble = makeService()
         let boundPeer = PeerID(str: "1122334455667788")
@@ -440,6 +529,94 @@ struct BLEServiceCoreTests {
         #expect(outbound.count(ofType: .courierEnvelope) == 0)
     }
 
+    @Test
+    func replacementXXMessageOneWithPayloadCannotAuthenticateIngressLink() async throws {
+        let ble = makeService()
+        let victim = NoiseEncryptionService(keychain: MockKeychain())
+        let victimPeerID = PeerID(publicKey: victim.getStaticPublicKeyData())
+
+        // Preserve a working victim session while an unauthenticated
+        // replacement candidate arrives on a newly bound physical link.
+        let message1 = try ble._test_noiseInitiateHandshake(with: victimPeerID)
+        let message2 = try #require(
+            try victim.processHandshakeMessage(from: ble.myPeerID, message: message1)
+        )
+        let message3 = try #require(
+            try ble._test_noiseProcessHandshakeMessage(
+                from: victimPeerID,
+                message: message2
+            )
+        )
+        _ = try victim.processHandshakeMessage(
+            from: ble.myPeerID,
+            message: message3
+        )
+        #expect(ble.canDeliverSecurely(to: victimPeerID))
+
+        let centralUUID = "central-replacement-xx-message-one"
+        ble._test_bindCentral(centralUUID, to: victimPeerID)
+        #expect(
+            !ble._test_isNoiseAuthenticatedCentral(
+                centralUUID,
+                for: victimPeerID
+            )
+        )
+
+        // XX message one may legally carry a payload, so its length is not a
+        // reliable signal that the replacement handshake completed.
+        let unauthenticatedInitiator = NoiseHandshakeState(
+            role: .initiator,
+            pattern: .XX,
+            keychain: MockKeychain()
+        )
+        let replacementMessage1 = try unauthenticatedInitiator.writeMessage(
+            payload: Data([0xA5])
+        )
+        #expect(
+            replacementMessage1.count
+                > NoiseSecurityConstants.xxInitialMessageSize
+        )
+
+        let packet = BitchatPacket(
+            type: MessageType.noiseHandshake.rawValue,
+            senderID: Data(hexString: victimPeerID.id) ?? Data(),
+            recipientID: Data(hexString: ble.myPeerID.id),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: replacementMessage1,
+            signature: nil,
+            ttl: TransportConfig.messageTTLDefault
+        )
+        #expect(
+            ble._test_recordIngressIfNew(
+                packet: packet,
+                linkID: centralUUID
+            )
+        )
+
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+        ble._test_handlePacket(
+            packet,
+            fromPeerID: victimPeerID,
+            preseedPeer: false
+        )
+
+        // Waiting for the responder's message two proves the candidate was
+        // processed before checking its exact authentication result.
+        let candidateProcessed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .noiseHandshake) == 1 },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(candidateProcessed)
+        #expect(
+            !ble._test_isNoiseAuthenticatedCentral(
+                centralUUID,
+                for: victimPeerID
+            )
+        )
+        #expect(ble.canDeliverSecurely(to: victimPeerID))
+    }
+
     /// A legitimate rotation announce necessarily arrives on a link still
     /// bound to the OLD ID, so its registry upsert stores the new peer
     /// disconnected. The successful rebind must promote it: a healed
@@ -573,6 +750,108 @@ struct BLEServiceCoreTests {
     }
 
     @Test
+    func panicSuspension_dropsLateOutboundWorkUntilCommit() async {
+        let ble = makeService()
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+        let packet = makePublicPacket(
+            content: "late callback",
+            sender: ble.myPeerID,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+
+        ble.suspendForPanicReset()
+        ble.sendPacket(packet)
+        #expect(outbound.count(ofType: .message) == 0)
+
+        ble.completePanicReset(restartServices: false)
+        ble.sendPacket(packet)
+        #expect(outbound.count(ofType: .message) == 1)
+    }
+
+    @Test @MainActor
+    func panicSuspension_invalidatesQueuedMainActorIngress() async {
+        let ble = makeService()
+        let delegate = TransportEventCaptureDelegate()
+        ble.eventDelegate = delegate
+        let message = BitchatMessage(
+            id: "pre-panic-ingress",
+            sender: "Peer",
+            content: "must not survive panic",
+            timestamp: Date(),
+            isRelay: false,
+            isPrivate: true,
+            recipientNickname: "Me",
+            senderPeerID: PeerID(str: "1122334455667788")
+        )
+
+        // The test already owns MainActor, so this task cannot run until the
+        // synchronous panic boundary below has invalidated its generation.
+        ble._test_emitTransportEvent(.messageReceived(message))
+        ble.suspendForPanicReset()
+        await Task.yield()
+        #expect(delegate.messageIDs.isEmpty)
+
+        ble.completePanicReset(restartServices: false)
+        ble._test_emitTransportEvent(.messageReceived(message))
+        await Task.yield()
+        #expect(delegate.messageIDs == [message.id])
+    }
+
+    @Test @MainActor
+    func panicSuspension_rejectsPausedBLEReceiveBeforeMessageQueueHandoff() async {
+        let ble = makeService()
+        let gate = ReceivePacketHandoffGate()
+        ble._test_beforeReceivePacketHandoff = gate.pause
+        ble._test_onReceivePacketHandoff = gate.recordHandoff
+        defer {
+            gate.release()
+            ble._test_beforeReceivePacketHandoff = nil
+            ble._test_onReceivePacketHandoff = nil
+        }
+
+        let sender = PeerID(str: "1122334455667788")
+        let packet = makePublicPacket(
+            content: "must not cross panic",
+            sender: sender,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        ble._test_handlePacketFromBLEQueue(packet, fromPeerID: sender)
+        #expect(await TestHelpers.waitUntil(
+            { gate.hasPaused },
+            timeout: TestConstants.longTimeout
+        ))
+
+        // Panic closes the lifecycle before waiting for the paused bleQueue
+        // callback. Releasing it afterward lets the callback enqueue its
+        // messageQueue handoff, where the captured generation must be rejected
+        // before packet processing starts.
+        let panicIngressObserver = PanicIngressObserver(service: ble)
+        let didObservePanicClosure = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let didObserveClosure = panicIngressObserver.waitUntilClosed(
+                    timeout: TestConstants.defaultTimeout
+                )
+                gate.release()
+                continuation.resume(returning: didObserveClosure)
+            }
+            ble.suspendForPanicReset()
+        }
+
+        #expect(didObservePanicClosure)
+        #expect(gate.handoffCount == 0)
+
+        // A packet captured under the reopened lifecycle still crosses the
+        // same handoff, proving the test did not merely disable the hook.
+        ble.completePanicReset(restartServices: false)
+        ble._test_handlePacketFromBLEQueue(packet, fromPeerID: sender)
+        #expect(await TestHelpers.waitUntil(
+            { gate.handoffCount == 1 },
+            timeout: TestConstants.longTimeout
+        ))
+    }
+
+    @Test
     func modifiedServices_rediscoverWhenBitChatServiceIsInvalidated() async throws {
         let otherService = CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB")
 
@@ -666,6 +945,68 @@ private final class OutboundPacketTap {
     }
 }
 
+private final class ReceivePacketHandoffGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var paused = false
+    private var released = false
+    private var recordedHandoffCount = 0
+
+    var hasPaused: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return paused
+    }
+
+    var handoffCount: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return recordedHandoffCount
+    }
+
+    func pause() {
+        condition.lock()
+        paused = true
+        condition.broadcast()
+        while !released {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func recordHandoff() {
+        condition.lock()
+        recordedHandoffCount += 1
+        condition.unlock()
+    }
+}
+
+/// Lets a dedicated dispatch worker observe the lock-protected panic gate
+/// without treating the full BLE service as generally Sendable.
+private final class PanicIngressObserver: @unchecked Sendable {
+    private let service: BLEService
+
+    init(service: BLEService) {
+        self.service = service
+    }
+
+    func waitUntilClosed(timeout: TimeInterval) -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            + UInt64(timeout * 1_000_000_000)
+        while service._test_isPanicIngressOpen,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        return !service._test_isPanicIngressOpen
+    }
+}
+
 private func makeService() -> BLEService {
     let keychain = MockKeychain()
     let identityManager = MockIdentityManager(keychain)
@@ -687,6 +1028,18 @@ private func makePublicPacket(content: String, sender: PeerID, timestamp: UInt64
         payload: Data(content.utf8),
         signature: nil,
         ttl: 3
+    )
+}
+
+private func makeLeavePacket(sender: PeerID, marker: String) -> BitchatPacket {
+    BitchatPacket(
+        type: MessageType.leave.rawValue,
+        senderID: Data(hexString: sender.id) ?? Data(),
+        recipientID: nil,
+        timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+        payload: Data(marker.utf8),
+        signature: nil,
+        ttl: TransportConfig.messageTTLDefault
     )
 }
 
@@ -722,5 +1075,15 @@ private final class PublicCaptureDelegate: BitchatDelegate {
         lock.lock()
         defer { lock.unlock() }
         return publicMessages
+    }
+}
+
+@MainActor
+private final class TransportEventCaptureDelegate: TransportEventDelegate {
+    private(set) var messageIDs: [String] = []
+
+    func didReceiveTransportEvent(_ event: TransportEvent) {
+        guard case .messageReceived(let message) = event else { return }
+        messageIDs.append(message.id)
     }
 }

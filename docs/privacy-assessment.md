@@ -48,15 +48,15 @@ Residual risk: private-message metadata such as timing, radio adjacency, ciphert
 - Recent signed public mesh messages are archived in Application Support for up to 15 minutes so gossip sync survives a relaunch and can cross mesh partitions.
 - Signed public board posts and tombstones persist until author-selected expiry, at most seven days. Stores are bounded by global and per-author quotas.
 - Group metadata (name, roster, creator, epoch) persists as protected JSON; group keys live in the keychain until leave/removal/wipe.
-- Voice notes and images are stored in Application Support. Incoming media has a 100 MB oldest-first quota; outgoing media does not have an equivalent automatic lifetime and remains until cleanup, panic wipe, or app removal.
+- Voice notes and images are stored in Application Support. Incoming media has a 100 MB oldest-first quota; outgoing media does not have an equivalent automatic lifetime and remains until cleanup, panic wipe, or app removal. Panic wipe invalidates detached preparation work, cancels active transfers, closes live capture files, and removes the managed media tree before returning.
 
 Public archives contain content already intended for public mesh/board distribution, but a seized unlocked device can reveal it. Group metadata and media can reveal relationships or content even when the in-memory chat timeline has gone away.
 
 ## Nostr and Mesh Bridge
 
-- NIP-17/NIP-44 v2 private fallback protects plaintext with secp256k1 key agreement, HKDF-SHA256, and XChaCha20-Poly1305. Relays still see event and network metadata.
+- BitChat's proprietary private-envelope fallback protects plaintext with secp256k1 key agreement, HKDF-SHA256, and XChaCha20-Poly1305. It is not NIP-17, NIP-44, or NIP-59 compatible and does not provide forward secrecy against later compromise of the recipient's static Nostr private key. Relays still see the recipient public-key tag, event timing and size, and network metadata.
 - Bridge courier drops use a throwaway publisher key, an opaque Noise-sealed envelope, and a day-rotating recipient tag. Only a party already holding the recipient's Noise static key can compute candidate tags.
-- Relay publication is considered successful only after an explicit NIP-20 `OK true` from at least one target relay. Rejected, disconnected, timed-out, or merely socket-written events stay retryable.
+- Relay publication is considered successful only after an explicit NIP-01 `OK true` from at least one target relay. Rejected, disconnected, timed-out, or merely socket-written events stay retryable.
 - When mesh bridge is enabled, public mesh messages not marked “nearby only” are signed under a per-cell Nostr identity and published to a neighborhood rendezvous geohash. Presence and public bridge traffic therefore expose a coarse area to relays and participants.
 - A bridge gateway can carry signed bridge/location events and opaque courier drops for nearby mesh-only peers. It cannot validly publish a neighbor's radio-only message because the author must first sign the bridge event.
 
@@ -88,7 +88,7 @@ Residual risk: Nostr relay retention and logging are outside project control. Pu
 
 ## Panic Wipe Coverage
 
-The panic action clears identity/session state, preferences, location state, groups, prekeys, outbox mail, courier mail, bridge dedup state, gossip archive, board data, managed media, and active subscriptions/transports. New persistent stores must add an explicit wipe hook and a regression test.
+The panic action clears identity/session state, preferences, location state, groups, prekeys, outbox mail, courier mail, bridge dedup state, gossip archive, board data, managed media, and active subscriptions/transports. Managed media deletion completes synchronously, after active media work has been invalidated. Keychain secrets use device-only accessibility, and an install marker detects and clears app keys that survive uninstall before a later reinstall can use them. New persistent stores must add an explicit wipe hook and a regression test.
 
 ## Release Review Checklist
 

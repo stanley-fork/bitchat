@@ -11,13 +11,27 @@ import CryptoKit
 import Foundation
 import BitFoundation
 
+struct NoiseHandshakeProcessingResult {
+    let response: Data?
+    let didEstablishAuthenticatedSession: Bool
+}
+
 final class NoiseSessionManager {
     private var sessions: [PeerID: NoiseSession] = [:]
+    /// Opaque identity for each exact entry in `sessions`. The generation is
+    /// created and removed under the same barrier as the session itself, so a
+    /// caller can never authenticate data with one session and lease another.
+    private var sessionGenerations: [PeerID: UUID] = [:]
+    /// A responder rehandshake must not evict a working transport session
+    /// before the candidate proves that its authenticated static key belongs
+    /// to the claimed wire ID. Candidates therefore live outside `sessions`
+    /// until the XX handshake completes and the binding is validated.
+    private var responderCandidates: [PeerID: NoiseSession] = [:]
     private let sessionFactory: (PeerID, NoiseRole) -> NoiseSession
     private let managerQueue = DispatchQueue(label: "chat.bitchat.noise.manager", attributes: .concurrent)
     
     // Callbacks
-    var onSessionEstablished: ((PeerID, Curve25519.KeyAgreement.PublicKey) -> Void)?
+    var onSessionEstablished: ((PeerID, Curve25519.KeyAgreement.PublicKey, UUID) -> Void)?
     var onSessionFailed: ((PeerID, Error) -> Void)?
     
     init(localStaticKey: Curve25519.KeyAgreement.PrivateKey, keychain: KeychainManagerProtocol) {
@@ -54,6 +68,10 @@ final class NoiseSessionManager {
             if let session = sessions.removeValue(forKey: peerID) {
                 session.reset() // Clear sensitive data before removing
             }
+            sessionGenerations.removeValue(forKey: peerID)
+            if let candidate = responderCandidates.removeValue(forKey: peerID) {
+                candidate.reset()
+            }
         }
     }
 
@@ -62,7 +80,12 @@ final class NoiseSessionManager {
             for (_, session) in sessions {
                 session.reset()
             }
+            for (_, candidate) in responderCandidates {
+                candidate.reset()
+            }
             sessions.removeAll()
+            sessionGenerations.removeAll()
+            responderCandidates.removeAll()
         }
     }
     
@@ -79,11 +102,14 @@ final class NoiseSessionManager {
             // Remove any existing non-established session
             if let existingSession = sessions[peerID], !existingSession.isEstablished() {
                 _ = sessions.removeValue(forKey: peerID)
+                sessionGenerations.removeValue(forKey: peerID)
+                existingSession.reset()
             }
             
             // Create new initiator session
             let session = sessionFactory(peerID, .initiator)
             sessions[peerID] = session
+            sessionGenerations[peerID] = UUID()
             
             do {
                 let handshakeData = try session.startHandshake()
@@ -91,6 +117,8 @@ final class NoiseSessionManager {
             } catch {
                 // Clean up failed session
                 _ = sessions.removeValue(forKey: peerID)
+                sessionGenerations.removeValue(forKey: peerID)
+                session.reset()
                 SecureLogger.error(.handshakeFailed(peerID: peerID.id, error: error.localizedDescription))
                 throw error
             }
@@ -98,61 +126,128 @@ final class NoiseSessionManager {
     }
     
     func handleIncomingHandshake(from peerID: PeerID, message: Data) throws -> Data? {
-        // Process everything within the synchronized block to prevent race conditions
-        return try managerQueue.sync(flags: .barrier) {
-            var shouldCreateNew = false
-            var existingSession: NoiseSession? = nil
-            
-            if let existing = sessions[peerID] {
-                // If we have an established session, the peer must have cleared their session
-                // for a good reason (e.g., decryption failure, restart, etc.)
-                // We should accept the new handshake to re-establish encryption
-                if existing.isEstablished() {
-                    SecureLogger.info("Accepting handshake from \(peerID) despite existing session - peer likely cleared their session", category: .session)
-                    _ = sessions.removeValue(forKey: peerID)
-                    shouldCreateNew = true
+        try handleIncomingHandshakeWithResult(
+            from: peerID,
+            message: message
+        ).response
+    }
+
+    /// Processes one exact handshake candidate and reports whether that
+    /// candidate completed authenticated establishment. The peer's retained
+    /// session may already be established while a replacement is only on
+    /// message one, so callers must not infer candidate completion from the
+    /// peer-level session table.
+    func handleIncomingHandshakeWithResult(
+        from peerID: PeerID,
+        message: Data
+    ) throws -> NoiseHandshakeProcessingResult {
+        // Process everything within the synchronized block to prevent race conditions.
+        // Return establishment metadata and publish the callback only after the
+        // manager barrier is released, avoiding both a deadlock and a window in
+        // which `processHandshakeMessage` returns before authentication state.
+        let result: (
+            response: Data?,
+            establishedSession: (
+                remoteKey: Curve25519.KeyAgreement.PublicKey,
+                generation: UUID
+            )?
+        ) = try managerQueue.sync(flags: .barrier) {
+            let session: NoiseSession
+            let isReplacementCandidate: Bool
+
+            if let candidate = responderCandidates[peerID] {
+                // A fresh XX message 1 supersedes an incomplete candidate,
+                // but never the established session it is trying to replace.
+                if message.count == NoiseSecurityConstants.xxInitialMessageSize {
+                    candidate.reset()
+                    let replacement = sessionFactory(peerID, .responder)
+                    responderCandidates[peerID] = replacement
+                    session = replacement
                 } else {
-                    // If we're in the middle of a handshake and receive a new initiation,
-                    // reset and start fresh (the other side may have restarted)
-                    if existing.getState() == .handshaking && message.count == 32 {
-                        _ = sessions.removeValue(forKey: peerID)
-                        shouldCreateNew = true
-                    } else {
-                        existingSession = existing
-                    }
+                    session = candidate
+                }
+                isReplacementCandidate = true
+            } else if let existing = sessions[peerID] {
+                if existing.isEstablished() {
+                    SecureLogger.info(
+                        "Validating replacement handshake from \(peerID) while preserving the established session",
+                        category: .session
+                    )
+                    let candidate = sessionFactory(peerID, .responder)
+                    responderCandidates[peerID] = candidate
+                    session = candidate
+                    isReplacementCandidate = true
+                } else if existing.getState() == .handshaking,
+                          message.count == NoiseSecurityConstants.xxInitialMessageSize {
+                    // No established transport state exists to preserve. A
+                    // fresh initiation replaces the incomplete handshake.
+                    _ = sessions.removeValue(forKey: peerID)
+                    sessionGenerations.removeValue(forKey: peerID)
+                    existing.reset()
+                    let replacement = sessionFactory(peerID, .responder)
+                    sessions[peerID] = replacement
+                    sessionGenerations[peerID] = UUID()
+                    session = replacement
+                    isReplacementCandidate = false
+                } else {
+                    session = existing
+                    isReplacementCandidate = false
                 }
             } else {
-                shouldCreateNew = true
-            }
-            
-            // Get or create session
-            let session: NoiseSession
-            if shouldCreateNew {
                 let newSession = sessionFactory(peerID, .responder)
                 sessions[peerID] = newSession
+                sessionGenerations[peerID] = UUID()
                 session = newSession
-            } else {
-                session = existingSession!
+                isReplacementCandidate = false
             }
             
             // Process the handshake message within the synchronized block
             do {
                 let response = try session.processHandshakeMessage(message)
                 
-                // Check if session is established after processing
+                // Check the exact session that processed this message. A
+                // preserved peer-level session can remain established while a
+                // replacement candidate is still unauthenticated.
+                var establishedSession: (
+                    remoteKey: Curve25519.KeyAgreement.PublicKey,
+                    generation: UUID
+                )?
                 if session.isEstablished() {
-                    if let remoteKey = session.getRemoteStaticPublicKey() {
-                        // Schedule callback outside the synchronized block to prevent deadlock
-                        DispatchQueue.global().async { [weak self] in
-                            self?.onSessionEstablished?(peerID, remoteKey)
+                    guard let remoteKey = session.getRemoteStaticPublicKey(),
+                          authenticatedRemoteKey(remoteKey, matches: peerID) else {
+                        throw NoiseSessionError.peerIdentityMismatch
+                    }
+
+                    if isReplacementCandidate {
+                        _ = responderCandidates.removeValue(forKey: peerID)
+                        let previous = sessions.updateValue(session, forKey: peerID)
+                        sessionGenerations[peerID] = UUID()
+                        if let previous, previous !== session {
+                            previous.reset()
                         }
                     }
+                    guard let generation = sessionGenerations[peerID] else {
+                        throw NoiseEncryptionError.sessionNotEstablished
+                    }
+                    establishedSession = (remoteKey, generation)
                 }
                 
-                return response
+                return (response, establishedSession)
             } catch {
-                // Reset the session on handshake failure so next attempt can start fresh
-                _ = sessions.removeValue(forKey: peerID)
+                // A failed candidate is discarded without touching the
+                // established session. Ordinary failed handshakes retain the
+                // historical cleanup behavior.
+                if isReplacementCandidate {
+                    if let storedCandidate = responderCandidates[peerID],
+                       storedCandidate === session {
+                        _ = responderCandidates.removeValue(forKey: peerID)
+                    }
+                } else if let storedSession = sessions[peerID],
+                          storedSession === session {
+                    _ = sessions.removeValue(forKey: peerID)
+                    sessionGenerations.removeValue(forKey: peerID)
+                }
+                session.reset()
                 
                 // Schedule callback outside the synchronized block to prevent deadlock
                 DispatchQueue.global().async { [weak self] in
@@ -163,24 +258,105 @@ final class NoiseSessionManager {
                 throw error
             }
         }
+
+        if let established = result.establishedSession {
+            onSessionEstablished?(peerID, established.remoteKey, established.generation)
+        }
+        return NoiseHandshakeProcessingResult(
+            response: result.response,
+            didEstablishAuthenticatedSession: result.establishedSession != nil
+        )
+    }
+
+    /// Mesh handshakes normally use a 16-hex wire ID. Full Noise-key IDs are
+    /// also accepted by internal callers when they exactly match the static
+    /// key. Non-wire identifiers remain available to protocol test harnesses;
+    /// BLE packet ingress always supplies a short hexadecimal ID.
+    private func authenticatedRemoteKey(
+        _ remoteKey: Curve25519.KeyAgreement.PublicKey,
+        matches claimedPeerID: PeerID
+    ) -> Bool {
+        let rawKey = remoteKey.rawRepresentation
+        if claimedPeerID.isShort {
+            return PeerID(publicKey: rawKey) == claimedPeerID
+        }
+        if let claimedNoiseKey = claimedPeerID.noiseKey {
+            return claimedNoiseKey == rawKey
+        }
+        return true
     }
     
     // MARK: - Encryption/Decryption
     
     func encrypt(_ plaintext: Data, for peerID: PeerID) throws -> Data {
-        guard let session = getSession(for: peerID) else {
-            throw NoiseSessionError.sessionNotFound
+        try managerQueue.sync {
+            guard let session = sessions[peerID] else {
+                throw NoiseSessionError.sessionNotFound
+            }
+            return try session.encrypt(plaintext)
         }
-        
-        return try session.encrypt(plaintext)
+    }
+
+    /// Encrypts only if `expected` still names the current established entry.
+    /// A rekey between capability proof and media encryption therefore fails
+    /// closed instead of sending on an unproven replacement session.
+    func encrypt(
+        _ plaintext: Data,
+        for peerID: PeerID,
+        expectedSessionGeneration expected: UUID
+    ) throws -> Data {
+        try managerQueue.sync {
+            guard let session = sessions[peerID],
+                  session.isEstablished(),
+                  sessionGenerations[peerID] == expected else {
+                throw NoiseEncryptionError.sessionNotEstablished
+            }
+            return try session.encrypt(plaintext)
+        }
     }
     
     func decrypt(_ ciphertext: Data, from peerID: PeerID) throws -> Data {
-        guard let session = getSession(for: peerID) else {
-            throw NoiseSessionError.sessionNotFound
+        try decryptWithSessionGeneration(ciphertext, from: peerID).plaintext
+    }
+
+    func sessionGeneration(for peerID: PeerID) -> UUID? {
+        managerQueue.sync {
+            guard sessions[peerID]?.isEstablished() == true else { return nil }
+            return sessionGenerations[peerID]
         }
-        
-        return try session.decrypt(ciphertext)
+    }
+
+    /// Decrypts while holding the manager's read lease. Session promotion and
+    /// removal require its barrier, so the returned generation always names
+    /// the exact session object that authenticated these bytes.
+    func decryptWithSessionGeneration(
+        _ ciphertext: Data,
+        from peerID: PeerID
+    ) throws -> (plaintext: Data, sessionGeneration: UUID) {
+        try managerQueue.sync {
+            guard let session = sessions[peerID] else {
+                throw NoiseSessionError.sessionNotFound
+            }
+            guard session.isEstablished(),
+                  let generation = sessionGenerations[peerID] else {
+                throw NoiseEncryptionError.sessionNotEstablished
+            }
+            return (try session.decrypt(ciphertext), generation)
+        }
+    }
+
+    /// Runs a state commit under a read lease for the exact established
+    /// session. Rekey, replacement, and removal all need the same barrier.
+    func withCurrentSessionGeneration<Result>(
+        for peerID: PeerID,
+        expected: UUID,
+        _ body: () -> Result
+    ) -> Result? {
+        managerQueue.sync {
+            guard sessions[peerID]?.isEstablished() == true,
+                  sessionGenerations[peerID] == expected else { return nil }
+            return body()
+        }
     }
     
     // MARK: - Key Management
@@ -207,11 +383,11 @@ final class NoiseSessionManager {
         }
     }
     
-    func initiateRekey(for peerID: PeerID) throws {
+    func initiateRekey(for peerID: PeerID) throws -> Data {
         // Remove old session
         removeSession(for: peerID)
         
         // Initiate new handshake
-        _ = try initiateHandshake(with: peerID)
+        return try initiateHandshake(with: peerID)
     }
 }
