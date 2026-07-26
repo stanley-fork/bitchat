@@ -97,7 +97,7 @@ enum EncryptionStatus: Equatable {
     case noiseHandshaking   // Currently establishing
     case noiseSecured       // Established but not verified
     case noiseVerified      // Established and verified
-    
+
     var icon: String? {  // Made optional to hide icon when no handshake
         switch self {
         case .none:
@@ -184,11 +184,20 @@ final class NoiseEncryptionService {
     private var onPeerAuthenticatedHandlers: [((PeerID, String) -> Void)] = [] // Array of handlers for peer authentication
     private var onPeerAuthenticatedWithGenerationHandlers: [((PeerID, String, UUID) -> Void)] = []
     var onHandshakeRequired: ((PeerID) -> Void)? // peerID needs handshake
-    /// Automatic rekey removed the old session and produced XX message 1.
-    /// The transport must clear session-scoped state and put these exact bytes
-    /// on the wire; merely reporting "handshake required" strands the partial
-    /// initiator session because a second initiate call sees it already exists.
-    var onRekeyHandshakeReady: ((_ peerID: PeerID, _ message: Data) -> Void)?
+    /// Automatic rekey prepared XX message 1. The transport must claim the
+    /// exact attempt at its actual BLE handoff; a crossed inbound initiation
+    /// can invalidate the token before that point.
+    var onRekeyHandshakeReady:
+        ((_ peerID: PeerID, _ initiation: NoiseHandshakeInitiation) -> Void)?
+    var onHandshakeRecoveryRequired:
+        ((_ request: NoiseHandshakeRecoveryRequest) -> Void)?
+    /// An unauthenticated reconnect attempt failed or timed out and the
+    /// receive-only rollback session became the active transport again.
+    /// Transport queues may only be drained for this exact restored
+    /// generation when the reason is terminal; a restore that owns a pending
+    /// convergence retry must keep them parked until the retry concludes.
+    var onSessionRestoredWithGeneration:
+        ((_ peerID: PeerID, _ generation: UUID, _ reason: NoiseSessionRestoreReason) -> Void)?
     
     // Add a handler for peer authentication
     func addOnPeerAuthenticatedHandler(_ handler: @escaping (PeerID, String) -> Void) {
@@ -219,7 +228,17 @@ final class NoiseEncryptionService {
         }
     }
     
-    init(keychain: KeychainManagerProtocol) {
+    init(
+        keychain: KeychainManagerProtocol,
+        ordinaryHandshakeTimeout: TimeInterval =
+            NoiseSecurityConstants.ordinaryHandshakeTimeout,
+        ordinaryResponderHandshakeTimeout: TimeInterval =
+            NoiseSecurityConstants.ordinaryResponderHandshakeTimeout,
+        recentInitiatorCompletionGracePeriod: TimeInterval =
+            NoiseSecurityConstants.recentInitiatorCompletionGracePeriod,
+        ordinaryReconnectRollbackCooldown: TimeInterval =
+            NoiseSecurityConstants.ordinaryReconnectRollbackCooldown
+    ) {
         self.keychain = keychain
         self.localPrekeys = LocalPrekeyStore(keychain: keychain)
 
@@ -309,7 +328,17 @@ final class NoiseEncryptionService {
         self.signingPublicKey = signingKey.publicKey
 
         // Initialize session manager
-        self.sessionManager = NoiseSessionManager(localStaticKey: staticIdentityKey, keychain: keychain)
+        self.sessionManager = NoiseSessionManager(
+            localStaticKey: staticIdentityKey,
+            keychain: keychain,
+            ordinaryHandshakeTimeout: ordinaryHandshakeTimeout,
+            ordinaryResponderHandshakeTimeout:
+                ordinaryResponderHandshakeTimeout,
+            recentInitiatorCompletionGracePeriod:
+                recentInitiatorCompletionGracePeriod,
+            ordinaryReconnectRollbackCooldown:
+                ordinaryReconnectRollbackCooldown
+        )
 
         // Set up session callbacks
         sessionManager.onSessionEstablished = { [weak self] peerID, remoteStaticKey, generation in
@@ -318,6 +347,12 @@ final class NoiseEncryptionService {
                 remoteStaticKey: remoteStaticKey,
                 sessionGeneration: generation
             )
+        }
+        sessionManager.onSessionRestored = { [weak self] peerID, generation, reason in
+            self?.onSessionRestoredWithGeneration?(peerID, generation, reason)
+        }
+        sessionManager.onHandshakeRecoveryRequired = { [weak self] request in
+            self?.onHandshakeRecoveryRequired?(request)
         }
 
         // Start session maintenance timer
@@ -628,7 +663,7 @@ final class NoiseEncryptionService {
         guard let packetData = packet.toBinaryDataForSigning() else {
             return nil
         }
-        
+
         // Sign with the noise private key (converted to Ed25519 for signing)
         guard let signature = signData(packetData) else {
             return nil
@@ -681,6 +716,90 @@ final class NoiseEncryptionService {
         // The Noise protocol handles its own message format
         let handshakeData = try sessionManager.initiateHandshake(with: peerID)
         return handshakeData
+    }
+
+    /// Atomically admits and prepares one initial ordinary handshake. Returns
+    /// nil when another discovery callback already created a session.
+    func initiateHandshakeIfNeeded(
+        with peerID: PeerID,
+        retryOnTimeout: Bool = false
+    ) throws -> NoiseHandshakeInitiation? {
+        guard peerID.isValid else {
+            SecureLogger.warning(.authenticationFailed(peerID: peerID.id))
+            throw NoiseSecurityError.invalidPeerID
+        }
+
+        guard let initiation = try sessionManager.initiateHandshakeIfAbsent(
+            with: peerID,
+            notifyOnTimeout: retryOnTimeout,
+            authorize: { [rateLimiter] in
+                guard rateLimiter.allowHandshake(from: peerID) else {
+                    SecureLogger.warning(
+                        .authenticationFailed(peerID: "Rate limited: \(peerID)")
+                    )
+                    throw NoiseSecurityError.rateLimitExceeded
+                }
+            }
+        ) else {
+            return nil
+        }
+        SecureLogger.info(.handshakeStarted(peerID: peerID.id))
+        return initiation
+    }
+
+    /// Atomically prepares an ordinary reconnect for a peer whose cached
+    /// transport belongs to an earlier physical link. Failed authorization or
+    /// handshake setup preserves the established session.
+    func initiateReconnectHandshake(
+        with peerID: PeerID,
+        retryOnTimeout: Bool = false
+    ) throws -> NoiseHandshakeInitiation {
+        guard peerID.isValid else {
+            SecureLogger.warning(.authenticationFailed(peerID: peerID.id))
+            throw NoiseSecurityError.invalidPeerID
+        }
+
+        return try sessionManager.initiateReconnectHandshake(
+            with: peerID,
+            notifyOnTimeout: retryOnTimeout,
+            authorize: { [rateLimiter] in
+                guard rateLimiter.allowHandshake(from: peerID) else {
+                    SecureLogger.warning(
+                        .authenticationFailed(peerID: "Rate limited: \(peerID)")
+                    )
+                    throw NoiseSecurityError.rateLimitExceeded
+                }
+            }
+        )
+    }
+
+    func prepareHandshakeRecovery(
+        _ request: NoiseHandshakeRecoveryRequest
+    ) throws -> NoiseHandshakeRecoveryPreparation? {
+        try sessionManager.prepareHandshakeRecovery(
+            request,
+            authorizeAttempt: { [rateLimiter] in
+                guard rateLimiter.allowHandshake(from: request.peerID) else {
+                    SecureLogger.warning(
+                        .authenticationFailed(
+                            peerID: "Rate limited: \(request.peerID)"
+                        )
+                    )
+                    throw NoiseSecurityError.rateLimitExceeded
+                }
+            }
+        )
+    }
+
+    func cancelHandshakeRecovery(_ request: NoiseHandshakeRecoveryRequest) {
+        sessionManager.cancelHandshakeRecovery(request)
+    }
+
+    func claimHandshakeInitiation(
+        _ initiation: NoiseHandshakeInitiation,
+        for peerID: PeerID
+    ) -> Data? {
+        sessionManager.claimHandshakeInitiation(initiation, for: peerID)
     }
     
     /// Process an incoming handshake message
@@ -736,6 +855,13 @@ final class NoiseEncryptionService {
     /// Check if we have a session (established or handshaking) with a peer
     func hasSession(with peerID: PeerID) -> Bool {
         return sessionManager.getSession(for: peerID) != nil
+    }
+
+    /// True while an inbound ordinary XX responder is waiting for message 3.
+    /// A small amount of immediately-following ciphertext may arrive first
+    /// over BLE and must be retried only after responder promotion.
+    func isAwaitingResponderHandshakeCompletion(with peerID: PeerID) -> Bool {
+        sessionManager.isAwaitingResponderHandshakeCompletion(for: peerID)
     }
     
     // MARK: - Encryption/Decryption
@@ -796,7 +922,7 @@ final class NoiseEncryptionService {
         }
         return try sessionManager.encrypt(data, for: peerID)
     }
-    
+
     /// Decrypt data from a specific peer
     func decrypt(_ data: Data, from peerID: PeerID) throws -> Data {
         try decryptWithSessionGeneration(data, from: peerID).plaintext
@@ -804,27 +930,37 @@ final class NoiseEncryptionService {
 
     func decryptWithSessionGeneration(
         _ data: Data,
-        from peerID: PeerID
+        from peerID: PeerID,
+        establishedGenerationIsReady: (UUID) -> Bool = { _ in true }
     ) throws -> (plaintext: Data, sessionGeneration: UUID) {
         // Standard transport ciphertext has 20 bytes of nonce/tag overhead.
-        // A larger candidate is admitted only up to the framed-file ceiling;
+        // A larger ciphertext is admitted only up to the framed-file ceiling;
         // after authenticated decryption it must prove it is `.privateFile`.
         let isStandardCiphertext = NoiseSecurityValidator.validateCiphertextSize(data)
-        guard isStandardCiphertext || NoiseSecurityValidator.validatePrivateFileCiphertextSize(data) else {
-            throw NoiseSecurityError.messageTooLarge
-        }
-        
-        // Check rate limit
-        guard rateLimiter.allowMessage(from: peerID) else {
-            throw NoiseSecurityError.rateLimitExceeded
-        }
-        
-        // Check if we have an established session
-        guard hasEstablishedSession(with: peerID) else {
+        let isAdmittedCiphertext = isStandardCiphertext
+            || NoiseSecurityValidator.validatePrivateFileCiphertextSize(data)
+
+        // A quarantined transport is deliberately unavailable for outbound
+        // state, but remains receive-only until the responder proves identity
+        // or the bounded rollback restores it.
+        guard sessionManager.hasReceiveSession(for: peerID) else {
             throw NoiseEncryptionError.sessionNotEstablished
         }
         
-        let result = try sessionManager.decryptWithSessionGeneration(data, from: peerID)
+        let result = try sessionManager.decryptWithSessionGeneration(
+            data,
+            from: peerID,
+            establishedGenerationIsReady:
+                establishedGenerationIsReady,
+            authorizeDecrypt: { [rateLimiter] in
+                guard isAdmittedCiphertext else {
+                    throw NoiseSecurityError.messageTooLarge
+                }
+                guard rateLimiter.allowMessage(from: peerID) else {
+                    throw NoiseSecurityError.rateLimitExceeded
+                }
+            }
+        )
         if !isStandardCiphertext {
             guard NoisePayloadType.isPrivateFile(rawValue: result.plaintext.first),
                   NoiseSecurityValidator.validatePrivateFileMessageSize(result.plaintext) else {
@@ -943,9 +1079,9 @@ final class NoiseEncryptionService {
     }
 
     private func initiateAutomaticRekey(for peerID: PeerID) throws {
-        let handshakeMessage = try sessionManager.initiateRekey(for: peerID)
+        let initiation = try sessionManager.initiateRekey(for: peerID)
         SecureLogger.debug("Key rotation initiated for peer: \(peerID)", category: .security)
-        onRekeyHandshakeReady?(peerID, handshakeMessage)
+        onRekeyHandshakeReady?(peerID, initiation)
         onHandshakeRequired?(peerID)
     }
 
@@ -1041,6 +1177,9 @@ struct NoiseMessage: Codable {
 enum NoiseEncryptionError: Error {
     case handshakeRequired
     case sessionNotEstablished
+    /// Manager keys are established or restored, but BLE has not installed
+    /// generation-bound transport state. No receive nonce was consumed.
+    case transportGenerationNotReady
     /// Envelope references a prekey ID we don't hold (never ours, already
     /// deleted after its grace window, or wiped in a panic).
     case unknownPrekey

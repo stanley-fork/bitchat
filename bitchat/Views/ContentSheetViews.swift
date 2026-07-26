@@ -6,11 +6,28 @@ import UIKit
 import AppKit
 #endif
 
+struct ContentPeopleSheetModalPresentationState {
+    var isImagePreviewPresented = false
+    var isVerificationSheetPresented = false
+    var legacyPrivateMediaConsentRequest: LegacyPrivateMediaConsentRequest? = nil
+    var isVoiceAlertPresented = false
+    var isMediaPickerPresented = false
+
+    var hasPresentation: Bool {
+        isImagePreviewPresented
+            || isVerificationSheetPresented
+            || legacyPrivateMediaConsentRequest != nil
+            || isVoiceAlertPresented
+            || isMediaPickerPresented
+    }
+}
+
 struct ContentPeopleSheetView: View {
     @EnvironmentObject private var appChromeModel: AppChromeModel
     @EnvironmentObject private var privateConversationModel: PrivateConversationModel
     @EnvironmentObject private var verificationModel: VerificationModel
     @EnvironmentObject private var conversationUIModel: ConversationUIModel
+    @Environment(\.scenePhase) private var scenePhase
 
     @Binding var showSidebar: Bool
     @Binding var messageText: String
@@ -23,6 +40,7 @@ struct ContentPeopleSheetView: View {
     var isTextFieldFocused: FocusState<Bool>.Binding
     @ObservedObject var voiceRecordingVM: VoiceRecordingViewModel
     @Binding var autocompleteDebounceTimer: Timer?
+    @State private var showVerifySheet = false
     @ThemedPalette private var palette
 
     let headerHeight: CGFloat
@@ -34,6 +52,75 @@ struct ContentPeopleSheetView: View {
     #else
     @Binding var showMacImagePicker: Bool
     #endif
+
+    private func modalPresentationState(
+        includingVoiceAlert: Bool
+    ) -> ContentPeopleSheetModalPresentationState {
+        #if os(iOS)
+        let isMediaPickerPresented = showImagePicker
+        #else
+        let isMediaPickerPresented = showMacImagePicker
+        #endif
+
+        return ContentPeopleSheetModalPresentationState(
+            isImagePreviewPresented: imagePreviewURL != nil,
+            isVerificationSheetPresented: showVerifySheet,
+            legacyPrivateMediaConsentRequest:
+                conversationUIModel.legacyPrivateMediaConsentRequest,
+            isVoiceAlertPresented: includingVoiceAlert && voiceRecordingVM.showAlert,
+            isMediaPickerPresented: isMediaPickerPresented
+        )
+    }
+
+    private var hasModalPresentation: Bool {
+        modalPresentationState(includingVoiceAlert: true).hasPresentation
+    }
+
+    /// The voice alert cannot defer to itself: its own binding must keep
+    /// reporting `true` while it is the presented modal.
+    private var hasModalPresentationBesidesVoiceAlert: Bool {
+        modalPresentationState(includingVoiceAlert: false).hasPresentation
+    }
+
+    private var bluetoothAlertBinding: Binding<Bool> {
+        Binding(
+            get: {
+                scenePhase == .active
+                    && appChromeModel.showBluetoothAlert
+                    && !hasModalPresentation
+            },
+            set: { isPresented in
+                guard !isPresented,
+                      scenePhase == .active,
+                      !hasModalPresentation else {
+                    return
+                }
+                appChromeModel.showBluetoothAlert = false
+            }
+        )
+    }
+
+    /// Voice recording happens inside this sheet, so its error alert must
+    /// present from here as well: the root copy defers whenever this sheet
+    /// is up, exactly like the Bluetooth alert above. Presenting from the
+    /// root instead would force-dismiss the sheet and end the conversation.
+    private var voiceAlertBinding: Binding<Bool> {
+        Binding(
+            get: {
+                scenePhase == .active
+                    && voiceRecordingVM.showAlert
+                    && !hasModalPresentationBesidesVoiceAlert
+            },
+            set: { isPresented in
+                guard !isPresented,
+                      scenePhase == .active,
+                      !hasModalPresentationBesidesVoiceAlert else {
+                    return
+                }
+                voiceRecordingVM.showAlert = false
+            }
+        )
+    }
 
     var body: some View {
         let legacyConsentRequest = conversationUIModel.legacyPrivateMediaConsentRequest
@@ -78,7 +165,8 @@ struct ContentPeopleSheetView: View {
                     #endif
                 } else {
                     ContentPeopleListView(
-                        showSidebar: $showSidebar
+                        showSidebar: $showSidebar,
+                        showVerifySheet: $showVerifySheet
                     )
                 }
             }
@@ -182,6 +270,27 @@ struct ContentPeopleSheetView: View {
             }
         }
         #endif
+        .alert("Recording Error", isPresented: voiceAlertBinding, actions: {
+            Button("common.ok", role: .cancel) {}
+            if voiceRecordingVM.state == .permissionDenied {
+                Button("location_channels.action.open_settings") {
+                    SystemSettings.microphone.open()
+                }
+            }
+        }, message: {
+            Text(voiceRecordingVM.state.alertMessage)
+        })
+        .alert(
+            "content.alert.bluetooth_required.title",
+            isPresented: bluetoothAlertBinding
+        ) {
+            Button("content.alert.bluetooth_required.settings") {
+                SystemSettings.bluetooth.open()
+            }
+            Button("common.ok", role: .cancel) {}
+        } message: {
+            Text(appChromeModel.bluetoothAlertMessage)
+        }
     }
 }
 
@@ -196,8 +305,7 @@ private struct ContentPeopleListView: View {
     @ThemedPalette private var palette
 
     @Binding var showSidebar: Bool
-
-    @State private var showVerifySheet = false
+    @Binding var showVerifySheet: Bool
 
     var body: some View {
         VStack(spacing: 0) {

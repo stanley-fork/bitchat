@@ -365,6 +365,217 @@ struct PrivateMediaEndToEndTests {
     }
 
     @Test
+    func privateMediaRetryRequiresExactAuthenticatedBit9Proof() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "private-media-receipt-proof-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alice = makeService(
+            baseDirectory: root.appendingPathComponent(
+                "alice",
+                isDirectory: true
+            )
+        )
+        let bob = makeService(
+            baseDirectory: root.appendingPathComponent(
+                "bob",
+                isDirectory: true
+            )
+        )
+        let bothCapabilities: PeerCapabilities = [
+            .privateMedia,
+            .privateMediaReceipts
+        ]
+
+        // A public bit-9 announce is discovery only.
+        alice._test_seedConnectedPeer(
+            bob.myPeerID,
+            nickname: "Bob",
+            capabilities: bothCapabilities,
+            noisePublicKey: bob.noiseStaticPublicKeyData()
+        )
+        #expect(
+            alice.authenticatedPrivateMediaReceiptSessionGeneration(
+                to: bob.myPeerID
+            ) == nil
+        )
+
+        let proofs = try await establishSessionCapturingPeerState(
+            alice: alice,
+            bob: bob
+        )
+        #expect(
+            alice.authenticatedPrivateMediaReceiptSessionGeneration(
+                to: bob.myPeerID
+            ) == nil
+        )
+
+        // Bit 8 alone preserves encrypted transfer compatibility but cannot
+        // authorize automatic resend.
+        let privateMediaOnly = try authenticatedPeerStatePacket(
+            from: bob,
+            to: alice,
+            capabilities: .privateMedia
+        )
+        alice._test_handlePacket(
+            privateMediaOnly,
+            fromPeerID: bob.myPeerID
+        )
+        #expect(await TestHelpers.waitUntil(
+            {
+                alice.privateMediaSendPolicy(to: bob.myPeerID)
+                    == .encrypted
+            },
+            timeout: TestConstants.longTimeout
+        ))
+        #expect(
+            alice.authenticatedPrivateMediaReceiptSessionGeneration(
+                to: bob.myPeerID
+            ) == nil
+        )
+
+        let receiptCapable = try authenticatedPeerStatePacket(
+            from: bob,
+            to: alice,
+            capabilities: bothCapabilities
+        )
+        alice._test_handlePacket(
+            receiptCapable,
+            fromPeerID: bob.myPeerID
+        )
+        #expect(await TestHelpers.waitUntil(
+            {
+                alice.authenticatedPrivateMediaReceiptSessionGeneration(
+                    to: bob.myPeerID
+                ) != nil
+            },
+            timeout: TestConstants.longTimeout
+        ))
+
+        bob._test_handlePacket(
+            proofs.alice,
+            fromPeerID: alice.myPeerID
+        )
+        alice._test_onOutboundPacket = nil
+        bob._test_onOutboundPacket = nil
+    }
+
+    @Test
+    func receiptRetryRechecksBit9AtDeferredTransportBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "private-media-retry-proof-race-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alice = makeService(
+            baseDirectory: root.appendingPathComponent(
+                "alice",
+                isDirectory: true
+            )
+        )
+        let bob = makeService(
+            baseDirectory: root.appendingPathComponent(
+                "bob",
+                isDirectory: true
+            )
+        )
+        let receiptCapabilities: PeerCapabilities = [
+            .privateMedia,
+            .privateMediaReceipts
+        ]
+        alice._test_seedConnectedPeer(
+            bob.myPeerID,
+            nickname: "Bob",
+            capabilities: receiptCapabilities,
+            noisePublicKey: bob.noiseStaticPublicKeyData()
+        )
+        bob._test_seedConnectedPeer(
+            alice.myPeerID,
+            nickname: "Alice",
+            capabilities: receiptCapabilities,
+            noisePublicKey: alice.noiseStaticPublicKeyData()
+        )
+        try await establishSession(alice: alice, bob: bob)
+        #expect(
+            alice.authenticatedPrivateMediaReceiptSessionGeneration(
+                to: bob.myPeerID
+            ) != nil
+        )
+
+        let privateMediaOnly = try authenticatedPeerStatePacket(
+            from: bob,
+            to: alice,
+            capabilities: .privateMedia
+        )
+        let transferID =
+            "receipt-proof-race-\(UUID().uuidString)"
+        let tap = PacketTap()
+        let boundaryProofs = ReceiptCapabilityRecorder()
+        let rejections = TransferCancellationRecorder()
+        let cancellable = TransferProgressManager.shared.publisher.sink {
+            rejections.record($0)
+        }
+        alice._test_onOutboundPacket = tap.record
+        alice._test_beforePrivateMediaDeferredSend = { id in
+            guard id == transferID else { return }
+            boundaryProofs.record(
+                alice
+                    .authenticatedPrivateMediaReceiptSessionGeneration(
+                        to: bob.myPeerID
+                    ) != nil
+            )
+        }
+        defer {
+            alice._test_beforePrivateMediaDeferredSend = nil
+            alice._test_onOutboundPacket = nil
+        }
+
+        // Rotate authenticated state before the deferred retry reaches its
+        // admission boundary.
+        alice._test_handlePacket(
+            privateMediaOnly,
+            fromPeerID: bob.myPeerID
+        )
+        let content = Data("%PDF-1.7\nreceipt-proof-race".utf8)
+        alice.sendFilePrivateReceiptRetry(
+            BitchatFilePacket(
+                fileName: "receipt-proof-race.pdf",
+                fileSize: UInt64(content.count),
+                mimeType: "application/pdf",
+                content: content
+            ),
+            to: bob.myPeerID,
+            transferId: transferID
+        )
+        #expect(await TestHelpers.waitUntil(
+            { boundaryProofs.snapshot() == [false] },
+            timeout: TestConstants.longTimeout
+        ))
+        await alice._test_drainPrivateMediaSendPipeline()
+
+        #expect(await TestHelpers.waitUntil(
+            { rejections.contains(transferID) },
+            timeout: TestConstants.longTimeout
+        ))
+        #expect(tap.snapshot().allSatisfy {
+            $0.type != MessageType.fileTransfer.rawValue
+                && !(
+                    $0.type == MessageType.noiseEncrypted.rawValue
+                        && $0.version == 2
+                )
+        })
+        let state = alice._test_privateMediaTransferState(
+            transferId: transferID
+        )
+        #expect(!state.admissionActive)
+        #expect(!state.pendingNoise)
+        _ = cancellable
+    }
+
+    @Test
     func capabilityAnnounceCannotPoisonPinWithoutMatchingNoiseAuthentication() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("private-media-poisoning-\(UUID().uuidString)", isDirectory: true)
@@ -682,13 +893,18 @@ struct PrivateMediaEndToEndTests {
         #expect(!identity.hasObservedPrivateMediaCapability(
             fingerprint: impostorKey.sha256Fingerprint()
         ))
+        #expect(identity.hasObservedPrivateMediaCapability(
+            fingerprint: bob.noiseStaticPublicKeyData().sha256Fingerprint()
+        ))
         alice._test_seedConnectedPeer(
             bob.myPeerID,
             nickname: "Bob",
             capabilities: [],
             noisePublicKey: impostorKey
         )
-        #expect(alice.privateMediaSendPolicy(to: bob.myPeerID) == .legacyRequiresConsent)
+        // The exact live Noise identity remains authoritative over a later
+        // impostor registry rewrite.
+        #expect(alice.privateMediaSendPolicy(to: bob.myPeerID) == .encrypted)
     }
 
     @Test
@@ -876,7 +1092,7 @@ struct PrivateMediaEndToEndTests {
             + marker
             + Data(repeating: 0x4A, count: 6 * 1024)
         try await assertPrivateMediaRoundTrip(
-            fileName: "private.jpg",
+            fileName: "img_20260725_120000_11111111-1111-1111-1111-111111111111.jpg",
             mimeType: "image/jpeg",
             content: content,
             marker: marker,
@@ -1147,6 +1363,17 @@ struct PrivateMediaEndToEndTests {
         #expect(message.isPrivate)
         #expect(message.senderPeerID == alice.myPeerID)
         #expect(message.content.hasPrefix(expectedMessagePrefix))
+        if let stableMessageID = PrivateMediaMessageIdentity.stableID(
+            for: file,
+            senderPeerID: alice.myPeerID,
+            recipientPeerID: bob.myPeerID
+        ) {
+            #expect(message.id == stableMessageID)
+        } else {
+            // Generic/legacy filenames retain random per-arrival IDs so two
+            // unrelated "photo.jpg" transfers are never deduplicated.
+            #expect(!message.id.hasPrefix("media-"))
+        }
 
         let stored = recursivelyStoredFiles(under: bobRoot)
         #expect(stored.count == 1)
@@ -1289,6 +1516,8 @@ struct PrivateMediaEndToEndTests {
 
         return enumerator.compactMap { item in
             guard let url = item as? URL,
+                  !url.pathComponents.contains(".private-media-receipts"),
+                  url.lastPathComponent != ".private-media-receipts.json",
                   (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
                 return nil
             }
@@ -1386,6 +1615,23 @@ private final class PrivateMediaPolicyRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return policy
+    }
+}
+
+private final class ReceiptCapabilityRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Bool] = []
+
+    func record(_ value: Bool) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
     }
 }
 

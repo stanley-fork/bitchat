@@ -14,6 +14,61 @@ import AppKit
 #endif
 import BitFoundation
 
+struct ContentRootModalPresentationState {
+    var isPeopleSheetPresented = false
+    var isAppInfoPresented = false
+    var isFingerprintPresented = false
+    var isLocationChannelsSheetPresented = false
+    var isNoticesSheetPresented = false
+    var isImagePreviewPresented = false
+    var isVerificationSheetPresented = false
+    var isVoiceAlertPresented = false
+    var isScreenshotPrivacyAlertPresented = false
+    var isMediaPickerPresented = false
+
+    var hasPresentation: Bool {
+        isPeopleSheetPresented
+            || isAppInfoPresented
+            || isFingerprintPresented
+            || isLocationChannelsSheetPresented
+            || isNoticesSheetPresented
+            || isImagePreviewPresented
+            || isVerificationSheetPresented
+            || isVoiceAlertPresented
+            || isScreenshotPrivacyAlertPresented
+            || isMediaPickerPresented
+    }
+}
+
+extension ContentRootModalPresentationState {
+    @MainActor
+    init(
+        appChromeModel: AppChromeModel,
+        isPeopleSheetPresented: Bool = false,
+        isImagePreviewPresented: Bool = false,
+        isVerificationSheetPresented: Bool = false,
+        isVoiceAlertPresented: Bool = false,
+        isMediaPickerPresented: Bool = false
+    ) {
+        self.init(
+            isPeopleSheetPresented: isPeopleSheetPresented,
+            isAppInfoPresented: appChromeModel.isAppInfoPresented,
+            isFingerprintPresented:
+                appChromeModel.showingFingerprintFor != nil,
+            isLocationChannelsSheetPresented:
+                appChromeModel.isLocationChannelsSheetPresented,
+            isNoticesSheetPresented:
+                appChromeModel.isNoticesSheetPresented,
+            isImagePreviewPresented: isImagePreviewPresented,
+            isVerificationSheetPresented: isVerificationSheetPresented,
+            isVoiceAlertPresented: isVoiceAlertPresented,
+            isScreenshotPrivacyAlertPresented:
+                appChromeModel.showScreenshotPrivacyWarning,
+            isMediaPickerPresented: isMediaPickerPresented
+        )
+    }
+}
+
 /// On macOS 14+, disables the default system focus ring on TextFields.
 /// On earlier macOS versions and on iOS this is a no-op.
 struct FocusEffectDisabledModifier: ViewModifier {
@@ -43,6 +98,7 @@ struct ContentView: View {
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.appTheme) private var appTheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showSidebar = false
     @State private var selectedMessageSender: String?
     @State private var selectedMessageSenderID: PeerID?
@@ -79,6 +135,80 @@ struct ContentView: View {
     }
 
     private var usesGlassLayout: Bool { appTheme.usesGlassChrome }
+
+    private var isPeopleSheetPresented: Bool {
+        showSidebar || selectedPrivatePeerID != nil
+    }
+
+    private func rootModalPresentationState(
+        includingVoiceAlert: Bool
+    ) -> ContentRootModalPresentationState {
+        #if os(iOS)
+        let isMediaPickerPresented = showImagePicker
+        #else
+        let isMediaPickerPresented = showMacImagePicker
+        #endif
+
+        return ContentRootModalPresentationState(
+            appChromeModel: appChromeModel,
+            isPeopleSheetPresented: isPeopleSheetPresented,
+            isImagePreviewPresented: imagePreviewURL != nil,
+            isVerificationSheetPresented: showVerifySheet,
+            isVoiceAlertPresented: includingVoiceAlert && voiceRecordingVM.showAlert,
+            isMediaPickerPresented: isMediaPickerPresented
+        )
+    }
+
+    private var hasRootModalPresentation: Bool {
+        rootModalPresentationState(includingVoiceAlert: true).hasPresentation
+    }
+
+    /// The voice alert cannot defer to itself: its own binding must keep
+    /// reporting `true` while it is the presented modal.
+    private var hasRootModalPresentationBesidesVoiceAlert: Bool {
+        rootModalPresentationState(includingVoiceAlert: false).hasPresentation
+    }
+
+    private var rootBluetoothAlertBinding: Binding<Bool> {
+        Binding(
+            get: {
+                scenePhase == .active
+                    && appChromeModel.showBluetoothAlert
+                    && !hasRootModalPresentation
+            },
+            set: { isPresented in
+                guard !isPresented,
+                      scenePhase == .active,
+                      !hasRootModalPresentation else {
+                    return
+                }
+                appChromeModel.showBluetoothAlert = false
+            }
+        )
+    }
+
+    /// Voice recording errors can surface while the people/DM sheet is up
+    /// (recording happens inside the sheet). Presenting the root alert then
+    /// would force-dismiss the sheet, so the root copy defers to any other
+    /// root modal; the sheet presents its own copy. Mirrors the Bluetooth
+    /// alert treatment above.
+    private var rootVoiceAlertBinding: Binding<Bool> {
+        Binding(
+            get: {
+                scenePhase == .active
+                    && voiceRecordingVM.showAlert
+                    && !hasRootModalPresentationBesidesVoiceAlert
+            },
+            set: { isPresented in
+                guard !isPresented,
+                      scenePhase == .active,
+                      !hasRootModalPresentationBesidesVoiceAlert else {
+                    return
+                }
+                voiceRecordingVM.showAlert = false
+            }
+        )
+    }
 
     var body: some View {
         mainContent
@@ -121,11 +251,20 @@ struct ContentView: View {
         }
         .sheet(
             isPresented: Binding(
-                get: { showSidebar || selectedPrivatePeerID != nil },
+                get: { isPeopleSheetPresented },
                 set: { isPresented in
                     if !isPresented {
                         showSidebar = false
-                        privateConversationModel.endConversation()
+                        // Scene/background and alert-presentation
+                        // reconciliation (Bluetooth-off, recording errors)
+                        // are not user requests to leave the conversation.
+                        // Keep the selected DM so the sheet remains live
+                        // when the app returns from Settings.
+                        if scenePhase == .active,
+                           !appChromeModel.showBluetoothAlert,
+                           !voiceRecordingVM.showAlert {
+                            privateConversationModel.endConversation()
+                        }
                     }
                 }
             )
@@ -226,7 +365,7 @@ struct ContentView: View {
                 ImagePreviewView(url: url)
             }
         }
-        .alert("Recording Error", isPresented: $voiceRecordingVM.showAlert, actions: {
+        .alert("Recording Error", isPresented: rootVoiceAlertBinding, actions: {
             Button("common.ok", role: .cancel) {}
             if voiceRecordingVM.state == .permissionDenied {
                 Button("location_channels.action.open_settings") {
@@ -236,7 +375,7 @@ struct ContentView: View {
         }, message: {
             Text(voiceRecordingVM.state.alertMessage)
         })
-        .alert("content.alert.bluetooth_required.title", isPresented: $appChromeModel.showBluetoothAlert) {
+        .alert("content.alert.bluetooth_required.title", isPresented: rootBluetoothAlertBinding) {
             Button("content.alert.bluetooth_required.settings") {
                 SystemSettings.bluetooth.open()
             }
