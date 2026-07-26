@@ -44,6 +44,46 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertTrue(context.sessionFactory.allConnections.allSatisfy { $0.cancelCallCount >= 1 })
     }
 
+    /// A relay removed while its connection is queued behind Tor bootstrap
+    /// must stay removed: draining the pending set used to resurrect it,
+    /// because `dropRelays` never touched `pendingTorConnectionURLs` and a
+    /// custom relay is in neither the default set nor the allow-list filter.
+    func test_relayRemovedWhileWaitingForTor_staysRemovedWhenTorBecomesReady() async {
+        let customURL = "wss://custom-removed.example"
+        let center = NotificationCenter()
+        let customRelays = MutableRelayList(urls: [customURL])
+        let context = makeContext(
+            permission: .authorized,
+            userTorEnabled: true,
+            torEnforced: true,
+            torIsReady: false,
+            notificationCenter: center,
+            customRelays: customRelays
+        )
+
+        // Defaults plus the custom relay all queue while Tor bootstraps.
+        context.manager.connect()
+        XCTAssertTrue(context.sessionFactory.requestedURLs.isEmpty)
+        XCTAssertEqual(context.torWaiter.awaitCallCount, 1)
+
+        // The relay is removed by hand before Tor is ready.
+        customRelays.urls = []
+        center.post(name: NostrRelaySettings.didChangeNotification, object: nil)
+        // The settings sink hops through the main queue; let it land.
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        context.torWaiter.resolve(true)
+
+        let defaultsConnected = await waitUntil {
+            context.sessionFactory.requestedURLs.count == self.expectedDefaultRelayCount
+        }
+        XCTAssertTrue(defaultsConnected)
+        XCTAssertFalse(
+            context.sessionFactory.requestedURLs.contains(customURL),
+            "a relay removed while Tor was bootstrapping must not reconnect when the pending queue drains"
+        )
+    }
+
     func test_connect_waitsForTorReadinessBeforeCreatingSessions() async {
         let context = makeContext(permission: .authorized, userTorEnabled: true, torEnforced: true, torIsReady: false)
 
@@ -920,7 +960,7 @@ final class NostrRelayManagerTests: XCTestCase {
             try context.sessionFactory.latestConnection(for: relayURL)?.emitEventMessage(subscriptionID: "ordered", event: event)
         }
 
-        let allDelivered = await waitUntil(timeout: 5.0) {
+        let allDelivered = await waitUntil(timeout: TestConstants.settleTimeout) {
             receivedIDs.count == events.count
         }
         XCTAssertTrue(allDelivered)
@@ -966,7 +1006,7 @@ final class NostrRelayManagerTests: XCTestCase {
         }
         try context.sessionFactory.latestConnection(for: quietRelayURL)?.emitEventMessage(subscriptionID: "quiet", event: quietEvent)
 
-        let quietDelivered = await waitUntil(timeout: 5.0) { quietDeliveredAfterBusyCount >= 0 }
+        let quietDelivered = await waitUntil(timeout: TestConstants.settleTimeout) { quietDeliveredAfterBusyCount >= 0 }
         XCTAssertTrue(quietDelivered, "relay B's event was never delivered")
 
         // The signal: B did not have to wait for A's entire backlog. If the two
@@ -979,7 +1019,7 @@ final class NostrRelayManagerTests: XCTestCase {
         )
 
         // Both relays still drain fully and in order.
-        let allDelivered = await waitUntil(timeout: 5.0) {
+        let allDelivered = await waitUntil(timeout: TestConstants.settleTimeout) {
             busyDeliveredCount == busyEvents.count
         }
         XCTAssertTrue(allDelivered)
@@ -1735,6 +1775,58 @@ final class NostrRelayManagerTests: XCTestCase {
         XCTAssertGreaterThan(Set(factors).count, 1)
     }
 
+    // MARK: - Hand-added relays
+
+    /// Adding a relay has to take effect without a restart: the whole point is
+    /// recovering reachability when the built-in hostnames are blocked.
+    @MainActor
+    func testAddedRelayJoinsTheTargetSetOnSettingsChange() async {
+        let center = NotificationCenter()
+        let custom = MutableRelayList(urls: [])
+        let context = makeContext(
+            permission: .authorized,
+            notificationCenter: center,
+            customRelays: custom
+        )
+
+        XCTAssertFalse(context.manager.relays.contains { $0.url == "wss://added.example.com" })
+
+        custom.urls = ["wss://added.example.com"]
+        center.post(name: NostrRelaySettings.didChangeNotification, object: nil)
+
+        let joined = await waitUntil {
+            context.manager.relays.contains { $0.url == "wss://added.example.com" }
+        }
+        XCTAssertTrue(joined)
+    }
+
+    /// Removing a relay must actually close it. The teardown path iterates the
+    /// current target list, and a removed relay is no longer in it, so without
+    /// an explicit reconcile against the previous set its socket and queued
+    /// sends would linger.
+    @MainActor
+    func testRemovedRelayLeavesTheTargetSet() async {
+        let center = NotificationCenter()
+        let custom = MutableRelayList(urls: ["wss://added.example.com"])
+        let context = makeContext(
+            permission: .authorized,
+            notificationCenter: center,
+            customRelays: custom
+        )
+
+        XCTAssertTrue(context.manager.relays.contains { $0.url == "wss://added.example.com" })
+
+        custom.urls = []
+        center.post(name: NostrRelaySettings.didChangeNotification, object: nil)
+
+        let dropped = await waitUntil {
+            !context.manager.relays.contains { $0.url == "wss://added.example.com" }
+        }
+        XCTAssertTrue(dropped)
+        // The built-in relays are untouched by a custom-relay removal.
+        XCTAssertTrue(context.manager.relays.contains { $0.url == "wss://nos.lol" })
+    }
+
     private func makeContext(
         permission: LocationChannelManager.PermissionState,
         favorites: Set<Data> = [],
@@ -1743,6 +1835,8 @@ final class NostrRelayManagerTests: XCTestCase {
         torEnforced: Bool = false,
         torIsReady: Bool = true,
         torIsForeground: Bool = true,
+        notificationCenter: NotificationCenter = NotificationCenter(),
+        customRelays: MutableRelayList = MutableRelayList(urls: []),
         jitterUnit: @escaping () -> Double = { 0.5 } // 0.5 -> jitter factor 1.0 (no jitter)
     ) -> RelayManagerTestContext {
         let permissionSubject = CurrentValueSubject<LocationChannelManager.PermissionState, Never>(permission)
@@ -1770,7 +1864,9 @@ final class NostrRelayManagerTests: XCTestCase {
                     scheduler.schedule(delay: delay, action: action)
                 },
                 now: { clock.now },
-                jitterUnit: jitterUnit
+                jitterUnit: jitterUnit,
+                notificationCenter: notificationCenter,
+                customRelays: { customRelays.urls }
             )
         )
         return RelayManagerTestContext(
@@ -1811,7 +1907,7 @@ final class NostrRelayManagerTests: XCTestCase {
     }
 
     private func waitUntil(
-        timeout: TimeInterval = 1.0,
+        timeout: TimeInterval = TestConstants.settleTimeout,
         condition: @escaping @MainActor () -> Bool
     ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
@@ -1842,6 +1938,16 @@ private final class MutableClock {
 
     init(now: Date) {
         self.now = now
+    }
+}
+
+/// Stand-in for the persisted hand-added relay list, so tests can change it
+/// without writing to shared preferences.
+private final class MutableRelayList {
+    var urls: [String]
+
+    init(urls: [String]) {
+        self.urls = urls
     }
 }
 

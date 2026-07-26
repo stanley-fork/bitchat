@@ -152,9 +152,19 @@ final class AppRuntime: ObservableObject {
         NetworkActivationService.shared.start()
         GeohashPresenceService.shared.start()
         checkForSharedContent()
+        expireAgedMedia()
 
         record(.launched)
         record(.startupCompleted)
+    }
+
+    /// Drops media that has outlived the retention window. Off the main thread
+    /// and best-effort: the sweep walks the media tree, and nothing at launch
+    /// depends on its result.
+    private func expireAgedMedia() {
+        Task(priority: .utility) {
+            BLEIncomingFileStore().expireAgedMedia()
+        }
     }
 
     func handleOpenURL(_ url: URL) {
@@ -316,6 +326,16 @@ private extension AppRuntime {
                 else { return }
                 self?.record(.torLifecycleChanged(.willStart))
                 self?.chatViewModel.handleTorWillStart()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .TorBootstrapDidStall)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard self?.chatViewModel.networkActivationAllowed == true
+                else { return }
+                self?.record(.torLifecycleChanged(.bootstrapDidStall))
+                self?.chatViewModel.handleTorBootstrapDidStall()
             }
             .store(in: &cancellables)
 
