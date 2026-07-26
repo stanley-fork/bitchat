@@ -13,11 +13,27 @@ struct BLEFileTransferHandlerTests {
 
         var signatureVerifyCount = 0
         var signedNameQueries: [PeerID] = []
+        var blockedPeers: Set<PeerID> = []
         var trackedPackets: [BitchatPacket] = []
         var quotaReservations: [Int] = []
         var saveCalls: [(data: Data, preferredName: String?, subdirectory: String, fallbackExtension: String?, defaultPrefix: String)] = []
+        var receiptStates: [String: BLEPrivateMediaReceiptState] = [:]
+        var receiptCommits: [(messageID: String, storedURL: URL)] = []
+        var receiptCommitSucceeds = true
+        var removedIncomingFiles: [URL] = []
         var lastSeenUpdates: [PeerID] = []
+        var deliveryAcks: [(messageID: String, peerID: PeerID)] = []
         var deliveredMessages: [BitchatMessage] = []
+        var saveOverride: ((
+            _ data: Data,
+            _ preferredName: String?,
+            _ subdirectory: String,
+            _ fallbackExtension: String?,
+            _ defaultPrefix: String
+        ) -> URL?)?
+        var receiptStateOverride: ((String) -> BLEPrivateMediaReceiptState)?
+        var receiptCommitOverride: ((String, URL) -> Bool)?
+        var removeIncomingFileOverride: ((URL) -> Void)?
     }
 
     private let localPeerID = PeerID(str: "0102030405060708")
@@ -46,13 +62,44 @@ struct BLEFileTransferHandlerTests {
             },
             saveIncomingFile: { data, preferredName, subdirectory, fallbackExtension, defaultPrefix in
                 recorder.saveCalls.append((data, preferredName, subdirectory, fallbackExtension, defaultPrefix))
+                if let saveOverride = recorder.saveOverride {
+                    return saveOverride(data, preferredName, subdirectory, fallbackExtension, defaultPrefix)
+                }
                 return recorder.saveResult
+            },
+            privateMediaReceiptState: { messageID in
+                if let receiptStateOverride = recorder.receiptStateOverride {
+                    return receiptStateOverride(messageID)
+                }
+                return recorder.receiptStates[messageID] ?? .absent
+            },
+            commitPrivateMediaFile: { messageID, storedURL in
+                recorder.receiptCommits.append((messageID, storedURL))
+                if let receiptCommitOverride = recorder.receiptCommitOverride {
+                    return receiptCommitOverride(messageID, storedURL)
+                }
+                guard recorder.receiptCommitSucceeds else { return false }
+                recorder.receiptStates[messageID] = .accepted(storedURL)
+                return true
+            },
+            removeIncomingFile: { storedURL in
+                recorder.removedIncomingFiles.append(storedURL)
+                recorder.removeIncomingFileOverride?(storedURL)
+            },
+            isPrivateMediaSenderBlocked: { peerID in
+                recorder.blockedPeers.contains(peerID)
             },
             updatePeerLastSeen: { peerID in
                 recorder.lastSeenUpdates.append(peerID)
             },
-            deliverMessage: { message in
+            acknowledgePrivateMedia: { messageID, peerID in
+                recorder.deliveryAcks.append((messageID, peerID))
+            },
+            deliverMessage: { message, shouldDeliver, completion in
+                guard shouldDeliver() else { return }
                 recorder.deliveredMessages.append(message)
+                guard shouldDeliver() else { return }
+                completion()
             }
         )
         return BLEFileTransferHandler(environment: environment)
@@ -284,6 +331,7 @@ struct BLEFileTransferHandlerTests {
         #expect(recorder.lastSeenUpdates == [remotePeerID])
         #expect(recorder.deliveredMessages.count == 1)
         #expect(recorder.deliveredMessages.first?.isPrivate == true)
+        #expect(recorder.deliveredMessages.first?.id.hasPrefix("media-") == false)
         // Must be explicit: BitchatMessage defaults private messages to
         // .sending, which the media views render as an in-flight send
         // (empty reveal mask, disabled reveal tap).
@@ -291,13 +339,14 @@ struct BLEFileTransferHandlerTests {
     }
 
     @Test
-    func decryptedPrivateFileUsesValidationQuotaAndPrivateDeliveryWithoutRawSignature() throws {
+    func bit8EncryptedPrivateFileKeepsStableIDAndAckWithoutBit9Proof() throws {
         let recorder = Recorder()
         recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
         let handler = makeHandler(recorder: recorder)
         let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let fileName = "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg"
         let file = BitchatFilePacket(
-            fileName: "secret.jpg",
+            fileName: fileName,
             fileSize: UInt64(content.count),
             mimeType: "image/jpeg",
             content: content
@@ -316,6 +365,357 @@ struct BLEFileTransferHandlerTests {
         #expect(recorder.deliveredMessages.count == 1)
         #expect(recorder.deliveredMessages.first?.isPrivate == true)
         #expect(recorder.deliveredMessages.first?.timestamp == timestamp)
+        #expect(recorder.deliveredMessages.first?.id == PrivateMediaMessageIdentity.stableID(
+            senderPeerID: remotePeerID,
+            recipientPeerID: localPeerID,
+            fileName: fileName
+        ))
+        #expect(recorder.receiptCommits.count == 1)
+        #expect(recorder.deliveryAcks.count == 1)
+        #expect(recorder.deliveryAcks.first?.messageID == recorder.deliveredMessages.first?.id)
+    }
+
+    @Test
+    func rawLegacyPrivateFileWithRetryShapedNameNeverUsesReceiptLedger() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(
+            remotePeerID,
+            nickname: "Alice",
+            isVerified: true,
+            signingPublicKey: sampleSigningKey
+        )]
+        recorder.signatureVerifies = true
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let packet = try makeFileTransferPacket(
+            sender: remotePeerID,
+            mimeType: "image/jpeg",
+            content: content,
+            recipientID: Data(hexString: localPeerID.id),
+            fileName: "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg"
+        )
+
+        #expect(handler.handle(packet, from: remotePeerID))
+        #expect(recorder.receiptCommits.isEmpty)
+        #expect(recorder.deliveryAcks.isEmpty)
+        #expect(recorder.deliveredMessages.count == 1)
+        #expect(recorder.deliveredMessages.first?.id.hasPrefix("media-") == false)
+    }
+
+    @Test
+    func repeatedLegacyPrivateImageNamesKeepDistinctRandomMessageIDs() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let file = BitchatFilePacket(
+            fileName: "photo.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_235)
+        ))
+
+        #expect(recorder.deliveredMessages.count == 2)
+        #expect(recorder.deliveredMessages[0].id != recorder.deliveredMessages[1].id)
+        #expect(recorder.deliveredMessages.allSatisfy { !$0.id.hasPrefix("media-") })
+    }
+
+    @Test
+    func lostCapabilityProofThenStableRetryReusesDurableIDWithoutSecondDiskWrite() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let fileName = "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg"
+        let file = BitchatFilePacket(
+            fileName: fileName,
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+        let expectedID = try #require(PrivateMediaMessageIdentity.stableID(
+            senderPeerID: remotePeerID,
+            recipientPeerID: localPeerID,
+            fileName: fileName
+        ))
+
+        // First encrypted arrival may precede the sender's authenticated bit-9
+        // proof. It still uses the bit-8 stable ID/ACK contract.
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        // A later automatic retry after proof must resolve the same durable ID
+        // rather than create a legacy random-ID bubble.
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_235)
+        ))
+
+        #expect(recorder.quotaReservations == [content.count])
+        #expect(recorder.saveCalls.count == 1)
+        // The handler re-offers a durable duplicate so a relaunched UI can
+        // restore its bubble; the synchronous conversation sink deduplicates.
+        #expect(recorder.deliveredMessages.count == 2)
+        #expect(recorder.lastSeenUpdates == [remotePeerID, remotePeerID])
+        #expect(recorder.deliveryAcks.count == 2)
+        #expect(recorder.deliveryAcks.allSatisfy {
+            $0.messageID == expectedID && $0.peerID == remotePeerID
+        })
+    }
+
+    @Test
+    func acceptedPrivateMediaAfterRelaunchRedeliversDurableURLBeforeAck() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "private-media-handler-relaunch-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = BLEIncomingFileStore(baseDirectory: root)
+        let content = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let file = BitchatFilePacket(
+            fileName: "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+
+        func configure(_ recorder: Recorder) {
+            recorder.peers = [remotePeerID: makePeerInfo(
+                remotePeerID,
+                nickname: "Alice",
+                isVerified: true
+            )]
+            recorder.saveOverride = {
+                data,
+                preferredName,
+                subdirectory,
+                fallbackExtension,
+                defaultPrefix in
+                store.save(
+                    data: data,
+                    preferredName: preferredName,
+                    subdirectory: subdirectory,
+                    fallbackExtension: fallbackExtension,
+                    defaultPrefix: defaultPrefix
+                )
+            }
+            recorder.receiptStateOverride = {
+                store.privateMediaReceiptState(messageID: $0)
+            }
+            recorder.receiptCommitOverride = {
+                store.commitPrivateMediaFile(messageID: $0, storedURL: $1)
+            }
+            recorder.removeIncomingFileOverride = {
+                store.removeIncomingFile(at: $0)
+            }
+        }
+
+        let first = Recorder()
+        configure(first)
+        #expect(makeHandler(recorder: first).handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        let originalMessage = try #require(first.deliveredMessages.first)
+        #expect(first.deliveryAcks.count == 1)
+
+        // A fresh handler models process relaunch: its in-memory reservation
+        // cache is empty, so only the durable receipt can suppress disk work.
+        let relaunched = Recorder()
+        configure(relaunched)
+        #expect(makeHandler(recorder: relaunched).handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_235)
+        ))
+
+        #expect(relaunched.quotaReservations.isEmpty)
+        #expect(relaunched.saveCalls.isEmpty)
+        #expect(relaunched.receiptCommits.isEmpty)
+        #expect(relaunched.deliveredMessages.count == 1)
+        #expect(relaunched.deliveredMessages.first?.id == originalMessage.id)
+        #expect(relaunched.deliveredMessages.first?.content == originalMessage.content)
+        #expect(relaunched.deliveryAcks.count == 1)
+        #expect(relaunched.deliveryAcks.first?.messageID == originalMessage.id)
+    }
+
+    @Test
+    func inFlightStableDuplicateIsNotAcknowledgedAndFailedSaveRemainsRetryable() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let file = BitchatFilePacket(
+            fileName: "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+        var handler: BLEFileTransferHandler!
+        var nestedResult: Bool?
+        var failFirstSave = true
+        recorder.saveOverride = { _, _, _, _, _ in
+            if failFirstSave {
+                failFirstSave = false
+                nestedResult = handler.handlePrivatePayload(
+                    payload,
+                    from: self.remotePeerID,
+                    timestamp: Date(timeIntervalSince1970: 1_235)
+                )
+                return nil
+            }
+            return recorder.saveResult
+        }
+        handler = makeHandler(recorder: recorder)
+
+        // The nested arrival sees the first reservation as pending. It is
+        // coalesced without an ACK; then the first durable save fails.
+        #expect(!handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        #expect(nestedResult == true)
+        #expect(recorder.saveCalls.count == 1)
+        #expect(recorder.deliveryAcks.isEmpty)
+        #expect(recorder.deliveredMessages.isEmpty)
+
+        // Failure released the reservation, so the sender's later retry can
+        // persist and deliver normally.
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_236)
+        ))
+        #expect(recorder.saveCalls.count == 2)
+        #expect(recorder.deliveryAcks.count == 1)
+        #expect(recorder.deliveredMessages.count == 1)
+    }
+
+    @Test
+    func unavailableDurableReceiptStateWithholdsDiskDeliveryAndAck() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(
+            remotePeerID,
+            nickname: "Alice",
+            isVerified: true
+        )]
+        let fileName =
+            "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg"
+        let messageID = try #require(PrivateMediaMessageIdentity.stableID(
+            senderPeerID: remotePeerID,
+            recipientPeerID: localPeerID,
+            fileName: fileName
+        ))
+        recorder.receiptStates[messageID] = .unavailable
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let payload = try #require(BitchatFilePacket(
+            fileName: fileName,
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        ).encode())
+
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        #expect(recorder.quotaReservations.isEmpty)
+        #expect(recorder.saveCalls.isEmpty)
+        #expect(recorder.receiptCommits.isEmpty)
+        #expect(recorder.deliveredMessages.isEmpty)
+        #expect(recorder.deliveryAcks.isEmpty)
+    }
+
+    @Test
+    func durableReceiptCommitFailureRollsBackAndWithholdsDeliveryAck() throws {
+        let recorder = Recorder()
+        recorder.peers = [remotePeerID: makePeerInfo(
+            remotePeerID,
+            nickname: "Alice",
+            isVerified: true
+        )]
+        recorder.receiptCommitSucceeds = false
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        let payload = try #require(BitchatFilePacket(
+            fileName: "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        ).encode())
+
+        #expect(!handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+        #expect(recorder.saveCalls.count == 1)
+        #expect(recorder.receiptCommits.count == 1)
+        #expect(recorder.removedIncomingFiles.count == 1)
+        #expect(recorder.removedIncomingFiles.first == recorder.saveResult)
+        #expect(recorder.deliveredMessages.isEmpty)
+        #expect(recorder.deliveryAcks.isEmpty)
+    }
+
+    @Test
+    func blockedPrivateMediaIsDroppedBeforeQuotaDiskAndDedupState() throws {
+        let recorder = Recorder()
+        recorder.blockedPeers = [remotePeerID]
+        recorder.peers = [remotePeerID: makePeerInfo(remotePeerID, nickname: "Alice", isVerified: true)]
+        let handler = makeHandler(recorder: recorder)
+        let content = Data([0xFF, 0xD8, 0xFF]) + Data(repeating: 0x41, count: 128)
+        let file = BitchatFilePacket(
+            fileName: "img_20260725_105708_1CC2760D-76AA-40C3-8013-C7FAA6C2EF99.jpg",
+            fileSize: UInt64(content.count),
+            mimeType: "image/jpeg",
+            content: content
+        )
+        let payload = try #require(file.encode())
+
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_234)
+        ))
+
+        #expect(recorder.quotaReservations.isEmpty)
+        #expect(recorder.saveCalls.isEmpty)
+        #expect(recorder.lastSeenUpdates.isEmpty)
+        #expect(recorder.deliveryAcks.isEmpty)
+        #expect(recorder.deliveredMessages.isEmpty)
+
+        // Unblocking must allow a retry through; the blocked attempt cannot
+        // poison the stable-ID dedup reservation.
+        recorder.blockedPeers = []
+        #expect(handler.handlePrivatePayload(
+            payload,
+            from: remotePeerID,
+            timestamp: Date(timeIntervalSince1970: 1_235)
+        ))
+        #expect(recorder.saveCalls.count == 1)
+        #expect(recorder.deliveredMessages.count == 1)
+        #expect(recorder.deliveryAcks.count == 1)
     }
 
     @Test
@@ -337,6 +737,7 @@ struct BLEFileTransferHandlerTests {
         #expect(recorder.quotaReservations.isEmpty)
         #expect(recorder.saveCalls.isEmpty)
         #expect(recorder.lastSeenUpdates.isEmpty)
+        #expect(recorder.deliveryAcks.isEmpty)
         #expect(recorder.deliveredMessages.isEmpty)
     }
 
@@ -466,6 +867,57 @@ struct BLEFileTransferHandlerTests {
             #expect(isDirectory.boolValue)
             #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
         }
+    }
+
+    @Test
+    func panicWipeClearsCachedPrivateMediaReceiptDecisions() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "panic-receipt-cache-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: base) }
+        let messageID = "media-00112233445566778899aabbccddeeff"
+
+        let seed = BLEPrivateMediaReceiptStore(baseDirectory: base)
+        #expect(seed.recordDeleted(messageID: messageID))
+
+        // Production wiring: receipt lookups run against the service's OWN
+        // incoming-file store while the panic wipe runs on the separate store
+        // `PanicRecoveryOperations.live()` constructs. The test must reset
+        // the instance BLEService uses, not a same-instance shortcut.
+        let keychain = MockKeychain()
+        let identityManager = MockIdentityManager(keychain)
+        let service = BLEService(
+            keychain: keychain,
+            idBridge: NostrIdentityBridge(keychain: MockKeychainHelper()),
+            identityManager: identityManager,
+            initializeBluetoothManagers: false,
+            incomingFileStore: BLEIncomingFileStore(baseDirectory: base)
+        )
+        #expect(
+            service._test_privateMediaReceiptState(messageID: messageID)
+                == .tombstoned
+        )
+
+        service.suspendForPanicReset()
+        // A receive callback drained during suspension can still consult the
+        // ledger and re-cache the pre-wipe decision before media deletion.
+        #expect(
+            service._test_privateMediaReceiptState(messageID: messageID)
+                == .tombstoned
+        )
+
+        // The wipe itself runs on the recovery operations' distinct store,
+        // exactly like ChatViewModel's panic transaction.
+        let recoveryStore = BLEIncomingFileStore(baseDirectory: base)
+        try recoveryStore.panicWipe()
+        service.completePanicReset(restartServices: false)
+
+        #expect(
+            service._test_privateMediaReceiptState(messageID: messageID)
+                == .absent
+        )
     }
 
     @Test

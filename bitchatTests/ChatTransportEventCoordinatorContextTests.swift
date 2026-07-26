@@ -220,26 +220,61 @@ struct ChatTransportEventCoordinatorContextTests {
     func didReceiveMessage_routesPrivateAndPublic_skipsBlockedAndEmpty() async {
         let context = MockChatTransportEventContext()
         let coordinator = ChatTransportEventCoordinator(context: context)
+        let peerID = PeerID(str: "1122334455667788")
 
         // Blocked messages are dropped before any handling.
-        context.blockedMessageIDs = ["blocked"]
+        context.blockedMessageIDs = ["blocked", "blocked-private"]
         coordinator.didReceiveMessage(makeMessage(id: "blocked"))
+        coordinator.didReceiveMessage(makeMessage(
+            id: "blocked-private",
+            isPrivate: true,
+            senderPeerID: peerID
+        ))
         // Empty public content is dropped too.
         coordinator.didReceiveMessage(makeMessage(id: "empty", content: "   "))
         await drainMainActorTasks()
         #expect(context.handledPublicMessages.isEmpty)
         #expect(context.handledPrivateMessages.isEmpty)
         #expect(context.mentionCheckedMessageIDs.isEmpty)
+        #expect(context.meshDeliveryAcks.isEmpty)
 
         // Private goes to the private handler, public to the public handler;
-        // both get mention checks and haptics.
-        coordinator.didReceiveMessage(makeMessage(id: "pm", isPrivate: true))
+        // both get mention checks and haptics. Stable-media ACK authorization
+        // belongs to BLEFileTransferHandler after its durable commit and this
+        // synchronous acceptance result, not to the generic UI coordinator.
+        let stableMediaID = "media-\(String(repeating: "a", count: 32))"
+        coordinator.didReceiveMessage(makeMessage(
+            id: stableMediaID,
+            isPrivate: true,
+            senderPeerID: peerID
+        ))
+        coordinator.didReceiveMessage(makeMessage(
+            id: "legacy-media",
+            isPrivate: true,
+            senderPeerID: peerID
+        ))
+        coordinator.didReceiveMessage(makeMessage(id: "pm-missing-sender", isPrivate: true))
         coordinator.didReceiveMessage(makeMessage(id: "pub"))
         await drainMainActorTasks()
-        #expect(context.handledPrivateMessages.map(\.id) == ["pm"])
+        #expect(context.handledPrivateMessages.map(\.id) == [
+            stableMediaID,
+            "legacy-media",
+            "pm-missing-sender"
+        ])
         #expect(context.handledPublicMessages.map(\.id) == ["pub"])
-        #expect(context.mentionCheckedMessageIDs == ["pm", "pub"])
-        #expect(context.hapticMessageIDs == ["pm", "pub"])
+        #expect(context.mentionCheckedMessageIDs == [
+            stableMediaID,
+            "legacy-media",
+            "pm-missing-sender",
+            "pub"
+        ])
+        #expect(context.hapticMessageIDs == [
+            stableMediaID,
+            "legacy-media",
+            "pm-missing-sender",
+            "pub"
+        ])
+        #expect(context.meshDeliveryAcks.isEmpty)
     }
 
     @Test @MainActor
