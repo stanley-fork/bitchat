@@ -86,7 +86,14 @@ protocol ChatMediaTransferContext: AnyObject {
     @discardableResult
     func appendPublicMessage(_ message: BitchatMessage, to conversationID: ConversationID) -> Bool
     func removeMessage(withID messageID: String, cleanupFile: Bool)
+    /// Removes a media bubble with direction-scoped cleanup instead of the
+    /// broad compatibility cleanup path.
+    func removeUntombstonedMediaMessage(withID messageID: String)
+    func removeOutgoingMediaMessage(withID messageID: String)
     func addSystemMessage(_ content: String)
+    /// Surfaces a refused explicit media deletion in the affected chat so a
+    /// wedged delete never looks like success.
+    func notifyMediaDeletionRefused(messageID: String)
     /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
     func notifyUIChanged()
 
@@ -122,6 +129,15 @@ protocol ChatMediaTransferContext: AnyObject {
     )
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String)
     func cancelTransfer(_ transferId: String)
+    /// Receiver-side stable-ID deletion commit. Implementations must invoke
+    /// completion only after the entire batch is durably tombstoned.
+    func persistDeletedPrivateMedia(
+        messageIDs: [String],
+        completion: @escaping @MainActor (Bool) -> Void
+    )
+    /// Whether any current private-chat copy of this stable ID came from a
+    /// remote peer and therefore requires a receiver tombstone.
+    func requiresPrivateMediaTombstone(messageID: String) -> Bool
 }
 
 extension ChatViewModel: ChatMediaTransferContext {
@@ -207,6 +223,185 @@ extension ChatViewModel: ChatMediaTransferContext {
 
     func cancelTransfer(_ transferId: String) {
         meshService.cancelTransfer(transferId)
+    }
+
+    func removeUntombstonedMediaMessage(withID messageID: String) {
+        let message = conversations.conversationsByID.values.lazy
+            .flatMap(\.messages)
+            .first { $0.id == messageID }
+        if let message, !isIncomingPrivateMessage(message) {
+            mediaTransferCoordinator.cleanupOutgoingLocalFile(
+                forMessage: message
+            )
+        }
+        removeMessage(withID: messageID, cleanupFile: false)
+        if let message {
+            cleanupLegacyIncomingMediaPayloads(for: [message])
+        }
+    }
+
+    /// Explicitly deleted LEGACY (non-stable-ID) incoming media has no
+    /// durable ID-to-file ownership, so the actual unlink is delegated to
+    /// the transport's gated cleanup: a basename that is pending delivery or
+    /// reserved by a receipt/deletion transaction stays on disk for bounded
+    /// quota cleanup instead. Must run after the bubbles were removed; a
+    /// surviving reference in any conversation keeps the payload.
+    func cleanupLegacyIncomingMediaPayloads(for messages: [BitchatMessage]) {
+        guard let cleanup =
+                meshService as? any PrivateMediaDeletionPersisting else {
+            return
+        }
+        let legacyPaths = Set(messages.compactMap { message -> String? in
+            guard !PrivateMediaMessageIdentity.isStableID(message.id),
+                  isIncomingPrivateMessage(message) else {
+                return nil
+            }
+            return incomingMediaRelativePath(for: message)
+        })
+        guard !legacyPaths.isEmpty else { return }
+        let survivingPaths = Set(
+            conversations.conversationsByID.values.lazy
+                .flatMap(\.messages)
+                .compactMap { message -> String? in
+                    guard self.isIncomingPrivateMessage(message) else {
+                        return nil
+                    }
+                    return self.incomingMediaRelativePath(for: message)
+                }
+        )
+        for relativePath in legacyPaths.subtracting(survivingPaths).sorted() {
+            cleanup.removeLegacyPrivateMediaPayload(
+                relativePath: relativePath
+            )
+        }
+    }
+
+    func removeOutgoingMediaMessage(withID messageID: String) {
+        let message = conversations.conversationsByID.values.lazy
+            .flatMap(\.messages)
+            .first { $0.id == messageID }
+        if let message {
+            mediaTransferCoordinator.cleanupOutgoingLocalFile(
+                forMessage: message
+            )
+        }
+        removeMessage(withID: messageID, cleanupFile: false)
+    }
+
+    func persistDeletedPrivateMedia(
+        messageIDs: [String],
+        completion: @escaping @MainActor (Bool) -> Void
+    ) {
+        guard !messageIDs.isEmpty else {
+            completion(true)
+            return
+        }
+        guard let persistence =
+                meshService as? any PrivateMediaDeletionPersisting else {
+            completion(false)
+            return
+        }
+        let requestedIDs = Set(messageIDs)
+        let incomingPathReferences = Array(
+            conversations.conversationsByID.values
+                .lazy
+                .flatMap(\.messages)
+                .compactMap { message -> (
+                    messageID: String,
+                    path: String
+                )? in
+                guard self.isIncomingPrivateMessage(message),
+                      let path = self.incomingMediaRelativePath(
+                          for: message
+                      ) else {
+                    return nil
+                }
+                return (message.id, path)
+            }
+        )
+        let ownerIDsByPath = Dictionary(
+            grouping: incomingPathReferences,
+            by: { $0.path }
+        ).mapValues { Set($0.map(\.messageID)) }
+        let protectedPayloadRelativePaths = Set(
+            ownerIDsByPath.compactMap { path, ownerIDs in
+                ownerIDs.isSubset(of: requestedIDs) ? nil : path
+            }
+        )
+        var payloadRelativePaths: [String: String] = [:]
+        for reference in incomingPathReferences
+        where requestedIDs.contains(reference.messageID)
+            && ownerIDsByPath[reference.path, default: []]
+                .isSubset(of: requestedIDs) {
+            payloadRelativePaths[reference.messageID] = reference.path
+        }
+        persistence.persistDeletedPrivateMedia(
+            messageIDs: messageIDs,
+            payloadRelativePaths: payloadRelativePaths,
+            protectedPayloadRelativePaths:
+                protectedPayloadRelativePaths,
+            completion: completion
+        )
+    }
+
+    func requiresPrivateMediaTombstone(messageID: String) -> Bool {
+        guard PrivateMediaMessageIdentity.isStableID(messageID) else {
+            return false
+        }
+        return privateChats.values.lazy.flatMap { $0 }.contains { message in
+            message.id == messageID && isIncomingPrivateMessage(message)
+        }
+    }
+
+    func notifyMediaDeletionRefused(messageID: String) {
+        let owningPeerID = privateChats.first { _, messages in
+            messages.contains { $0.id == messageID }
+        }?.key
+        notifyPrivateMediaDeletionRefused(peerID: owningPeerID)
+    }
+
+    /// A refused deletion/clear previously surfaced only in SecureLogger, so
+    /// a wedged /clear looked like success. Tell the affected chat that its
+    /// bubbles and payloads were intentionally kept.
+    func notifyPrivateMediaDeletionRefused(peerID: PeerID?) {
+        let copy = String(
+            localized: "content.system.media_delete_refused",
+            comment: "System message when an explicit media delete or /clear was refused and bubbles/files were kept"
+        )
+        if let peerID = peerID ?? selectedPrivateChatPeer {
+            addLocalPrivateSystemMessage(copy, to: peerID)
+        } else {
+            addSystemMessage(copy)
+        }
+    }
+
+    private func isIncomingPrivateMessage(
+        _ message: BitchatMessage
+    ) -> Bool {
+        if let senderPeerID = message.senderPeerID {
+            return senderPeerID.toShort() != meshService.myPeerID.toShort()
+        }
+        return message.sender != nickname
+            && !message.sender.hasPrefix(nickname + "#")
+    }
+
+    private func incomingMediaRelativePath(
+        for message: BitchatMessage
+    ) -> String? {
+        let categories: [MimeType.Category] = [.audio, .image, .file]
+        guard let category = categories.first(where: {
+            message.content.hasPrefix($0.messagePrefix)
+        }),
+        let rawFilename = String(
+            message.content.dropFirst(category.messagePrefix.count)
+        ).trimmedOrNilIfEmpty,
+        let safeFilename =
+            (rawFilename as NSString).lastPathComponent.nilIfEmpty,
+        safeFilename != ".",
+        safeFilename != ".." else {
+            return nil
+        }
+        return "\(category.mediaDir)/incoming/\(safeFilename)"
     }
 }
 
@@ -297,6 +492,7 @@ final class ChatMediaTransferCoordinator {
 
     private(set) var transferIdToMessageIDs: [String: [String]] = [:]
     private(set) var messageIDToTransferId: [String: String] = [:]
+    private var deletionGeneration: UInt64 = 0
     private var reconnectRetryRecords: [
         String: PrivateMediaReconnectRetryRecord
     ] = [:]
@@ -871,8 +1067,7 @@ final class ChatMediaTransferCoordinator {
                 cancelActiveTransfer: false
             )
             clearTransferMapping(for: messageID)
-            context.removeMessage(withID: messageID, cleanupFile: true)
-
+            context.removeOutgoingMediaMessage(withID: messageID)
         case .rejected(let id, let reason):
             guard let messageID = currentMessageID(forTransferID: id) else {
                 return
@@ -891,6 +1086,40 @@ final class ChatMediaTransferCoordinator {
     }
 
     func cleanupLocalFile(forMessage message: BitchatMessage) {
+        cleanupLocalFile(
+            forMessage: message,
+            directions: ["outgoing", "incoming"],
+            searchAllCategories: true
+        )
+    }
+
+    /// `/clear` may cancel an outgoing message before receiver tombstones are
+    /// committed. Restrict cleanup to that message's outgoing directory so a
+    /// same-name incoming payload cannot be removed prematurely.
+    func cleanupOutgoingLocalFile(forMessage message: BitchatMessage) {
+        cleanupLocalFile(
+            forMessage: message,
+            directions: ["outgoing"],
+            searchAllCategories: false
+        )
+    }
+
+    /// Receiver cleanup runs only after any required tombstone commit. Keep it
+    /// scoped to the parsed media category and incoming directory so unrelated
+    /// outgoing or cross-category payloads with the same basename survive.
+    func cleanupIncomingLocalFile(forMessage message: BitchatMessage) {
+        cleanupLocalFile(
+            forMessage: message,
+            directions: ["incoming"],
+            searchAllCategories: false
+        )
+    }
+
+    private func cleanupLocalFile(
+        forMessage message: BitchatMessage,
+        directions: [String],
+        searchAllCategories: Bool
+    ) {
         let categories: [MimeType.Category] = [.audio, .image, .file]
         guard let category = categories.first(where: { message.content.hasPrefix($0.messagePrefix) }),
               let rawFilename = String(message.content.dropFirst(category.messagePrefix.count)).trimmedOrNilIfEmpty,
@@ -901,11 +1130,27 @@ final class ChatMediaTransferCoordinator {
             return
         }
 
-        let subdirs = categories.flatMap { ["\($0.mediaDir)/outgoing", "\($0.mediaDir)/incoming"] }
+        let targetCategories = searchAllCategories ? categories : [category]
+        let subdirs = targetCategories.flatMap { category in
+            directions.map { "\(category.mediaDir)/\($0)" }
+        }
         for subdir in subdirs {
             let target = base.appendingPathComponent(subdir, isDirectory: true).appendingPathComponent(safeFilename)
             guard target.path.hasPrefix(base.path) else { continue }
 
+            guard FileManager.default.fileExists(atPath: target.path) else {
+                continue
+            }
+            guard let values = try? target.resourceValues(
+                forKeys: [.isRegularFileKey]
+            ),
+            values.isRegularFile == true else {
+                SecureLogger.warning(
+                    "Refusing to cleanup non-file media target \(safeFilename)",
+                    category: .session
+                )
+                continue
+            }
             do {
                 try FileManager.default.removeItem(at: target)
             } catch CocoaError.fileNoSuchFile {
@@ -917,33 +1162,86 @@ final class ChatMediaTransferCoordinator {
     }
 
     func cancelMediaSend(messageID: String) {
-        discardReconnectRetry(
-            messageID: messageID,
-            cancelActiveTransfer: false
-        )
-        if let transferId = messageIDToTransferId[messageID],
-           let active = transferIdToMessageIDs[transferId]?.first,
-           active == messageID {
-            context.cancelTransfer(transferId)
-        }
-        clearTransferMapping(for: messageID)
-        context.removeMessage(withID: messageID, cleanupFile: true)
+        cancelAllMediaSendOwners(messageID: messageID)
+        context.removeOutgoingMediaMessage(withID: messageID)
+    }
+
+    /// Lets `/clear` cancel send ownership without implicitly deciding which
+    /// bubbles/files its deletion transaction may remove.
+    func cancelMediaTransferForConversationClear(messageID: String) {
+        cancelAllMediaSendOwners(messageID: messageID)
     }
 
     func deleteMediaMessage(messageID: String) {
+        // Stop every exact sender owner before the durable receiver commit.
+        // Otherwise a retained retry or admitted legacy send could transmit
+        // after the bubble and payload have been deleted.
+        cancelAllMediaSendOwners(messageID: messageID)
+
+        guard context.requiresPrivateMediaTombstone(
+            messageID: messageID
+        ) else {
+            finishMediaDeletion(
+                messageID: messageID,
+                receiverJournalOwnsPayload: false
+            )
+            return
+        }
+
+        let generation = deletionGeneration
+        context.persistDeletedPrivateMedia(
+            messageIDs: [messageID]
+        ) { [weak self] persisted in
+            guard let self,
+                  self.deletionGeneration == generation else {
+                return
+            }
+            guard persisted else {
+                SecureLogger.error(
+                    "Refusing to delete private media without a durable tombstone id=\(messageID.prefix(12))…",
+                    category: .session
+                )
+                self.context.notifyMediaDeletionRefused(
+                    messageID: messageID
+                )
+                return
+            }
+            self.finishMediaDeletion(
+                messageID: messageID,
+                receiverJournalOwnsPayload: true
+            )
+        }
+    }
+
+    private func finishMediaDeletion(
+        messageID: String,
+        receiverJournalOwnsPayload: Bool
+    ) {
+        if receiverJournalOwnsPayload {
+            // The journal already owns the exact path. A basename cleanup here
+            // could delete a different arrival that reused it after unlink.
+            context.removeMessage(withID: messageID, cleanupFile: false)
+        } else {
+            context.removeUntombstonedMediaMessage(withID: messageID)
+        }
+    }
+
+    private func cancelAllMediaSendOwners(messageID: String) {
+        // This releases the retained packet and expiry/retry owner. When its
+        // exact active transfer still owns the mapping, it cancels that owner
+        // before any deletion persistence or UI mutation can proceed.
         discardReconnectRetry(
             messageID: messageID,
-            cancelActiveTransfer: false
+            cancelActiveTransfer: true
         )
-        // Delete is also a send cancellation. In particular, an approved
-        // legacy-clear send may still be waiting on BLEService.messageQueue;
-        // removing only the UI mapping would let that deferred work transmit.
+        // In particular, an approved legacy send may still be waiting on
+        // BLEService.messageQueue. Its admission must be canceled before the
+        // mapping/consent owner is released.
         if let transferId = messageIDToTransferId[messageID],
            transferIdToMessageIDs[transferId]?.first == messageID {
             context.cancelTransfer(transferId)
         }
         clearTransferMapping(for: messageID)
-        context.removeMessage(withID: messageID, cleanupFile: true)
     }
 
     /// A raw link callback can arrive before the replacement Noise session
@@ -999,6 +1297,7 @@ final class ChatMediaTransferCoordinator {
     /// is the last filesystem mutation before the transaction can complete.
     func resetForPanic() {
         imagePreparationBarrier.invalidateAndWait()
+        deletionGeneration &+= 1
         peersResolvingReconnectRetry.removeAll(keepingCapacity: false)
         for task in reconnectRetryExpiryTasks.values {
             task.cancel()
