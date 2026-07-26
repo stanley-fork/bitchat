@@ -1769,9 +1769,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
 
         case .peerConnected(let peerID):
             transportEventCoordinator.didConnectToPeerSynchronously(peerID)
+            mediaTransferCoordinator.peerDidReconnect(peerID)
 
         case .peerDisconnected(let peerID):
             transportEventCoordinator.didDisconnectFromPeerSynchronously(peerID)
+            mediaTransferCoordinator.peerDidDisconnect(peerID)
 
         case .peerListUpdated(let peers):
             peerListCoordinator.didUpdatePeerListSynchronously(peers)
@@ -1858,10 +1860,16 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
 
     func didConnectToPeer(_ peerID: PeerID) {
         transportEventCoordinator.didConnectToPeer(peerID)
+        Task { @MainActor [weak self] in
+            self?.mediaTransferCoordinator.peerDidReconnect(peerID)
+        }
     }
 
     func didDisconnectFromPeer(_ peerID: PeerID) {
         transportEventCoordinator.didDisconnectFromPeer(peerID)
+        Task { @MainActor [weak self] in
+            self?.mediaTransferCoordinator.peerDidDisconnect(peerID)
+        }
     }
 
     func didUpdatePeerList(_ peers: [PeerID]) {
