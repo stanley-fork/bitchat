@@ -8,6 +8,7 @@ struct BLENoisePacketHandlerTests {
 
     private final class Recorder {
         var handshakeResult: Result<Data?, Error> = .success(nil)
+        var handshakeAuthenticated = false
         var hasSession = false
         var decryptResult: Result<Data, Error> = .success(Data())
 
@@ -38,7 +39,11 @@ struct BLENoisePacketHandlerTests {
             now: { now },
             processHandshakeMessage: { peerID, message in
                 recorder.processedHandshakes.append((peerID, message))
-                return try recorder.handshakeResult.get()
+                return NoiseHandshakeProcessingResult(
+                    response: try recorder.handshakeResult.get(),
+                    didEstablishAuthenticatedSession:
+                        recorder.handshakeAuthenticated
+                )
             },
             hasNoiseSession: { peerID in
                 recorder.hasSessionQueries.append(peerID)
@@ -111,6 +116,24 @@ struct BLENoisePacketHandlerTests {
     }
 
     @Test
+    func handshakeResultPreservesExactCandidateAuthentication() {
+        let recorder = Recorder()
+        recorder.handshakeAuthenticated = true
+        let handler = makeHandler(recorder: recorder)
+        let packet = makeHandshakePacket(
+            recipientID: Data(hexString: localPeerID.id)
+        )
+
+        let result = handler.handleHandshakeWithResult(
+            packet,
+            from: remotePeerID
+        )
+
+        #expect(result.processed)
+        #expect(result.didEstablishAuthenticatedSession)
+    }
+
+    @Test
     func handshakeForAnotherPeerIsIgnored() {
         let recorder = Recorder()
         let handler = makeHandler(recorder: recorder)
@@ -150,6 +173,21 @@ struct BLENoisePacketHandlerTests {
 
         #expect(recorder.hasSessionQueries == [remotePeerID])
         #expect(recorder.initiatedHandshakes.isEmpty)
+    }
+
+    @Test
+    func peerIdentityMismatchDoesNotRecreateHandshakeState() {
+        let recorder = Recorder()
+        recorder.handshakeResult = .failure(NoiseSessionError.peerIdentityMismatch)
+        recorder.hasSession = false
+        let handler = makeHandler(recorder: recorder)
+        let packet = makeHandshakePacket(recipientID: Data(hexString: localPeerID.id))
+
+        #expect(!handler.handleHandshake(packet, from: remotePeerID))
+
+        #expect(recorder.hasSessionQueries.isEmpty)
+        #expect(recorder.initiatedHandshakes.isEmpty)
+        #expect(recorder.broadcastPackets.isEmpty)
     }
 
     // MARK: Encrypted

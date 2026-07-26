@@ -2,6 +2,11 @@ import BitFoundation
 import BitLogger
 import Foundation
 
+struct BLENoiseHandshakeHandlingResult {
+    let processed: Bool
+    let didEstablishAuthenticatedSession: Bool
+}
+
 /// Narrow environment for `BLENoisePacketHandler`.
 ///
 /// All queue hops (collections barrier writes, main-actor UI notification)
@@ -16,8 +21,11 @@ struct BLENoisePacketHandlerEnvironment {
     let messageTTL: UInt8
     /// Current time source.
     let now: () -> Date
-    /// Processes an inbound handshake message, returning an optional response payload (crypto).
-    let processHandshakeMessage: (_ peerID: PeerID, _ message: Data) throws -> Data?
+    /// Processes an inbound handshake message, returning its optional response
+    /// and whether that exact candidate authenticated (crypto).
+    let processHandshakeMessage:
+        (_ peerID: PeerID, _ message: Data) throws
+            -> NoiseHandshakeProcessingResult
     /// Whether any Noise session (established or pending) exists for the peer (crypto).
     let hasNoiseSession: (PeerID) -> Bool
     /// Initiates a fresh Noise handshake with the peer (crypto + send).
@@ -49,13 +57,28 @@ final class BLENoisePacketHandler {
         self.environment = environment
     }
 
-    func handleHandshake(_ packet: BitchatPacket, from peerID: PeerID) {
+    /// Returns true when the handshake message was processed successfully.
+    /// Callers use this to distinguish an authenticated replacement completion
+    /// from a rejected candidate while an older session remains established.
+    @discardableResult
+    func handleHandshake(_ packet: BitchatPacket, from peerID: PeerID) -> Bool {
+        handleHandshakeWithResult(packet, from: peerID).processed
+    }
+
+    func handleHandshakeWithResult(
+        _ packet: BitchatPacket,
+        from peerID: PeerID
+    ) -> BLENoiseHandshakeHandlingResult {
         let env = environment
         // Use NoiseEncryptionService for handshake processing
         if PeerID(hexData: packet.recipientID) == env.localPeerID() {
             // Handshake is for us
             do {
-                if let response = try env.processHandshakeMessage(peerID, packet.payload) {
+                let result = try env.processHandshakeMessage(
+                    peerID,
+                    packet.payload
+                )
+                if let response = result.response {
                     // Send response
                     let responsePacket = BitchatPacket(
                         type: MessageType.noiseHandshake.rawValue,
@@ -72,14 +95,39 @@ final class BLENoisePacketHandler {
 
                 // Session establishment will trigger onPeerAuthenticated callback
                 // which will send any pending messages at the right time
+                return BLENoiseHandshakeHandlingResult(
+                    processed: true,
+                    didEstablishAuthenticatedSession:
+                        result.didEstablishAuthenticatedSession
+                )
+            } catch NoiseSessionError.peerIdentityMismatch {
+                // The candidate was already discarded by the session manager.
+                // Do not let a spoofed claimed ID trigger a fresh outbound
+                // handshake or recreate state for the attacker-selected ID.
+                SecureLogger.warning(
+                    "Rejected Noise handshake whose static key does not match \(peerID.id.prefix(8))…",
+                    category: .security
+                )
+                return BLENoiseHandshakeHandlingResult(
+                    processed: false,
+                    didEstablishAuthenticatedSession: false
+                )
             } catch {
                 SecureLogger.error("Failed to process handshake: \(error)")
                 // Try initiating a new handshake
                 if !env.hasNoiseSession(peerID) {
                     env.initiateHandshake(peerID)
                 }
+                return BLENoiseHandshakeHandlingResult(
+                    processed: false,
+                    didEstablishAuthenticatedSession: false
+                )
             }
         }
+        return BLENoiseHandshakeHandlingResult(
+            processed: false,
+            didEstablishAuthenticatedSession: false
+        )
     }
 
     func handleEncrypted(_ packet: BitchatPacket, from peerID: PeerID) {

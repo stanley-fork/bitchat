@@ -100,6 +100,95 @@ struct BLEServiceCoreTests {
     }
 
     @Test
+    func unsignedAndBadSignatureLeaveDoNotEvictOrRelayClaimedPeer() async throws {
+        let ble = makeService()
+        let alice = NoiseEncryptionService(keychain: MockKeychain())
+        let mallory = NoiseEncryptionService(keychain: MockKeychain())
+        let alicePeerID = PeerID(publicKey: alice.getStaticPublicKeyData())
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+
+        let unsigned = makeLeavePacket(sender: alicePeerID, marker: "unsigned")
+        ble._test_handlePacket(
+            unsigned,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let unsignedRelayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) > 0 },
+            timeout: TestConstants.shortTimeout
+        )
+        #expect(!unsignedRelayed)
+        #expect(ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID })
+
+        let badSignature = try #require(
+            mallory.signPacket(makeLeavePacket(sender: alicePeerID, marker: "bad-signature"))
+        )
+        ble._test_handlePacket(
+            badSignature,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let badSignatureRelayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) > 0 },
+            timeout: TestConstants.shortTimeout
+        )
+        #expect(!badSignatureRelayed)
+        #expect(ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID })
+    }
+
+    @Test
+    func validSignedLeaveEvictsSessionAndRelays() async throws {
+        let ble = makeService()
+        let alice = NoiseEncryptionService(keychain: MockKeychain())
+        let alicePeerID = PeerID(publicKey: alice.getStaticPublicKeyData())
+
+        // Establish a real session so the leave regression also verifies that
+        // stale secure-delivery state is retired, not just the peer-list row.
+        let message1 = try ble._test_noiseInitiateHandshake(with: alicePeerID)
+        let message2 = try #require(
+            try alice.processHandshakeMessage(from: ble.myPeerID, message: message1)
+        )
+        let message3 = try #require(
+            try ble._test_noiseProcessHandshakeMessage(from: alicePeerID, message: message2)
+        )
+        _ = try alice.processHandshakeMessage(from: ble.myPeerID, message: message3)
+        #expect(ble.canDeliverSecurely(to: alicePeerID))
+        let centralUUID = "central-valid-leave"
+        ble._test_bindCentral(centralUUID, to: alicePeerID)
+        ble._test_markNoiseAuthenticatedCentral(centralUUID, to: alicePeerID)
+        #expect(ble._test_isNoiseAuthenticatedCentral(centralUUID, for: alicePeerID))
+
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+        let signedLeave = try #require(
+            alice.signPacket(makeLeavePacket(sender: alicePeerID, marker: "valid"))
+        )
+        ble._test_handlePacket(
+            signedLeave,
+            fromPeerID: alicePeerID,
+            signingPublicKey: alice.getSigningPublicKeyData()
+        )
+
+        let evicted = await TestHelpers.waitUntil(
+            {
+                !ble.currentPeerSnapshots().contains { $0.peerID == alicePeerID }
+                    && !ble.canDeliverSecurely(to: alicePeerID)
+                    && !ble._test_isNoiseAuthenticatedCentral(centralUUID, for: alicePeerID)
+            },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(evicted)
+        let relayed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .leave) == 1 },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(relayed)
+    }
+
+    @Test
     func ingressAllowsRelayedSenderOnBoundLink() async throws {
         let ble = makeService()
         let boundPeer = PeerID(str: "1122334455667788")
@@ -438,6 +527,94 @@ struct BLEServiceCoreTests {
         // real attacker CBCentral could accept the opaque courier packet and
         // cause the relay drop's persisted seen ID to be consumed forever.
         #expect(outbound.count(ofType: .courierEnvelope) == 0)
+    }
+
+    @Test
+    func replacementXXMessageOneWithPayloadCannotAuthenticateIngressLink() async throws {
+        let ble = makeService()
+        let victim = NoiseEncryptionService(keychain: MockKeychain())
+        let victimPeerID = PeerID(publicKey: victim.getStaticPublicKeyData())
+
+        // Preserve a working victim session while an unauthenticated
+        // replacement candidate arrives on a newly bound physical link.
+        let message1 = try ble._test_noiseInitiateHandshake(with: victimPeerID)
+        let message2 = try #require(
+            try victim.processHandshakeMessage(from: ble.myPeerID, message: message1)
+        )
+        let message3 = try #require(
+            try ble._test_noiseProcessHandshakeMessage(
+                from: victimPeerID,
+                message: message2
+            )
+        )
+        _ = try victim.processHandshakeMessage(
+            from: ble.myPeerID,
+            message: message3
+        )
+        #expect(ble.canDeliverSecurely(to: victimPeerID))
+
+        let centralUUID = "central-replacement-xx-message-one"
+        ble._test_bindCentral(centralUUID, to: victimPeerID)
+        #expect(
+            !ble._test_isNoiseAuthenticatedCentral(
+                centralUUID,
+                for: victimPeerID
+            )
+        )
+
+        // XX message one may legally carry a payload, so its length is not a
+        // reliable signal that the replacement handshake completed.
+        let unauthenticatedInitiator = NoiseHandshakeState(
+            role: .initiator,
+            pattern: .XX,
+            keychain: MockKeychain()
+        )
+        let replacementMessage1 = try unauthenticatedInitiator.writeMessage(
+            payload: Data([0xA5])
+        )
+        #expect(
+            replacementMessage1.count
+                > NoiseSecurityConstants.xxInitialMessageSize
+        )
+
+        let packet = BitchatPacket(
+            type: MessageType.noiseHandshake.rawValue,
+            senderID: Data(hexString: victimPeerID.id) ?? Data(),
+            recipientID: Data(hexString: ble.myPeerID.id),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: replacementMessage1,
+            signature: nil,
+            ttl: TransportConfig.messageTTLDefault
+        )
+        #expect(
+            ble._test_recordIngressIfNew(
+                packet: packet,
+                linkID: centralUUID
+            )
+        )
+
+        let outbound = OutboundPacketTap()
+        ble._test_onOutboundPacket = outbound.record
+        ble._test_handlePacket(
+            packet,
+            fromPeerID: victimPeerID,
+            preseedPeer: false
+        )
+
+        // Waiting for the responder's message two proves the candidate was
+        // processed before checking its exact authentication result.
+        let candidateProcessed = await TestHelpers.waitUntil(
+            { outbound.count(ofType: .noiseHandshake) == 1 },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(candidateProcessed)
+        #expect(
+            !ble._test_isNoiseAuthenticatedCentral(
+                centralUUID,
+                for: victimPeerID
+            )
+        )
+        #expect(ble.canDeliverSecurely(to: victimPeerID))
     }
 
     /// A legitimate rotation announce necessarily arrives on a link still
@@ -851,6 +1028,18 @@ private func makePublicPacket(content: String, sender: PeerID, timestamp: UInt64
         payload: Data(content.utf8),
         signature: nil,
         ttl: 3
+    )
+}
+
+private func makeLeavePacket(sender: PeerID, marker: String) -> BitchatPacket {
+    BitchatPacket(
+        type: MessageType.leave.rawValue,
+        senderID: Data(hexString: sender.id) ?? Data(),
+        recipientID: nil,
+        timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+        payload: Data(marker.utf8),
+        signature: nil,
+        ttl: TransportConfig.messageTTLDefault
     )
 }
 
