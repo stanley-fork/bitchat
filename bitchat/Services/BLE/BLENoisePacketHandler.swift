@@ -70,8 +70,8 @@ final class BLENoisePacketHandler {
     }
 
     /// Returns true when the handshake message was processed successfully.
-    /// Callers use this to distinguish an authenticated replacement completion
-    /// from a rejected candidate while an older session remains established.
+    /// Callers use this to distinguish an authenticated reconnect completion
+    /// from a rejected ordinary responder while rollback state is restored.
     @discardableResult
     func handleHandshake(_ packet: BitchatPacket, from peerID: PeerID) -> Bool {
         handleHandshakeWithResult(packet, from: peerID).processed
@@ -112,8 +112,16 @@ final class BLENoisePacketHandler {
                     didEstablishAuthenticatedSession:
                         result.didEstablishAuthenticatedSession
                 )
+            } catch let managedFailure as NoiseManagedHandshakeFailure {
+                SecureLogger.error(
+                    "Failed to process handshake; manager owns recovery: \(managedFailure.underlying)"
+                )
+                return BLENoiseHandshakeHandlingResult(
+                    processed: false,
+                    didEstablishAuthenticatedSession: false
+                )
             } catch NoiseSessionError.peerIdentityMismatch {
-                // The candidate was already discarded by the session manager.
+                // The responder was already discarded by the session manager.
                 // Do not let a spoofed claimed ID trigger a fresh outbound
                 // handshake or recreate state for the attacker-selected ID.
                 SecureLogger.warning(
