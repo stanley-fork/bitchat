@@ -13,6 +13,58 @@ import BitFoundation
 
 struct BLEServiceCoreTests {
 
+    /// Records ping completions (delivered on the main actor) so the
+    /// injected-clock test can assert from its own thread.
+    private final class MeshPingResultCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [MeshPingResult?] = []
+        var results: [MeshPingResult?] { lock.withLock { recorded } }
+        func record(_ result: MeshPingResult?) {
+            lock.withLock { recorded.append(result) }
+        }
+    }
+
+    /// The ping deadline asserted on an injected clock: the real 10s
+    /// product constant, no wall-clock in the loop. This is the pattern
+    /// for every engine deadline — the timeout must not fire early, must
+    /// fire exactly once at the deadline, and must stay consumed after.
+    @Test
+    func meshPingTimesOutOnTheInjectedClockExactlyOnce() async throws {
+        let scheduler = BLEEngineManualScheduler()
+        let ble = makeService(engineScheduler: scheduler)
+        let peer = PeerID(str: "aabbccdd00112233")
+        ble._test_seedConnectedPeer(peer, nickname: "Alice")
+
+        let collector = MeshPingResultCollector()
+        ble.sendMeshPing(to: peer) { result in
+            collector.record(result)
+        }
+        // The probe registers and its deadline schedules on the engine;
+        // fence that submission before touching the clock.
+        await ble._test_drainNoiseMessagePipeline()
+        #expect(scheduler.pendingCount == 1)
+
+        // A hair before the deadline nothing may fire.
+        scheduler.advance(by: TransportConfig.meshPingTimeoutSeconds - 0.01)
+        await ble._test_drainNoiseMessagePipeline()
+        #expect(collector.results.isEmpty)
+
+        // Crossing the deadline expires the probe: nil, exactly once, on
+        // the main actor.
+        scheduler.advance(by: 0.02)
+        let completed = await TestHelpers.waitUntil(
+            { collector.results.count == 1 },
+            timeout: TestConstants.longTimeout
+        )
+        #expect(completed)
+        #expect(collector.results == [nil])
+
+        // The deadline is consumed — more time cannot re-fire it.
+        scheduler.advance(by: TransportConfig.meshPingTimeoutSeconds * 2)
+        await ble._test_drainNoiseMessagePipeline()
+        #expect(collector.results.count == 1)
+    }
+
     @Test
     func duplicatePacket_isDeduped() async throws {
         let ble = makeService()
@@ -908,6 +960,17 @@ struct BLEServiceCoreTests {
         // old generation the remote may no longer be able to read.
         #expect(outbound.count(ofType: .noiseEncrypted) == 0)
 
+        // The capability-proof watchdog armed at the original authentication
+        // is still live and can genuinely reach its real 5s deadline here on
+        // a stalled CI runner. Fire it deterministically: its drain must
+        // respect the deferred-until-convergence state instead of encrypting
+        // the parked queues under the restored keys (the exact silent loss
+        // the defer path exists to prevent). The retry below then still
+        // finds the queues parked.
+        ble._test_forcePrivateMediaProofTimeout(for: alicePeerID)
+        await ble._test_drainNoiseMessagePipeline()
+        #expect(outbound.count(ofType: .noiseEncrypted) == 0)
+
         // Release the mandatory convergence retry: it retires the restored
         // session and starts a fresh XX exchange with the live peer.
         recoveryGate.release()
@@ -1499,7 +1562,8 @@ private final class PanicIngressObserver: @unchecked Sendable {
 
 private func makeService(
     noiseResponderHandshakeTimeout: TimeInterval =
-        NoiseSecurityConstants.ordinaryResponderHandshakeTimeout
+        NoiseSecurityConstants.ordinaryResponderHandshakeTimeout,
+    engineScheduler: BLEEngineScheduling = BLEEngineDispatchScheduler()
 ) -> BLEService {
     let keychain = MockKeychain()
     let identityManager = MockIdentityManager(keychain)
@@ -1509,7 +1573,8 @@ private func makeService(
         idBridge: idBridge,
         identityManager: identityManager,
         initializeBluetoothManagers: false,
-        noiseResponderHandshakeTimeout: noiseResponderHandshakeTimeout
+        noiseResponderHandshakeTimeout: noiseResponderHandshakeTimeout,
+        engineScheduler: engineScheduler
     )
 }
 
