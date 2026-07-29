@@ -206,20 +206,35 @@ final class BLEService: NSObject {
     // 1. Consolidated BLE link tracking for both central and peripheral roles.
     private var linkStateStore = BLELinkStateStore()
 
-    // A peer ID can retain an established Noise session after its physical
-    // link disappears. Courier handover therefore needs the stronger fact
-    // that the session was established *on this current ingress link*, not
-    // merely that some session exists for the claimed ID. bleQueue-owned.
-    private var noiseAuthenticatedLinkOwners: [BLEIngressLinkID: PeerID] = [:]
-    private var noiseReconnectPolicy = BLENoiseReconnectPolicy()
-
-    // Rotation-rebind cooldown per link UUID (bleQueue-owned, like the link
-    // store): entries older than the cooldown are pruned on insert.
-    private var lastLinkRebindAt: [String: Date] = [:]
-
-    // Redundant-link retirement cooldown per peer (bleQueue-owned): bounds
-    // how often a replayed announce could flip which duplicate link survives.
-    private var lastRedundantLinkRetirementAt: [PeerID: Date] = [:]
+    // The engine-owned identity domain: per-link Noise authentication +
+    // rebind containment (courier handover needs the stronger fact that a
+    // session was established *on this current ingress link*, not merely
+    // that some session exists for the claimed ID), and the identity↔link
+    // bindings that qualify every attribution decision.
+    //
+    // Owned by the engine queue since the option-B flip: bleQueue hands
+    // decoded packets up as (packet, linkID) and the engine attributes
+    // them; bleQueue never touches these. A binding can therefore briefly
+    // outlive its physical link (the delegate's retirement hop is async) —
+    // every query that needs liveness joins against the physical store,
+    // which the engine may sync-read via `readLinkState`.
+    private var _linkAuth = BLELinkAuthState()
+    private var _linkBindings = BLELinkBindings()
+    private var linkAuth: BLELinkAuthState {
+        get { assertLinkIdentityEngineOwned(); return _linkAuth }
+        set { assertLinkIdentityEngineOwned(); _linkAuth = newValue }
+    }
+    private var linkBindings: BLELinkBindings {
+        get { assertLinkIdentityEngineOwned(); return _linkBindings }
+        set { assertLinkIdentityEngineOwned(); _linkBindings = newValue }
+    }
+    /// Debug-traps any identity-domain access off the engine queue — the
+    /// mechanical form of the option-B ownership contract.
+    private func assertLinkIdentityEngineOwned() {
+        #if DEBUG
+        dispatchPrecondition(condition: .onQueue(messageQueue))
+        #endif
+    }
 
     // BCH-01-004: Rate-limiting for subscription-triggered announces.
     private var subscriptionAnnounceLimiter = BLESubscriptionAnnounceLimiter()
@@ -285,9 +300,6 @@ final class BLEService: NSObject {
     /// May block in tests to hold the serial message queue immediately before
     /// the deferred private-media admission check.
     var _test_beforePrivateMediaDeferredSend: ((String) -> Void)?
-    /// May block announce handling after verified-link rebind work is queued.
-    /// Tests use this boundary to prove rebind and reconnect are serialized.
-    var _test_afterVerifiedDirectRebindEnqueued: (() -> Void)?
     /// May block the convergence-recovery callback on its global-queue thread
     /// before it enqueues onto `messageQueue`. Tests use this boundary to
     /// force the quarantine-restore handler to win the dispatch race.
@@ -373,12 +385,14 @@ final class BLEService: NSObject {
     /// Executes inline when already on the engine queue; otherwise blocks
     /// until the engine drains the work ahead of it.
     ///
-    /// Sync-edge order (deadlock freedom): main and test threads may
-    /// sync-wait on the engine; the engine sync-waits on bleQueue
-    /// (`readLinkState`) and on the crypto/identity services' internal
-    /// queues. None of those may ever sync-wait back on the engine —
-    /// bleQueue callers hop with `messageQueue.async` instead, and debug
-    /// builds trap any violation here.
+    /// Sync-edge order (deadlock freedom): main, test threads, and the
+    /// gossip manager's mesh.sync queue may sync-wait on the engine; the
+    /// engine sync-waits on bleQueue (`readLinkState`) and on the
+    /// crypto/identity services' internal queues. None of those may ever
+    /// sync-wait back on the engine — bleQueue callers hop with
+    /// `messageQueue.async` instead, and debug builds trap any violation
+    /// here. (The engine only ever async-dispatches into mesh.sync; its
+    /// queue.sync helpers are DEBUG test entry points on test threads.)
     private func onEngine<T>(_ body: () -> T) -> T {
         #if DEBUG
         dispatchPrecondition(condition: .notOnQueue(bleQueue))
@@ -764,6 +778,10 @@ final class BLEService: NSObject {
             ingressLinks.removeAll()
             recentTrafficTracker.removeAll()
             scheduledRelays.cancelAll()
+            // Proofs and revalidation epochs die with the identity; the
+            // rebind/retirement cooldowns deliberately survive (see
+            // BLELinkAuthState.removeAll).
+            linkAuth.removeAll()
             // These callbacks belong to pre-panic transfer state. Invoking
             // them would let queued UI work recreate or resend wiped media.
             privateMediaSessions.panicReset()
@@ -781,8 +799,6 @@ final class BLEService: NSObject {
             pendingPeripheralWrites.removeAll()
             pendingNotifications.removeAll()
             pendingWriteBuffers.removeAll()
-            noiseAuthenticatedLinkOwners.removeAll()
-            noiseReconnectPolicy.removeAll()
             radio.reset()
         }
         disconnectNotifyDebouncer.removeAll()
@@ -1058,6 +1074,10 @@ final class BLEService: NSObject {
             // Also clear pending message queues to avoid stale state across sessions
             pendingNoiseSessionQueues.removeAll()
             pendingDirectedRelays.removeAll()
+            // Identity domain is engine-owned: bindings and link proofs
+            // clear here, physical link state clears on bleQueue below.
+            linkBindings.removeAll()
+            linkAuth.removeAll()
             return (transfers: entries, pingTimeouts: pingTimeouts)
         }
 
@@ -1073,8 +1093,6 @@ final class BLEService: NSObject {
         // Clear peripheral references (synchronized access to avoid races with BLE callbacks)
         bleQueue.sync {
             linkStateStore.clearAll()
-            noiseAuthenticatedLinkOwners.removeAll()
-            noiseReconnectPolicy.removeAll()
             radio.reset()
             subscriptionAnnounceLimiter.removeAll()
         }
@@ -2192,9 +2210,12 @@ final class BLEService: NSObject {
         }
     }
 
-    /// Serializes the final authenticated-link check with CoreBluetooth's
-    /// notification admission on `bleQueue`, closing the rebind/disconnect
-    /// race between fanout planning and the actual handoff.
+    /// The authenticated-link eligibility check runs here on the engine —
+    /// the queue that owns bindings and rebinds — so fanout planning and
+    /// the final check are serialized against identity changes by
+    /// construction. Only the physical admission (updateValue and the
+    /// backpressure queue) hops to `bleQueue`; a central that physically
+    /// departs in between is a harmless no-op delivery.
     private func notifyOrEnqueueIfAccepted(
         data: Data,
         centrals: [CBCentral],
@@ -2202,18 +2223,19 @@ final class BLEService: NSObject {
         context: String,
         requiredAuthenticatedPeer: PeerID?
     ) -> Bool {
-        let accept = { [self] in
-            let eligible: [CBCentral]
-            if let peerID = requiredAuthenticatedPeer {
-                eligible = centrals.filter { central in
-                    let link = BLEIngressLinkID.central(central.identifier.uuidString)
-                    return noiseAuthenticatedLinkOwners[link] == peerID
-                        && linkStateStore.peerID(forCentralUUID: central.identifier.uuidString) == peerID
-                }
-            } else {
-                eligible = centrals
+        let eligible: [CBCentral]
+        if let peerID = requiredAuthenticatedPeer {
+            eligible = centrals.filter { central in
+                let link = BLEIngressLinkID.central(central.identifier.uuidString)
+                return linkAuth.isAuthenticated(link, for: peerID)
+                    && linkBindings.peer(forCentralUUID: central.identifier.uuidString) == peerID
             }
-            guard !eligible.isEmpty else { return false }
+        } else {
+            eligible = centrals
+        }
+        guard !eligible.isEmpty else { return false }
+
+        let accept = { [self] in
             if peripheralManager?.updateValue(data, for: characteristic, onSubscribedCentrals: eligible) == true {
                 return true
             }
@@ -2223,10 +2245,7 @@ final class BLEService: NSObject {
                 context: context
             )
         }
-
-        if DispatchQueue.getSpecific(key: bleQueueKey) != nil {
-            return accept()
-        }
+        // queue-contract-ok: engine → bleQueue is the sanctioned sync direction.
         return bleQueue.sync(execute: accept)
     }
 
@@ -2265,8 +2284,9 @@ final class BLEService: NSObject {
         let subscribedCentrals = characteristic == nil ? [] : centralSnapshot.centrals
         let connectedPeripheralIDs = connectedStates.map { $0.peripheral.identifier.uuidString }
         let centralIDs = subscribedCentrals.map { $0.identifier.uuidString }
-        let peripheralPeerBindings = Dictionary(uniqueKeysWithValues: connectedStates.compactMap { state in
-            state.peerID.map { (state.peripheral.identifier.uuidString, $0) }
+        let peripheralPeerBindings = Dictionary(uniqueKeysWithValues: connectedStates.compactMap { state -> (String, PeerID)? in
+            let uuid = state.peripheral.identifier.uuidString
+            return linkBindings.peer(forPeripheralID: uuid).map { (uuid, $0) }
         })
         let plan = BLEOutboundLinkPlanner.plan(
             packet: packet,
@@ -2279,10 +2299,7 @@ final class BLEService: NSObject {
             excludedLinks: excludedPeerLinks,
             peripheralPeerBindings: peripheralPeerBindings,
             centralPeerBindings: centralSnapshot.peerIDsByCentralUUID,
-            // Perf note: this is a third bleQueue hop per send; if send-path
-            // profiling ever flags it, fold it into snapshotPeripheralStates
-            // as a combined snapshot.
-            preferredPeripheralPerPeer: readLinkState { $0.preferredPeripheralBindings },
+            preferredPeripheralPerPeer: linkBindings.preferredPeripheralBindings,
             directAnnounceTTL: messageTTL,
             directedOnlyPeer: directedOnlyPeer,
             requireDirectPeerLink: requireDirectPeerLink || requireNoiseAuthenticatedPeerLink
@@ -2702,15 +2719,7 @@ final class BLEService: NSObject {
         // A valid departure retires transport state too; otherwise
         // canDeliverSecurely could remain true for a peer we just removed.
         clearNoiseSession(for: peerID)
-        readLinkState { _ in
-            let departedLinks = noiseAuthenticatedLinkOwners.compactMap { link, owner in
-                owner == peerID ? link : nil
-            }
-            for link in departedLinks {
-                noiseAuthenticatedLinkOwners.removeValue(forKey: link)
-                noiseReconnectPolicy.endLinkEpoch(link)
-            }
-        }
+        _ = linkAuth.retireLinks(ownedBy: peerID)
         // Remove the peer when they leave
         peerRegistry.mutate { _ = $0.remove(peerID) }
         // Remove any stored announcement for sync purposes
@@ -2915,12 +2924,22 @@ final class BLEService: NSObject {
 
 // MARK: - GossipSyncManager Delegate
 extension BLEService: GossipSyncManager.Delegate {
+    // Gossip calls arrive on the manager's own serial queue; sends read
+    // the engine-owned bindings, so they enter an engine slot. The sync
+    // hop is safe: mesh.sync sits above the engine in the sync order —
+    // production engine code only ever queue.async's into the manager
+    // (the queue.sync helpers are DEBUG test entry points that run on
+    // test threads), so no reverse edge exists.
     func sendPacket(_ packet: BitchatPacket) {
-        broadcastPacket(packet)
+        onEngine {
+            broadcastPacket(packet)
+        }
     }
 
     func sendPacket(to peerID: PeerID, packet: BitchatPacket) {
-        sendPacketDirected(packet, to: peerID)
+        onEngine {
+            sendPacketDirected(packet, to: peerID)
+        }
     }
 
     func signPacketForBroadcast(_ packet: BitchatPacket) -> BitchatPacket {
@@ -2962,14 +2981,12 @@ extension BLEService: CBCentralManagerDelegate {
             let existing = linkStateStore.state(forPeripheralID: identifier)
             let assembler = existing?.assembler ?? NotificationStreamAssembler()
             let characteristic = existing?.characteristic
-            let peerID = existing?.peerID
             let wasConnecting = existing?.isConnecting ?? false
             let wasConnected = existing?.isConnected ?? false
 
             let restoredState = BLEPeripheralLinkState(
                 peripheral: peripheral,
                 characteristic: characteristic,
-                peerID: peerID,
                 isConnecting: wasConnecting || peripheral.state == .connecting,
                 isConnected: wasConnected || peripheral.state == .connected,
                 lastConnectionAttempt: existing?.lastConnectionAttempt,
@@ -3025,28 +3042,32 @@ extension BLEService: CBCentralManagerDelegate {
             // not issue stop/cancel commands now; they are rejected as API
             // misuse. Retire our link state locally instead.
             SecureLogger.info("📴 Bluetooth powered off - cleaning up central state", category: .session)
-            let peripheralStates = linkStateStore.peripheralStates
-            let peerIDs: [PeerID] = peripheralStates.compactMap(\.peerID)
-            for state in peripheralStates {
-                let peripheralID = state.peripheral.identifier.uuidString
+            let peripheralIDs = linkStateStore.peripheralStates.map { $0.peripheral.identifier.uuidString }
+            for peripheralID in peripheralIDs {
                 pendingPeripheralWrites.discardAll(for: peripheralID)
-                noiseAuthenticatedLinkOwners.removeValue(
-                    forKey: .peripheral(peripheralID)
-                )
-                noiseReconnectPolicy.endLinkEpoch(.peripheral(peripheralID))
             }
-            _ = linkStateStore.clearPeripherals()
-            // Notify UI of disconnections
-            for peerID in peerIDs {
-                notifyUI { [weak self] in
-                    self?.notifyPeerDisconnectedDebounced(peerID)
+            linkStateStore.clearPeripherals()
+            messageQueue.async { [weak self] in
+                guard let self else { return }
+                for peripheralID in peripheralIDs {
+                    self.linkAuth.retireLink(.peripheral(peripheralID))
+                }
+                let peerIDs = self.linkBindings.clearPeripherals()
+                // Notify UI of disconnections
+                for peerID in peerIDs {
+                    self.notifyUI { [weak self] in
+                        self?.notifyPeerDisconnectedDebounced(peerID)
+                    }
                 }
             }
 
         case .unauthorized:
             // User denied Bluetooth permission
             SecureLogger.warning("🚫 Bluetooth unauthorized - user denied permission", category: .session)
-            _ = linkStateStore.clearPeripherals()
+            linkStateStore.clearPeripherals()
+            messageQueue.async { [weak self] in
+                _ = self?.linkBindings.clearPeripherals()
+            }
 
         case .unsupported:
             // Device doesn't support BLE
@@ -3099,11 +3120,8 @@ extension BLEService: CBCentralManagerDelegate {
     
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let peripheralID = peripheral.identifier.uuidString
-        
-        // Find the peer ID if we have it
-        let peerID = linkStateStore.peerID(forPeripheralID: peripheralID)
-        
-        SecureLogger.debug("📱 Disconnect: \(peerID?.id ?? peripheralID)\(error != nil ? " (\(error!.localizedDescription))" : "")", category: .session)
+
+        SecureLogger.debug("📱 Disconnect: \(peripheralID)\(error != nil ? " (\(error!.localizedDescription))" : "")", category: .session)
 
         // If disconnect carried an error (often timeout), apply short backoff to avoid thrash
         if error != nil {
@@ -3129,24 +3147,46 @@ extension BLEService: CBCentralManagerDelegate {
         }
         #endif
 
-        // Clean up references and peer mappings
-        tearDownPeripheralLink(peripheralID)
-        // A duplicate link can drop while the peer stays live on another
-        // (the dual-role central link, or a second bound link after a
-        // restore): peer-disconnect bookkeeping only runs once the peer's
-        // last live link is gone. removePeripheral just repaired the reverse
-        // map onto a connected survivor, so directLinkState is accurate
-        // here. The scan restart and connect-slot refill below stay
-        // unguarded — they respond to the physical drop regardless of
-        // remaining logical links.
-        let remainingLinks = peerID.map { linkStateStore.directLinkState(for: $0) }
-        let peerStillLinked = (remainingLinks?.hasPeripheral ?? false) || (remainingLinks?.hasCentral ?? false)
-        if let peerID, !peerStillLinked {
-            // Do not remove peer; mark as not connected but retain for reachability
-            peerRegistry.mutate { $0.markDisconnected(peerID) }
-            refreshLocalTopology()
-        }
+        // Physical teardown now; identity retirement and peer-disconnect
+        // bookkeeping on the engine, which owns the bindings. The scan
+        // restart and connect-slot refill below stay on bleQueue — they
+        // respond to the physical drop regardless of remaining logical
+        // links.
+        discardPeripheralLinkPhysical(peripheralID)
+        messageQueue.async { [weak self] in
+            guard let self else { return }
+            // A duplicate link can drop while the peer stays live on
+            // another (the dual-role central link, or a second bound link
+            // after a restore): peer-disconnect bookkeeping only runs once
+            // the peer's last live link is gone. The retirement just
+            // repaired the reverse map onto a connected survivor, so
+            // directLinkState is accurate here.
+            let peerID = self.retirePeripheralLinkIdentity(peripheralID)
+            if let peerID {
+                SecureLogger.debug("📱 Disconnected link was bound to \(peerID.id.prefix(8))…", category: .session)
+            }
+            let remainingLinks = peerID.map { self.directLinkState(for: $0) }
+            let peerStillLinked = (remainingLinks?.hasPeripheral ?? false) || (remainingLinks?.hasCentral ?? false)
+            if let peerID, !peerStillLinked {
+                // Do not remove peer; mark as not connected but retain for reachability
+                self.peerRegistry.mutate { $0.markDisconnected(peerID) }
+                self.refreshLocalTopology()
+            }
 
+            // Notify delegate about disconnection on main thread (direct link dropped)
+            self.notifyUI { [weak self] in
+                guard let self = self else { return }
+
+                // Get current peer list (after removal)
+                let currentPeerIDs = self.peerRegistry.peerIDs
+
+                if let peerID, !peerStillLinked {
+                    self.notifyPeerDisconnectedDebounced(peerID)
+                }
+                self.requestPeerDataPublish()
+                self.deliverTransportEvent(.peerListUpdated(currentPeerIDs))
+            }
+        }
 
         // Restart scanning with allow duplicates for faster rediscovery
         if centralManager?.state == .poweredOn {
@@ -3158,27 +3198,16 @@ extension BLEService: CBCentralManagerDelegate {
         }
         // Attempt to fill freed slot from queue
         bleQueue.async { [weak self] in self?.radio.tryConnectFromQueue() }
-
-        // Notify delegate about disconnection on main thread (direct link dropped)
-        notifyUI { [weak self] in
-            guard let self = self else { return }
-
-            // Get current peer list (after removal)
-            let currentPeerIDs = self.peerRegistry.peerIDs
-
-            if let peerID, !peerStillLinked {
-                self.notifyPeerDisconnectedDebounced(peerID)
-            }
-            self.requestPeerDataPublish()
-            self.deliverTransportEvent(.peerListUpdated(currentPeerIDs))
-        }
     }
     
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         let peripheralID = peripheral.identifier.uuidString
-        
-        // Clean up the references
-        tearDownPeripheralLink(peripheralID)
+
+        // Clean up the references: physical now, identity on the engine.
+        discardPeripheralLinkPhysical(peripheralID)
+        messageQueue.async { [weak self] in
+            self?.retirePeripheralLinkIdentity(peripheralID)
+        }
 
         SecureLogger.error("❌ Failed to connect to peripheral: \(peripheral.name ?? "Unknown") [\(peripheralID)] - Error: \(error?.localizedDescription ?? "Unknown")", category: .session)
         radio.recordConnectionFailure(peripheralID: peripheralID)
@@ -3206,18 +3235,78 @@ extension BLEService: BLERadioControllerDelegate {
     }
 
     func radioTearDownPeripheralLink(_ peripheralID: String) {
-        tearDownPeripheralLink(peripheralID)
+        // bleQueue (the controller's queue): physical discard now, identity
+        // retirement on the engine.
+        discardPeripheralLinkPhysical(peripheralID)
+        messageQueue.async { [weak self] in
+            self?.retirePeripheralLinkIdentity(peripheralID)
+        }
     }
 
-    /// Retires one peripheral link's transport bookkeeping: its write
-    /// backpressure, its Noise link proof and reconnect epoch, and the
-    /// link-state entry (which repairs the peer's reverse mapping onto a
-    /// surviving duplicate link). bleQueue-confined.
-    func tearDownPeripheralLink(_ peripheralID: String) {
+    /// bleQueue half of a peripheral-link teardown: the link's write
+    /// backpressure and its physical link-state entry. Identity retirement
+    /// (proof, epoch, binding repair) rides a separate engine hop —
+    /// `retirePeripheralLinkIdentity`. bleQueue-confined.
+    func discardPeripheralLinkPhysical(_ peripheralID: String) {
         pendingPeripheralWrites.discardAll(for: peripheralID)
-        noiseAuthenticatedLinkOwners.removeValue(forKey: .peripheral(peripheralID))
-        noiseReconnectPolicy.endLinkEpoch(.peripheral(peripheralID))
-        _ = linkStateStore.removePeripheral(peripheralID)
+        linkStateStore.removePeripheral(peripheralID)
+    }
+
+    /// Engine half of a peripheral-link teardown: retires the link's Noise
+    /// proof and revalidation epoch, and its binding — repairing the peer's
+    /// preferred link onto a connected survivor, preferring a writable one
+    /// (a link mid-service-rediscovery would strand directed sends until
+    /// its characteristic comes back). Returns the peer that owned the
+    /// binding. Engine-confined.
+    @discardableResult
+    func retirePeripheralLinkIdentity(_ peripheralID: String) -> PeerID? {
+        linkAuth.retireLink(.peripheral(peripheralID))
+        return linkBindings.peripheralRemoved(peripheralID) { remaining in
+            let alive = readLinkState { store in
+                remaining.compactMap { uuid -> (uuid: String, writable: Bool)? in
+                    guard let state = store.state(forPeripheralID: uuid),
+                          state.isConnected else { return nil }
+                    return (uuid, state.characteristic != nil)
+                }
+            }
+            return (alive.first(where: \.writable) ?? alive.first)?.uuid
+        }
+    }
+
+    /// Binds only live physical links, preserving the store-era guard that
+    /// a binding can never precede its link (a lost race against a
+    /// concurrent physical removal is healed by that removal's queued
+    /// identity retirement). Engine-confined.
+    func bindPeripheralLink(_ peripheralUUID: String, to peerID: PeerID) {
+        guard readLinkState({ $0.state(forPeripheralID: peripheralUUID) }) != nil else { return }
+        linkBindings.bindPeripheral(peripheralUUID, to: peerID)
+    }
+
+    /// Whether the peer holds a live direct link in either role: bindings
+    /// (engine) joined against physical liveness (readLinkState).
+    /// Engine-confined.
+    func directLinkState(for peerID: PeerID) -> BLEDirectLinkState {
+        let hasPeripheral = linkBindings.preferredPeripheralUUID(for: peerID)
+            .flatMap { uuid in readLinkState { $0.state(forPeripheralID: uuid)?.isConnected } } ?? false
+        return BLEDirectLinkState(
+            hasPeripheral: hasPeripheral,
+            hasCentral: linkBindings.hasCentral(boundTo: peerID)
+        )
+    }
+
+    /// The peer's preferred peripheral link state, when physically present.
+    /// Engine-confined.
+    func directPeripheralState(for peerID: PeerID) -> BLEPeripheralLinkState? {
+        linkBindings.preferredPeripheralUUID(for: peerID)
+            .flatMap { uuid in readLinkState { $0.state(forPeripheralID: uuid) } }
+    }
+
+    /// Subscribed centrals with their bindings, one view. Engine-confined.
+    func subscribedCentralSnapshot() -> BLESubscribedCentralSnapshot {
+        BLESubscribedCentralSnapshot(
+            centrals: readLinkState(\.subscribedCentrals),
+            peerIDsByCentralUUID: linkBindings.centralPeersByUUID
+        )
     }
 }
 
@@ -3343,23 +3432,23 @@ extension BLEService {
     }
 
     func _test_bindCentral(_ centralUUID: String, to peerID: PeerID) {
-        bleQueue.sync { linkStateStore.bindCentral(centralUUID, to: peerID) }
+        onEngine { linkBindings.bindCentral(centralUUID, to: peerID) }
     }
 
     func _test_centralBinding(_ centralUUID: String) -> PeerID? {
-        bleQueue.sync { linkStateStore.peerID(forCentralUUID: centralUUID) }
+        onEngine { linkBindings.peer(forCentralUUID: centralUUID) }
     }
 
     func _test_markNoiseAuthenticatedCentral(_ centralUUID: String, to peerID: PeerID) {
-        bleQueue.sync {
-            guard linkStateStore.peerID(forCentralUUID: centralUUID) == peerID else { return }
-            noiseAuthenticatedLinkOwners[.central(centralUUID)] = peerID
+        onEngine {
+            guard linkBindings.peer(forCentralUUID: centralUUID) == peerID else { return }
+            linkAuth.markAuthenticated(.central(centralUUID), owner: peerID)
         }
     }
 
     func _test_isNoiseAuthenticatedCentral(_ centralUUID: String, for peerID: PeerID) -> Bool {
-        bleQueue.sync {
-            noiseAuthenticatedLinkOwners[.central(centralUUID)] == peerID
+        onEngine {
+            linkAuth.isAuthenticated(.central(centralUUID), for: peerID)
         }
     }
 
@@ -3650,7 +3739,6 @@ extension BLEService: CBPeripheralDelegate {
         var state = linkStateStore.state(forPeripheralID: peripheralUUID) ?? BLEPeripheralLinkState(
             peripheral: peripheral,
             characteristic: nil,
-            peerID: nil,
             isConnecting: false,
             isConnected: peripheral.state == .connected,
             lastConnectionAttempt: nil,
@@ -3670,72 +3758,24 @@ extension BLEService: CBPeripheralDelegate {
             SecureLogger.error("❌ Invalid BLE frame length; reset notification stream", category: .session)
         }
         
-        // Codex review identified TOCTOU in this patch.
-        // Enforce per-link sender binding immediately within the same notification batch.
-        // NOTE: `processNotificationPacket` may bind the stored peer ID when an announce
-        // is processed, but `state` above is a snapshot. Track a local binding that we update as soon as
-        // we see a binding-eligible announce so subsequent frames can't spoof a different sender.
-        var boundPeerID: PeerID? = state.peerID
-
+        // Attribution — spoof rejection, announce binding, ingress
+        // recording — is engine work now (the engine owns the bindings).
+        // Frames hop up in decode order; the engine's serial slot ordering
+        // gives the same same-batch spoof protection the old bleQueue-side
+        // batch-local binding enforced: an announce that binds this link is
+        // attributed before every frame that rode behind it.
         for frame in result.frames {
             guard let packet = BinaryProtocol.decode(frame) else {
                 let prefix = frame.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
                 SecureLogger.error("❌ Failed to decode assembled notification frame (len=\(frame.count), prefix=\(prefix))", category: .session)
                 continue
             }
-
-            let claimedSenderID = PeerID(hexData: packet.senderID)
-            let context = acceptedIngressContext(
-                for: packet,
-                claimedSenderID: claimedSenderID,
-                boundPeerID: boundPeerID,
+            ingestDecodedPacket(
+                packet,
+                link: .peripheral(peripheralUUID),
                 linkDescription: "Peripheral \(peripheralUUID.prefix(8))…"
             )
-
-            guard let context else { continue }
-
-            // If this is a direct-link announce, bind immediately for the remainder of this batch.
-            if boundPeerID == nil,
-               packet.type == MessageType.announce.rawValue,
-               packet.ttl == messageTTL {
-                boundPeerID = claimedSenderID
-                state.peerID = claimedSenderID
-                linkStateStore.bindPeripheral(peripheralUUID, to: claimedSenderID)
-            }
-
-            if !recordIngressIfNew(packet, link: .peripheral(peripheralUUID), peerID: context.receivedFromPeerID) {
-                continue
-            }
-            processNotificationPacket(
-                packet,
-                from: peripheral,
-                peripheralUUID: peripheralUUID,
-                receivedFrom: context.receivedFromPeerID
-            )
         }
-    }
-
-    private func processNotificationPacket(_ packet: BitchatPacket, from _: CBPeripheral, peripheralUUID: String, receivedFrom peerID: PeerID) {
-        let senderID = PeerID(hexData: packet.senderID)
-
-        if packet.type != MessageType.announce.rawValue {
-            SecureLogger.debug("📦 Decoded notification packet type: \(packet.type) from sender: \(senderID.id.prefix(8))…", category: .session)
-        }
-
-        if packet.type == MessageType.announce.rawValue,
-           packet.ttl == messageTTL {
-            // Only bind an unbound link here: this runs before signature
-            // verification, so a bound link must not be re-bound by a raw
-            // announce (spoofable). Rotation rebinds happen after the announce
-            // verifies (rebindLinkAfterVerifiedDirectAnnounce).
-            let boundPeerID = linkStateStore.peerID(forPeripheralID: peripheralUUID)
-            if boundPeerID == nil || boundPeerID == senderID {
-                linkStateStore.bindPeripheral(peripheralUUID, to: senderID)
-                refreshLocalTopology()
-            }
-        }
-
-        handleReceivedPacket(packet, from: peerID)
     }
     
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -3831,32 +3871,35 @@ extension BLEService: CBPeripheralManagerDelegate {
             // Bluetooth was turned off - clean up peripheral state
             SecureLogger.info("📴 Bluetooth powered off - cleaning up peripheral state", category: .session)
             // Clear subscribed centrals (they are now invalid)
-            let centralSnapshot = linkStateStore.subscribedCentralSnapshot
-            for central in centralSnapshot.centrals {
-                let centralID = central.identifier.uuidString
-                noiseAuthenticatedLinkOwners.removeValue(
-                    forKey: .central(centralID)
-                )
-                noiseReconnectPolicy.endLinkEpoch(.central(centralID))
-            }
+            let centralIDs = linkStateStore.subscribedCentrals.map { $0.identifier.uuidString }
             pendingNotifications.removeAll()
             pendingWriteBuffers.removeAll()
-            let centralPeerIDs = linkStateStore.clearCentrals()
+            linkStateStore.clearCentrals()
             subscriptionAnnounceLimiter.removeAll()
             characteristic = nil
-            // Notify UI of disconnections
-            for peerID in centralPeerIDs {
-                notifyUI { [weak self] in
-                    self?.notifyPeerDisconnectedDebounced(peerID)
+            messageQueue.async { [weak self] in
+                guard let self else { return }
+                for centralID in centralIDs {
+                    self.linkAuth.retireLink(.central(centralID))
+                }
+                let centralPeerIDs = self.linkBindings.clearCentrals()
+                // Notify UI of disconnections
+                for peerID in centralPeerIDs {
+                    self.notifyUI { [weak self] in
+                        self?.notifyPeerDisconnectedDebounced(peerID)
+                    }
                 }
             }
 
         case .unauthorized:
             // User denied Bluetooth permission
             SecureLogger.warning("🚫 Bluetooth unauthorized for peripheral role", category: .session)
-            _ = linkStateStore.clearCentrals()
+            linkStateStore.clearCentrals()
             subscriptionAnnounceLimiter.removeAll()
             characteristic = nil
+            messageQueue.async { [weak self] in
+                _ = self?.linkBindings.clearCentrals()
+            }
 
         case .unsupported:
             // Device doesn't support BLE peripheral role
@@ -3962,38 +4005,41 @@ extension BLEService: CBPeripheralManagerDelegate {
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         let centralID = central.identifier.uuidString
         SecureLogger.debug("📤 Central unsubscribed: \(centralID.prefix(8))…", category: .session)
+        // bleQueue: physical retirement now.
         pendingNotifications.removeTarget { $0.identifier.uuidString == centralID }
-        noiseAuthenticatedLinkOwners.removeValue(forKey: .central(centralID))
-        noiseReconnectPolicy.endLinkEpoch(.central(centralID))
-        let removedPeerID = linkStateStore.removeSubscribedCentral(central)
-        
+        linkStateStore.removeSubscribedCentral(central)
+
         // Ensure we're still advertising for other devices to find us
         if !isPanicSuspended, peripheral.isAdvertising == false {
             SecureLogger.debug("📡 Restarting advertising after central unsubscribed", category: .session)
             peripheral.startAdvertising(BLERadioController.advertisementData())
         }
-        
-        // Find and disconnect the peer associated with this central
-        if let peerID = removedPeerID {
+
+        // Identity retirement and peer-disconnect bookkeeping on the
+        // engine, which owns the bindings.
+        messageQueue.async { [weak self] in
+            guard let self else { return }
+            self.linkAuth.retireLink(.central(centralID))
+            guard let peerID = self.linkBindings.centralRemoved(centralID) else { return }
             // The remote side retiring a redundant duplicate connection
             // arrives here as an unsubscribe while the peer stays live on
             // its other links; only the peer's last link disconnecting
             // counts. If every link truly dropped, the surviving-link
             // callbacks (didDisconnectPeripheral, or this one again) run
             // the bookkeeping.
-            guard linkStateStore.links(to: peerID).isEmpty else { return }
+            guard self.linkBindings.links(to: peerID).isEmpty else { return }
             // Mark peer as not connected; retain for reachability
-            peerRegistry.mutate { $0.markDisconnected(peerID) }
-            
-            refreshLocalTopology()
-            
+            self.peerRegistry.mutate { $0.markDisconnected(peerID) }
+
+            self.refreshLocalTopology()
+
             // Update UI immediately
-            notifyUI { [weak self] in
+            self.notifyUI { [weak self] in
                 guard let self = self else { return }
-                
+
                 // Get current peer list (after removal)
                 let currentPeerIDs = self.peerRegistry.peerIDs
-                
+
                 self.notifyPeerDisconnectedDebounced(peerID)
                 // Publish snapshots so UnifiedPeerService can refresh icons promptly
                 self.requestPeerDataPublish()
@@ -4120,37 +4166,16 @@ extension BLEService: CBPeripheralManagerDelegate {
     }
 
     private func processDecodedCentralWrite(_ packet: BitchatPacket, centralUUID: String, central: CBCentral) {
-        let claimedSenderID = PeerID(hexData: packet.senderID)
-        let context = acceptedIngressContext(
-            for: packet,
-            claimedSenderID: claimedSenderID,
-            boundPeerID: linkStateStore.peerID(forCentralUUID: centralUUID),
+        // bleQueue: physical bookkeeping only. A writer is a live central
+        // whether or not it subscribed; track it so directed replies and
+        // the fanout planner can reach it.
+        linkStateStore.addSubscribedCentral(central)
+        // Attribution is engine work (the engine owns the bindings).
+        ingestDecodedPacket(
+            packet,
+            link: .central(centralUUID),
             linkDescription: "Central \(centralUUID.prefix(8))…"
         )
-        guard let context else { return }
-
-        if packet.type != MessageType.announce.rawValue {
-            SecureLogger.debug("📦 Decoded (combined) packet type: \(packet.type) from sender: \(claimedSenderID.id.prefix(8))…", category: .session)
-        }
-
-        linkStateStore.addSubscribedCentral(central)
-
-        if packet.type == MessageType.announce.rawValue,
-           packet.ttl == messageTTL {
-            // Same rule as the peripheral path: raw announces only bind
-            // unbound links; rotation rebinds require a verified announce.
-            let boundPeerID = linkStateStore.peerID(forCentralUUID: centralUUID)
-            if boundPeerID == nil || boundPeerID == claimedSenderID {
-                linkStateStore.bindCentral(centralUUID, to: claimedSenderID)
-                refreshLocalTopology()
-            }
-        }
-
-        guard recordIngressIfNew(packet, link: .central(centralUUID), peerID: context.receivedFromPeerID) else {
-            return
-        }
-
-        handleReceivedPacket(packet, from: context.receivedFromPeerID)
     }
 }
 
@@ -4681,41 +4706,32 @@ extension BLEService {
         return plan.shouldSuppressFloodRelay
     }
 
-    /// Safely fetch the current direct-link state for a peer using the BLE queue.
+    /// The current direct-link state for a peer. Engine-confined (bindings
+    /// joined against physical liveness inside directLinkState).
     private func linkState(for peerID: PeerID) -> (hasPeripheral: Bool, hasCentral: Bool) {
-        let state = readLinkState { $0.directLinkState(for: peerID) }
+        let state = directLinkState(for: peerID)
         return (state.hasPeripheral, state.hasCentral)
     }
 
     private func links(to peerID: PeerID?) -> Set<BLEIngressLinkID> {
-        readLinkState { $0.links(to: peerID) }
+        linkBindings.links(to: peerID)
     }
 
-    private func boundPeerID(for link: BLEIngressLinkID, in store: BLELinkStateStore) -> PeerID? {
-        switch link {
-        case .peripheral(let peripheralUUID):
-            store.peerID(forPeripheralID: peripheralUUID)
-        case .central(let centralUUID):
-            store.peerID(forCentralUUID: centralUUID)
-        }
-    }
+
 
     /// Marks the exact physical ingress link that completed a fresh Noise
     /// handshake. An old session keyed only by peer ID is insufficient: a
     /// replayed announce can rebind an attacker's link to that ID.
+    /// Engine-confined.
     private func markNoiseAuthenticatedIngressLink(for packet: BitchatPacket, peerID: PeerID) {
         guard let link = ingressLinks.link(for: packet) else { return }
-        readLinkState { store in
-            guard boundPeerID(for: link, in: store) == peerID else { return }
-            noiseAuthenticatedLinkOwners[link] = peerID
-        }
+        guard linkBindings.boundPeer(for: link) == peerID else { return }
+        linkAuth.markAuthenticated(link, owner: peerID)
     }
 
     private func isNoiseAuthenticatedIngressLink(for packet: BitchatPacket, peerID: PeerID) -> Bool {
         guard let link = ingressLinks.link(for: packet) else { return false }
-        return readLinkState { store in
-            noiseAuthenticatedLinkOwners[link] == peerID && boundPeerID(for: link, in: store) == peerID
-        }
+        return linkAuth.isAuthenticated(link, for: peerID) && linkBindings.boundPeer(for: link) == peerID
     }
 
     private func hasCurrentNoiseAuthenticatedLink(to peerID: PeerID) -> Bool {
@@ -4723,37 +4739,36 @@ extension BLEService {
     }
 
     private func currentNoiseAuthenticatedLinks(to peerID: PeerID) -> Set<BLEIngressLinkID> {
-        readLinkState { store in
-            Set(noiseAuthenticatedLinkOwners.compactMap { link, owner in
-                owner == peerID && boundPeerID(for: link, in: store) == peerID ? link : nil
-            })
-        }
+        Set(linkAuth.links(ownedBy: peerID).filter { link in
+            linkBindings.boundPeer(for: link) == peerID
+        })
     }
 
     /// A peer-level session can outlive the physical link that established it.
     /// Revalidate a fresh direct link with an ordinary XX exchange, retiring
     /// cached sending keys atomically before message 1 can leave.
     ///
-    /// Takes the already-resolved ingress link: both callers run inside the
-    /// rebind's bleQueue critical section, which must never sync-wait on the
-    /// engine (the engine sync-waits on bleQueue via `readLinkState`).
+    /// Takes the already-resolved ingress link. Engine-confined: it runs
+    /// inside the rebind's engine slot, so no observer can see the new
+    /// binding while a cached peer-level sender is still considered
+    /// established.
     private func refreshNoiseSessionForVerifiedDirectLink(
         link: BLEIngressLinkID,
         peerID: PeerID
     ) {
         let hasEstablishedSession = noiseService.hasEstablishedSession(with: peerID)
         let authenticatedPeerLinks = currentNoiseAuthenticatedLinks(to: peerID)
-        let shouldRevalidate = readLinkState { store in
-            guard boundPeerID(for: link, in: store) == peerID else {
-                return false
-            }
-            return noiseReconnectPolicy.shouldRevalidate(
+        let shouldRevalidate: Bool
+        if linkBindings.boundPeer(for: link) == peerID {
+            shouldRevalidate = linkAuth.shouldRevalidate(
                 on: link,
+                for: peerID,
                 hasEstablishedSession: hasEstablishedSession,
-                isNoiseAuthenticatedLink: noiseAuthenticatedLinkOwners[link] == peerID,
                 hasAuthenticatedPeerLink: !authenticatedPeerLinks.isEmpty,
                 now: Date()
             )
+        } else {
+            shouldRevalidate = false
         }
         guard shouldRevalidate else { return }
 
@@ -5295,11 +5310,13 @@ extension BLEService {
     /// replay-rebound link, or process-local spool is not delivery.
     @discardableResult
     func deliverBridgedEnvelope(_ envelope: CourierEnvelope, to peerID: PeerID) -> Bool {
-        guard hasCurrentNoiseAuthenticatedLink(to: peerID) else { return false }
         guard let payload = envelope.encode() else { return false }
         let packet = makeCourierPacket(payload, to: peerID)
         return onEngine {
-            sendPacketDirected(
+            // Engine slot: the auth-link check and the directed send see one
+            // consistent view of the identity domain.
+            guard hasCurrentNoiseAuthenticatedLink(to: peerID) else { return false }
+            return sendPacketDirected(
                 packet,
                 to: peerID,
                 requireDirectPeerLink: true,
@@ -5790,7 +5807,10 @@ extension BLEService {
         }
     }
 
-    // MARK: Link capability snapshots (thread-safe via bleQueue)
+    // MARK: Link capability snapshots
+    // Physical link state is bleQueue-owned; the engine (and main) may
+    // sync-read it here. The bindings half of a combined view comes from
+    // the engine-owned identity domain directly.
 
     private func readLinkState<T>(_ body: (BLELinkStateStore) -> T) -> T {
         if DispatchQueue.getSpecific(key: bleQueueKey) != nil {
@@ -5801,7 +5821,7 @@ extension BLEService {
     }
 
     private func snapshotDirectPeripheralState(for peerID: PeerID) -> BLEPeripheralLinkState? {
-        readLinkState { $0.directPeripheralState(for: peerID) }
+        directPeripheralState(for: peerID)
     }
 
     private func snapshotPeripheralStates() -> [BLEPeripheralLinkState] {
@@ -5809,7 +5829,7 @@ extension BLEService {
     }
 
     private func snapshotSubscribedCentrals() -> BLESubscribedCentralSnapshot {
-        readLinkState(\.subscribedCentralSnapshot)
+        subscribedCentralSnapshot()
     }
     
     // MARK: Helpers: IDs, selection, and write backpressure
@@ -5845,6 +5865,11 @@ extension BLEService {
     /// peripheral's bounded retry queue. Unlike `writeOrEnqueue`, the return
     /// value distinguishes a retained queue item from one rejected or trimmed
     /// immediately, which lets durable courier state commit truthfully.
+    ///
+    /// The authenticated-link eligibility check runs on the engine (which
+    /// owns bindings and rebinds, so it is serialized against identity
+    /// changes by construction); only the physical admission hops to
+    /// `bleQueue`.
     private func writeOrEnqueueIfAccepted(
         _ data: Data,
         to peripheral: CBPeripheral,
@@ -5852,19 +5877,19 @@ extension BLEService {
         priority: BLEOutboundWritePriority,
         requiredAuthenticatedPeer: PeerID?
     ) -> Bool {
+        let uuid = peripheral.identifier.uuidString
+        if let peerID = requiredAuthenticatedPeer {
+            let link = BLEIngressLinkID.peripheral(uuid)
+            guard linkBindings.peer(forPeripheralID: uuid) == peerID,
+                  linkAuth.isAuthenticated(link, for: peerID) else {
+                return false
+            }
+        }
         let accept = { [self] in
-            let uuid = peripheral.identifier.uuidString
             guard let state = linkStateStore.state(forPeripheralID: uuid),
                   state.isConnected,
                   state.characteristic?.uuid == characteristic.uuid else {
                 return false
-            }
-            if let peerID = requiredAuthenticatedPeer {
-                let link = BLEIngressLinkID.peripheral(uuid)
-                guard state.peerID == peerID,
-                      noiseAuthenticatedLinkOwners[link] == peerID else {
-                    return false
-                }
             }
 
             if peripheral.canSendWriteWithoutResponse {
@@ -6444,7 +6469,81 @@ extension BLEService {
     }
     
     // MARK: Packet Reception
-    
+
+    /// The bleQueue → engine handoff for every frame the link layer
+    /// decodes: the radio side hands up (packet, linkID) and all
+    /// attribution — binding lookup, spoof rejection, raw-announce
+    /// binding, ingress recording — happens on the engine, the queue that
+    /// owns the identity domain. Captures the panic lifecycle at the
+    /// handoff, like `handleReceivedPacket`.
+    ///
+    /// Per-link frame order is preserved end to end (bleQueue and the
+    /// engine are both serial), so an announce that binds a link is
+    /// attributed before the directed frames that ride behind it — the
+    /// same-batch spoof protection the old bleQueue-side attribution
+    /// enforced with a batch-local binding.
+    private func ingestDecodedPacket(
+        _ packet: BitchatPacket,
+        link: BLEIngressLinkID,
+        linkDescription: String
+    ) {
+        guard let lifecycleGeneration = capturePanicLifecycleGeneration() else { return }
+        messageQueue.async { [weak self] in
+            guard let self,
+                  self.isCurrentPanicLifecycleGeneration(lifecycleGeneration) else {
+                return
+            }
+            self.attributeAndHandlePacket(packet, link: link, linkDescription: linkDescription)
+        }
+    }
+
+    /// Engine-confined attribution: resolves the link's bound owner,
+    /// admits or rejects the claimed sender, lets a direct raw announce
+    /// bind an unbound link (rotation rebinds still require a verified
+    /// announce — `rebindLinkAfterVerifiedDirectAnnounce`), records
+    /// ingress, and hands the packet to the handler pipeline.
+    private func attributeAndHandlePacket(
+        _ packet: BitchatPacket,
+        link: BLEIngressLinkID,
+        linkDescription: String
+    ) {
+        let claimedSenderID = PeerID(hexData: packet.senderID)
+        let context = acceptedIngressContext(
+            for: packet,
+            claimedSenderID: claimedSenderID,
+            boundPeerID: linkBindings.boundPeer(for: link),
+            linkDescription: linkDescription
+        )
+        guard let context else { return }
+
+        if packet.type != MessageType.announce.rawValue {
+            SecureLogger.debug("📦 Decoded packet type: \(packet.type) from sender: \(claimedSenderID.id.prefix(8))… (\(linkDescription))", category: .session)
+        }
+
+        if packet.type == MessageType.announce.rawValue,
+           packet.ttl == messageTTL {
+            // Raw announces only bind unbound links: this runs before
+            // signature verification, so a bound link must not be re-bound
+            // by a raw announce (spoofable).
+            let boundPeerID = linkBindings.boundPeer(for: link)
+            if boundPeerID == nil || boundPeerID == claimedSenderID {
+                switch link {
+                case .peripheral(let peripheralUUID):
+                    bindPeripheralLink(peripheralUUID, to: claimedSenderID)
+                case .central(let centralUUID):
+                    linkBindings.bindCentral(centralUUID, to: claimedSenderID)
+                }
+                refreshLocalTopology()
+            }
+        }
+
+        guard recordIngressIfNew(packet, link: link, peerID: context.receivedFromPeerID) else {
+            return
+        }
+
+        handleReceivedPacket(packet, from: context.receivedFromPeerID)
+    }
+
     private func handleReceivedPacket(_ packet: BitchatPacket, from peerID: PeerID) {
         let isNoisePacket = packet.type == MessageType.noiseHandshake.rawValue
             || packet.type == MessageType.noiseEncrypted.rawValue
@@ -6685,9 +6784,6 @@ extension BLEService {
         // consolidate duplicate same-role connections onto that link.
         if let result, result.isVerified, result.isDirectAnnounce {
             rebindLinkAfterVerifiedDirectAnnounce(packet, to: result.peerID)
-            #if DEBUG
-            _test_afterVerifiedDirectRebindEnqueued?()
-            #endif
             retireRedundantPeripheralLinks(packet, to: result.peerID)
         }
 
@@ -6738,93 +6834,90 @@ extension BLEService {
     /// spoofed. A signature-verified direct announce proves the claimed
     /// sender owns the link it arrived on, so rebind the link to the new ID
     /// and retire the old identity.
+    /// Engine-confined: the whole rebind — containment checks, proof
+    /// retirement, binding flip, reconnect decision, and rotated-identity
+    /// retirement — is one engine slot, so no observer can see a
+    /// half-applied rotation. Only the physical connection cancels hop to
+    /// bleQueue.
     private func rebindLinkAfterVerifiedDirectAnnounce(_ packet: BitchatPacket, to peerID: PeerID) {
         guard let link = ingressLinks.link(for: packet) else { return }
-        bleQueue.async { [weak self] in
-            guard let self else { return }
-            let linkUUID: String
-            let previousPeerID: PeerID?
-            switch link {
-            case .peripheral(let peripheralUUID):
-                linkUUID = peripheralUUID
-                previousPeerID = self.linkStateStore.peerID(forPeripheralID: peripheralUUID)
-            case .central(let centralUUID):
-                linkUUID = centralUUID
-                previousPeerID = self.linkStateStore.peerID(forCentralUUID: centralUUID)
-            }
-            guard let previousPeerID else { return }
-            guard previousPeerID != peerID else {
-                self.refreshNoiseSessionForVerifiedDirectLink(
-                    link: link,
-                    peerID: peerID
-                )
-                return
-            }
-
-            // The signature does not authenticate directness (TTL is excluded
-            // from signing because relays mutate it), so a "verified direct"
-            // announce can be a replay of another peer's fresh announce with
-            // its TTL restored. Contain what a forged rebind could do:
-            // never steal an identity another live link already owns, and
-            // allow at most one rebind per link per cooldown window so two
-            // identities can't fight over a link in a replay flip-flop.
-            guard self.linkStateStore.links(to: peerID).isEmpty else {
-                SecureLogger.warning("🚫 Refusing link rebind to \(peerID.id.prefix(8))…: identity already owns another live link", category: .security)
-                return
-            }
-            let now = Date()
-            self.lastLinkRebindAt = self.lastLinkRebindAt.filter {
-                now.timeIntervalSince($0.value) < TransportConfig.bleLinkRebindCooldownSeconds
-            }
-            guard self.lastLinkRebindAt[linkUUID] == nil else {
-                SecureLogger.warning("🚫 Refusing link rebind to \(peerID.id.prefix(8))…: rebind cooldown active for this link", category: .security)
-                return
-            }
-            self.lastLinkRebindAt[linkUUID] = now
-
-            // A Noise proof belongs to the old physical binding. Never carry
-            // it across an announce-driven rebind, whose direct TTL is
-            // replayable; the new owner must complete a fresh handshake.
-            self.noiseAuthenticatedLinkOwners.removeValue(forKey: link)
-            self.noiseReconnectPolicy.endLinkEpoch(link)
-            switch link {
-            case .peripheral(let peripheralUUID):
-                self.linkStateStore.bindPeripheral(peripheralUUID, to: peerID)
-            case .central(let centralUUID):
-                self.linkStateStore.bindCentral(centralUUID, to: peerID)
-            }
-            // Keep the rebind and reconnect decision in one bleQueue critical
-            // section. No observer may see the new binding while a cached
-            // peer-level sender is still considered established.
-            self.refreshNoiseSessionForVerifiedDirectLink(
+        let linkUUID: String
+        let previousPeerID: PeerID?
+        switch link {
+        case .peripheral(let peripheralUUID):
+            linkUUID = peripheralUUID
+            previousPeerID = linkBindings.peer(forPeripheralID: peripheralUUID)
+        case .central(let centralUUID):
+            linkUUID = centralUUID
+            previousPeerID = linkBindings.peer(forCentralUUID: centralUUID)
+        }
+        guard let previousPeerID else { return }
+        guard previousPeerID != peerID else {
+            refreshNoiseSessionForVerifiedDirectLink(
                 link: link,
                 peerID: peerID
             )
-            SecureLogger.debug("🔄 Rebinding link after peer-ID rotation: \(previousPeerID.id.prefix(8))… → \(peerID.id.prefix(8))…", category: .session)
-            self.refreshLocalTopology()
-            // The announce that triggered this rebind was upserted as
-            // disconnected: the registry ran while the link still belonged
-            // to the previous ID (the ambiguous state BLEAnnounceHandler
-            // denies the connected shortcut). The rebind has now
-            // containment-checked the claim and the identity owns a live
-            // link, so promote it — otherwise a healed rotation leaves a
-            // live link that reads as disconnected until the next announce.
-            self.messageQueue.async { [weak self] in
-                self?.promoteReboundPeerToConnected(peerID)
-            }
-            // Any other peripheral links still bound to the rotated-away ID
-            // are stale duplicates of the same physical device (its restored
-            // connections outlived the relaunch that rotated the ID): cancel
-            // them now instead of leaving ghost links that spray duplicate
-            // traffic until the inactivity timeout.
-            self.cancelBoundPeripheralLinks(to: previousPeerID, keeping: linkUUID)
-            // Retire the rotated-away ID only once its last link is gone; a
-            // remaining stale link heals the same way or ages out.
-            guard self.linkStateStore.links(to: previousPeerID).isEmpty else { return }
-            self.messageQueue.async { [weak self] in
-                self?.retireRotatedPeer(previousPeerID)
-            }
+            return
         }
+
+        // The signature does not authenticate directness (TTL is excluded
+        // from signing because relays mutate it), so a "verified direct"
+        // announce can be a replay of another peer's fresh announce with
+        // its TTL restored. Contain what a forged rebind could do:
+        // never steal an identity another live link already owns, and
+        // allow at most one rebind per link per cooldown window so two
+        // identities can't fight over a link in a replay flip-flop.
+        guard linkBindings.links(to: peerID).isEmpty else {
+            SecureLogger.warning("🚫 Refusing link rebind to \(peerID.id.prefix(8))…: identity already owns another live link", category: .security)
+            return
+        }
+        let now = Date()
+        guard linkAuth.permitRebind(
+            linkUUID: linkUUID,
+            now: now,
+            cooldown: TransportConfig.bleLinkRebindCooldownSeconds
+        ) else {
+            SecureLogger.warning("🚫 Refusing link rebind to \(peerID.id.prefix(8))…: rebind cooldown active for this link", category: .security)
+            return
+        }
+
+        // A Noise proof belongs to the old physical binding. Never carry
+        // it across an announce-driven rebind, whose direct TTL is
+        // replayable; the new owner must complete a fresh handshake.
+        linkAuth.retireLink(link)
+        switch link {
+        case .peripheral(let peripheralUUID):
+            bindPeripheralLink(peripheralUUID, to: peerID)
+        case .central(let centralUUID):
+            linkBindings.bindCentral(centralUUID, to: peerID)
+        }
+        // Same engine slot as the rebind: no observer may see the new
+        // binding while a cached peer-level sender is still considered
+        // established.
+        refreshNoiseSessionForVerifiedDirectLink(
+            link: link,
+            peerID: peerID
+        )
+        SecureLogger.debug("🔄 Rebinding link after peer-ID rotation: \(previousPeerID.id.prefix(8))… → \(peerID.id.prefix(8))…", category: .session)
+        refreshLocalTopology()
+        // The announce that triggered this rebind was upserted as
+        // disconnected: the registry ran while the link still belonged
+        // to the previous ID (the ambiguous state BLEAnnounceHandler
+        // denies the connected shortcut). The rebind has now
+        // containment-checked the claim and the identity owns a live
+        // link, so promote it — otherwise a healed rotation leaves a
+        // live link that reads as disconnected until the next announce.
+        promoteReboundPeerToConnected(peerID)
+        // Any other peripheral links still bound to the rotated-away ID
+        // are stale duplicates of the same physical device (its restored
+        // connections outlived the relaunch that rotated the ID): cancel
+        // them now instead of leaving ghost links that spray duplicate
+        // traffic until the inactivity timeout.
+        cancelBoundPeripheralLinks(to: previousPeerID, keeping: linkUUID)
+        // Retire the rotated-away ID only once its last link is gone; a
+        // remaining stale link heals the same way or ages out.
+        guard linkBindings.links(to: previousPeerID).isEmpty else { return }
+        retireRotatedPeer(previousPeerID)
     }
 
     /// After a restore relaunch the same phone can reappear under a fresh
@@ -6846,39 +6939,37 @@ extension BLEService {
     /// link either way.
     private func retireRedundantPeripheralLinks(_ packet: BitchatPacket, to peerID: PeerID) {
         let ingressLink = ingressLinks.link(for: packet)
-        bleQueue.async { [weak self] in
-            guard let self else { return }
-            let now = Date()
-            self.lastRedundantLinkRetirementAt = self.lastRedundantLinkRetirementAt.filter {
-                now.timeIntervalSince($0.value) < TransportConfig.bleLinkRebindCooldownSeconds
-            }
-            guard self.lastRedundantLinkRetirementAt[peerID] == nil else { return }
-
-            var ingressPeripheralUUID: String?
-            if case .peripheral(let uuid) = ingressLink {
-                ingressPeripheralUUID = uuid
-            }
-            guard let keptUUID = BLERedundantLinkPolicy.keptPeripheralUUID(
-                ingressPeripheralUUID: ingressPeripheralUUID,
-                mostRecentlyBoundUUID: self.linkStateStore.preferredPeripheralBindings[peerID],
-                links: self.peripheralLinkPolicySnapshot(),
-                peerID: peerID
-            ) else { return }
-
-            self.lastRedundantLinkRetirementAt[peerID] = now
-            // The survivor becomes the peer's reverse-mapped link so directed
-            // sends follow the consolidation.
-            self.linkStateStore.bindPeripheral(keptUUID, to: peerID)
-            self.cancelBoundPeripheralLinks(to: peerID, keeping: keptUUID)
-            self.refreshLocalTopology()
+        let now = Date()
+        var ingressPeripheralUUID: String?
+        if case .peripheral(let uuid) = ingressLink {
+            ingressPeripheralUUID = uuid
         }
+        guard let keptUUID = BLERedundantLinkPolicy.keptPeripheralUUID(
+            ingressPeripheralUUID: ingressPeripheralUUID,
+            mostRecentlyBoundUUID: linkBindings.preferredPeripheralUUID(for: peerID),
+            links: peripheralLinkPolicySnapshot(),
+            peerID: peerID
+        ) else { return }
+
+        guard linkAuth.permitRedundantRetirement(
+            peerID: peerID,
+            now: now,
+            cooldown: TransportConfig.bleLinkRebindCooldownSeconds
+        ) else { return }
+        // The survivor becomes the peer's reverse-mapped link so directed
+        // sends follow the consolidation.
+        bindPeripheralLink(keptUUID, to: peerID)
+        cancelBoundPeripheralLinks(to: peerID, keeping: keptUUID)
+        refreshLocalTopology()
     }
 
     /// Cancels our central-role connections whose link is bound to `peerID`,
-    /// except `keptUUID`. bleQueue only. Each entry is removed from the link
-    /// store BEFORE cancelling so didDisconnectPeripheral sees no peer
-    /// binding and skips its peer-disconnect bookkeeping — the peer is still
-    /// live (on the kept link, or under its rotated identity).
+    /// except `keptUUID`. Engine-confined: each binding is retired BEFORE
+    /// the cancel is issued, so didDisconnectPeripheral's identity hop sees
+    /// no peer binding and skips its peer-disconnect bookkeeping — the peer
+    /// is still live (on the kept link, or under its rotated identity).
+    /// Only the physical discard and the CoreBluetooth cancel hop to
+    /// bleQueue.
     private func cancelBoundPeripheralLinks(to peerID: PeerID, keeping keptUUID: String?) {
         let retiring = BLERedundantLinkPolicy.peripheralUUIDsToRetire(
             links: peripheralLinkPolicySnapshot(),
@@ -6886,24 +6977,36 @@ extension BLEService {
             keeping: keptUUID ?? ""
         )
         for uuid in retiring {
-            guard let state = linkStateStore.state(forPeripheralID: uuid) else { continue }
-            tearDownPeripheralLink(uuid)
+            retirePeripheralLinkIdentity(uuid)
             SecureLogger.info(
                 "🔗 Retiring redundant link \(uuid.prefix(8))… bound to \(peerID.id.prefix(8))…\(keptUUID.map { " (keeping \($0.prefix(8))…)" } ?? "")",
                 category: .session
             )
-            centralManager?.cancelPeripheralConnection(state.peripheral)
+            bleQueue.async { [weak self] in
+                guard let self,
+                      let state = self.linkStateStore.state(forPeripheralID: uuid) else { return }
+                self.discardPeripheralLinkPhysical(uuid)
+                self.centralManager?.cancelPeripheralConnection(state.peripheral)
+            }
         }
     }
 
-    /// bleQueue only (reads the link store).
+    /// Engine-confined: physical link rows joined with their engine-owned
+    /// bindings.
     private func peripheralLinkPolicySnapshot() -> [BLERedundantLinkPolicy.PeripheralLink] {
-        linkStateStore.peripheralStates.map {
+        let physical = readLinkState { store in
+            store.peripheralStates.map {
+                (uuid: $0.peripheral.identifier.uuidString,
+                 isConnected: $0.isConnected,
+                 hasCharacteristic: $0.characteristic != nil)
+            }
+        }
+        return physical.map {
             BLERedundantLinkPolicy.PeripheralLink(
-                uuid: $0.peripheral.identifier.uuidString,
-                peerID: $0.peerID,
+                uuid: $0.uuid,
+                peerID: linkBindings.peer(forPeripheralID: $0.uuid),
                 isConnected: $0.isConnected,
-                hasCharacteristic: $0.characteristic != nil
+                hasCharacteristic: $0.hasCharacteristic
             )
         }
     }
@@ -6986,15 +7089,7 @@ extension BLEService {
                 // residual forged-presence window this leaves is accepted.
                 guard let self else { return false }
                 guard let link = self.ingressLinks.link(for: packet) else { return false }
-                let boundPeerID: PeerID? = self.readLinkState { store in
-                    switch link {
-                    case .peripheral(let peripheralUUID):
-                        return store.peerID(forPeripheralID: peripheralUUID)
-                    case .central(let centralUUID):
-                        return store.peerID(forCentralUUID: centralUUID)
-                    }
-                }
-                guard let boundPeerID else { return false }
+                guard let boundPeerID = self.linkBindings.boundPeer(for: link) else { return false }
                 return boundPeerID != peerID
             },
             withRegistryBarrier: { [weak self] body in
@@ -7588,6 +7683,14 @@ extension BLEService {
     #endif
 
     private func checkPeerConnectivity() {
+        // Maintenance ticks on bleQueue; connectivity reconciliation reads
+        // the engine-owned bindings, so it rides an engine slot.
+        messageQueue.async { [weak self] in
+            self?.checkPeerConnectivityOnEngine()
+        }
+    }
+
+    private func checkPeerConnectivityOnEngine() {
         let now = Date()
         let peerIDsForLinkState: [PeerID] = peerRegistry.peerIDs
         var cachedLinkStates: [PeerID: BLEPeerLinkPresence] = [:]
