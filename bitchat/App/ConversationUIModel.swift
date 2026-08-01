@@ -128,6 +128,18 @@ final class ConversationUIModel: ObservableObject {
         message.sender == currentNickname || message.senderPeerID == chatViewModel.meshService.myPeerID
     }
 
+    /// Whether a private-message row should show the filled verification seal
+    /// next to the sender name (#1439). Scoped to DMs only — public timelines
+    /// have different trust semantics and stay undressed.
+    func showsVerifiedSeal(for message: BitchatMessage) -> Bool {
+        guard message.isPrivate,
+              message.sender != "system",
+              !isSentByCurrentUser(message),
+              let peerID = message.senderPeerID else { return false }
+        guard let fingerprint = chatViewModel.getFingerprint(for: peerID) else { return false }
+        return chatViewModel.peerIdentityStore.isVerified(fingerprint)
+    }
+
     func senderDisplayName(for peerID: PeerID, fallbackMessages: [BitchatMessage]) -> String? {
         if peerID.isGeoDM || peerID.isGeoChat {
             return chatViewModel.geohashDisplayName(for: peerID)
@@ -217,6 +229,15 @@ final class ConversationUIModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refreshComputedState()
+            }
+            .store(in: &cancellables)
+
+        // Verify/unverify while a DM is open must repaint existing rows —
+        // showsVerifiedSeal is computed per render, so forward the store change.
+        chatViewModel.peerIdentityStore.$verifiedFingerprints
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
             }
             .store(in: &cancellables)
     }
