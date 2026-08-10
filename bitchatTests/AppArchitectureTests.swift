@@ -458,6 +458,54 @@ struct AppArchitectureTests {
         #expect(chromeModel.showingFingerprintFor == nil)
     }
 
+    @Test("Triple-tap panic entry point only raises the confirmation dialog")
+    @MainActor
+    func requestPanicWipeAsksBeforeDestroying() {
+        let viewModel = makeArchitectureViewModel()
+        let privateInboxModel = PrivateInboxModel(conversations: ConversationStore())
+        let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
+        viewModel.seedPublicMessages([
+            BitchatMessage(
+                id: "keep-1",
+                sender: "Tester",
+                content: "still here",
+                timestamp: Date(),
+                isRelay: false
+            )
+        ])
+
+        chromeModel.requestPanicWipe()
+
+        // The gesture must never wipe directly — a fumbled tap on the logo
+        // (single-tap opens App Info) cannot be allowed to destroy identity.
+        #expect(chromeModel.showPanicConfirmation)
+        #expect(viewModel.messages.map(\.id) == ["keep-1"])
+    }
+
+    @Test("Panic wipe dismisses chrome sheets so its outcome is visible")
+    @MainActor
+    func panicWipeDismissesChromePresentation() {
+        let viewModel = makeArchitectureViewModel()
+        let privateInboxModel = PrivateInboxModel(conversations: ConversationStore())
+        let chromeModel = AppChromeModel(chatViewModel: viewModel, privateInboxModel: privateInboxModel)
+
+        // The App Info danger-zone path wipes while its own sheet is up; the
+        // success message and the failed-wipe banner both render on the root
+        // timeline, so any sheet left presented would hide the one signal
+        // that says whether the wipe worked.
+        chromeModel.presentAppInfo()
+        chromeModel.isLocationChannelsSheetPresented = true
+        chromeModel.presentNotices()
+        chromeModel.showFingerprint(for: PeerID(str: "peer-3"))
+
+        chromeModel.panicClearAllData()
+
+        #expect(!chromeModel.isAppInfoPresented)
+        #expect(!chromeModel.isLocationChannelsSheetPresented)
+        #expect(!chromeModel.isNoticesSheetPresented)
+        #expect(chromeModel.showingFingerprintFor == nil)
+    }
+
     @Test("Recent chats list direct conversations with people absent from the rosters")
     @MainActor
     func peerListModelSurfacesRecentChatsForAbsentPeers() async {
