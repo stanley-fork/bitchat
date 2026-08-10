@@ -409,7 +409,10 @@ struct ContentView: View {
         })
         .alert("content.alert.bluetooth_required.title", isPresented: rootBluetoothAlertBinding) {
             Button("content.alert.bluetooth_required.settings") {
-                SystemSettings.bluetooth.open()
+                // Powered-off needs the radio controls, not the privacy pane.
+                (appChromeModel.bluetoothState == .poweredOff
+                    ? SystemSettings.bluetoothPower
+                    : SystemSettings.bluetooth).open()
             }
             Button("common.ok", role: .cancel) {}
         } message: {
@@ -499,8 +502,17 @@ struct ContentView: View {
                 headerPeerCountFontSize: headerPeerCountFontSize
             )
 
+            // Failed-wipe outranks connectivity: "your data may still be
+            // here" matters more than "the radio is off".
             if appChromeModel.panicWipeBlocked {
                 PanicWipeBlockedBanner()
+            }
+
+            if let issue = ConnectivityIssue.resolve(
+                bluetoothState: appChromeModel.bluetoothState,
+                torBlocked: appChromeModel.torBlocked
+            ) {
+                ConnectivityStatusBanner(issue: issue)
             }
         }
         // Hosted here rather than on the logo Text so the pending dialog

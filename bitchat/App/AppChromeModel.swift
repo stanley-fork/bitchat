@@ -17,6 +17,9 @@ final class AppChromeModel: ObservableObject {
     @Published var showBluetoothAlert = false
     @Published var bluetoothAlertMessage = ""
     @Published var bluetoothState: CBManagerState = .unknown
+    /// Tor bootstrap has stalled (network likely blocks it); drives the
+    /// connectivity banner. Mirrored from `ChatViewModel.torBlocked`.
+    @Published private(set) var torBlocked = false
     @Published var showScreenshotPrivacyWarning = false
     /// Triple-tapping the logo asks first; the dialog lives on the header.
     @Published var showPanicConfirmation = false
@@ -167,6 +170,10 @@ final class AppChromeModel: ObservableObject {
         chatViewModel.$bluetoothState
             .receive(on: DispatchQueue.main)
             .assign(to: &$bluetoothState)
+
+        chatViewModel.$torBlocked
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$torBlocked)
 
         chatViewModel.$panicRecoveryBlocked
             .receive(on: DispatchQueue.main)
