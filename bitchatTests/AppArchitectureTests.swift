@@ -69,7 +69,11 @@ private func makeArchitectureMessage(
 
 @MainActor
 private func waitUntil(
-    timeoutNanoseconds: UInt64 = 3_000_000_000,
+    // Settle deadline, not a latency budget (see TestConstants.settleTimeout):
+    // the old 3s default flaked on CI the moment a Combine hop through
+    // receive(on: .main) was starved. Every caller waits for a condition to
+    // become true, so passing runs return immediately.
+    timeoutNanoseconds: UInt64 = UInt64(TestConstants.settleTimeout * 1_000_000_000),
     pollNanoseconds: UInt64 = 20_000_000,
     _ condition: @escaping @MainActor () -> Bool
 ) async {
@@ -580,11 +584,19 @@ struct AppArchitectureTests {
 
         // While that person is visible in the geohash roster, the chat row
         // collapses — same absent-from-rosters contract as mesh.
-        viewModel.participantTracker.setActiveGeohash("u4pruy")
-        viewModel.participantTracker.recordParticipant(pubkeyHex: pubkeyHex, geohash: "u4pruy")
-
+        //
+        // Re-assert the tracker state on every poll: the view model's own
+        // channel binding delivers its initial .mesh selection asynchronously
+        // and resets the active participant geohash when it lands
+        // (GeohashSubscriptionManager.setActiveParticipantGeohash(nil)) — on
+        // a loaded parallel runner that reset arrives AFTER this setup and
+        // the dedup can never happen. Both calls are idempotent, so the
+        // interference heals on the next poll while a genuine dedup failure
+        // still times out.
         await waitUntil {
-            !peerListModel.recentChatRows.contains { $0.peerID == geoDMPeer }
+            viewModel.participantTracker.setActiveGeohash("u4pruy")
+            viewModel.participantTracker.recordParticipant(pubkeyHex: pubkeyHex, geohash: "u4pruy")
+            return !peerListModel.recentChatRows.contains { $0.peerID == geoDMPeer }
         }
         #expect(!peerListModel.recentChatRows.contains { $0.peerID == geoDMPeer })
         #expect(peerListModel.recentChatRows.map(\.peerID) == [offlinePeerID])
