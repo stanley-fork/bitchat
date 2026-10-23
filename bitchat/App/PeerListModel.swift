@@ -55,7 +55,6 @@ struct RecentChatRow: Identifiable, Equatable {
 
 @MainActor
 final class PeerListModel: ObservableObject {
-    @Published private(set) var allPeers: [BitchatPeer] = []
     @Published private(set) var meshRows: [MeshPeerRow] = []
     @Published private(set) var geohashPeople: [GeohashPersonRow] = []
     @Published private(set) var groupRows: [GroupChatRow] = []
@@ -69,7 +68,11 @@ final class PeerListModel: ObservableObject {
     private let locationChannelsModel: LocationChannelsModel
     private let peerIdentityStore: PeerIdentityStore
     private let locationPresenceStore: LocationPresenceStore
+    /// The mesh roster `refresh()` builds rows from. Not published: no view
+    /// reads it, and publishing it would re-render on every mesh snapshot.
+    private var allPeers: [BitchatPeer] = []
     private var cancellables = Set<AnyCancellable>()
+    private var refreshScheduled = false
 
     init(
         chatViewModel: ChatViewModel,
@@ -128,32 +131,37 @@ final class PeerListModel: ObservableObject {
     }
 
     private func bind() {
+        // No equality guard: `BitchatPeer.==` compares only peer IDs, so a
+        // rename or a connection, favorite or petname change looks unchanged,
+        // and blocking someone republishes identical peers. The refresh is
+        // coalesced, and rows are compared in full before they're written.
         chatViewModel.$allPeers
             .receive(on: DispatchQueue.main)
             .sink { [weak self] peers in
-                self?.allPeers = peers
-                self?.refresh()
+                guard let self else { return }
+                self.allPeers = peers
+                self.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         chatViewModel.$nickname
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         locationPresenceStore.$teleportedGeo
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         conversations.$unreadConversations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
@@ -164,65 +172,87 @@ final class PeerListModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] change in
                 guard case .direct = Self.changedConversationID(change) else { return }
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         chatViewModel.groupStore.$groups
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         peerIdentityStore.$encryptionStatuses
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         peerIdentityStore.$verifiedFingerprints
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: Notification.Name("peerStatusUpdated"))
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         chatViewModel.participantTracker.$visiblePeople
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         locationChannelsModel.$selectedChannel
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         locationChannelsModel.$teleported
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
 
         locationChannelsModel.$availableChannels
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refresh()
+                self?.setNeedsRefresh()
             }
             .store(in: &cancellables)
+    }
+
+    /// Rebuilds the rows now. The geohash roster republishes only when
+    /// membership or names change, so its recency order goes stale while the
+    /// same people stay active; the people sheet calls this as it opens.
+    func refreshNow() {
+        refresh()
+    }
+
+    /// Coalesces bursts of triggers into one rebuild per main-queue turn: a
+    /// participant event republishes the roster and the teleport set, and a
+    /// mesh snapshot touches peers, unread and encryption state at once.
+    private func setNeedsRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.refreshScheduled = false
+                self.refresh()
+            }
+        }
     }
 
     private func refresh() {
@@ -266,13 +296,15 @@ final class PeerListModel: ObservableObject {
         let groupRows = buildGroupRows()
         let recentChatRows = buildRecentChatRows(meshRows: meshRows, geohashPeople: geohashPeople)
 
-        self.meshRows = meshRows
-        reachableMeshPeerCount = meshCounts.reachable
-        connectedMeshPeerCount = meshCounts.connected
-        self.geohashPeople = geohashPeople
-        visibleGeohashPeerCount = geohashPeople.count
-        self.groupRows = groupRows
-        self.recentChatRows = recentChatRows
+        // Assign only what changed: every @Published write re-renders every
+        // view observing this model (root, header, the open sheet).
+        if self.meshRows != meshRows { self.meshRows = meshRows }
+        if reachableMeshPeerCount != meshCounts.reachable { reachableMeshPeerCount = meshCounts.reachable }
+        if connectedMeshPeerCount != meshCounts.connected { connectedMeshPeerCount = meshCounts.connected }
+        if self.geohashPeople != geohashPeople { self.geohashPeople = geohashPeople }
+        if visibleGeohashPeerCount != geohashPeople.count { visibleGeohashPeerCount = geohashPeople.count }
+        if self.groupRows != groupRows { self.groupRows = groupRows }
+        if self.recentChatRows != recentChatRows { self.recentChatRows = recentChatRows }
     }
 
     /// Direct conversations with people absent from the rosters above:
