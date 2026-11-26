@@ -83,6 +83,7 @@ public final class TorManager: ObservableObject {
     // dropped — it is recorded here and honored when the shutdown finishes.
     private var shutdownsInFlight = 0
     private var startPendingAfterShutdown = false
+    private var wipeDataDirectoryOnShutdown = false
     private var bootstrapMonitorStarted = false
     // Fences the detached poll loop: shutdown, dormancy, and restart each bump
     // this, so a loop from a previous attempt cannot run out its deadline and
@@ -197,11 +198,14 @@ public final class TorManager: ObservableObject {
         SecureLogger.info("TorManager: arti_start OK (SOCKS \(socksHost):\(socksPort))", category: .session)
         startBootstrapMonitor()
 
-        // Start SOCKS readiness probe
+        // Start SOCKS readiness probe fenced to this bootstrap generation so
+        // an in-flight probe cannot mark Tor ready after a shutdown or restart.
+        let generation = bootstrapGeneration
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             let ready = await self.waitForSocksReady(timeout: 60.0)
             await MainActor.run {
+                guard generation == self.bootstrapGeneration else { return }
                 self.socksReady = ready
                 if ready {
                     SecureLogger.info("TorManager: SOCKS ready at \(self.socksHost):\(self.socksPort)", category: .session)
@@ -368,6 +372,13 @@ public final class TorManager: ObservableObject {
         SecureLogger.debug("TorManager: shutdownCompletely() called", category: .session)
         startPendingAfterShutdown = false
         bootstrapGeneration += 1
+        // Mark not-ready synchronously so no caller awaiting Tor readiness can
+        // observe `networkPermitted == true` while Arti is tearing down.
+        isReady = false
+        socksReady = false
+        bootstrapProgress = 0
+        bootstrapSummary = ""
+        isStarting = false
         shutdownsInFlight += 1
         Task.detached { [weak self] in
             guard let self = self else { return }
@@ -392,6 +403,10 @@ public final class TorManager: ObservableObject {
                 // Note: Don't clear startedAt here - it will be set fresh on next startIfNeeded()
                 // Clearing it here races with startup and defeats the grace period
                 self.shutdownsInFlight -= 1
+                if self.shutdownsInFlight == 0 && self.wipeDataDirectoryOnShutdown {
+                    self.wipeDataDirectoryOnShutdown = false
+                    self.removeDataDirectoryOnDisk()
+                }
                 if self.shutdownsInFlight == 0 && self.startPendingAfterShutdown {
                     self.startPendingAfterShutdown = false
                     SecureLogger.debug("TorManager: honoring start deferred during shutdown", category: .session)
@@ -399,6 +414,26 @@ public final class TorManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Panic-wipe hook: removes `Application Support/bitchat/arti` (guard
+    /// nodes, state, consensus cache). If Arti is currently shutting down,
+    /// defers removal until `arti_stop()` finishes so SQLite/state files are
+    /// deleted cleanly before any post-panic restart.
+    public func wipeStateDirectoryForPanic() {
+        if shutdownsInFlight > 0 || arti_is_running() != 0 {
+            wipeDataDirectoryOnShutdown = true
+            if shutdownsInFlight == 0 {
+                shutdownCompletely()
+            }
+            return
+        }
+        removeDataDirectoryOnDisk()
+    }
+
+    private func removeDataDirectoryOnDisk() {
+        guard let dir = dataDirectoryURL() else { return }
+        try? FileManager.default.removeItem(at: dir)
     }
 
     private func restartArti() async {
