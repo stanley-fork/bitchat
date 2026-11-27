@@ -21,7 +21,6 @@ struct ContentRootModalPresentationState {
     var isLocationChannelsSheetPresented = false
     var isNoticesSheetPresented = false
     var isImagePreviewPresented = false
-    var isVerificationSheetPresented = false
     var isVoiceAlertPresented = false
     var isScreenshotPrivacyAlertPresented = false
     var isMediaPickerPresented = false
@@ -33,7 +32,6 @@ struct ContentRootModalPresentationState {
             || isLocationChannelsSheetPresented
             || isNoticesSheetPresented
             || isImagePreviewPresented
-            || isVerificationSheetPresented
             || isVoiceAlertPresented
             || isScreenshotPrivacyAlertPresented
             || isMediaPickerPresented
@@ -46,7 +44,6 @@ extension ContentRootModalPresentationState {
         appChromeModel: AppChromeModel,
         isPeopleSheetPresented: Bool = false,
         isImagePreviewPresented: Bool = false,
-        isVerificationSheetPresented: Bool = false,
         isVoiceAlertPresented: Bool = false,
         isMediaPickerPresented: Bool = false
     ) {
@@ -60,12 +57,88 @@ extension ContentRootModalPresentationState {
             isNoticesSheetPresented:
                 appChromeModel.isNoticesSheetPresented,
             isImagePreviewPresented: isImagePreviewPresented,
-            isVerificationSheetPresented: isVerificationSheetPresented,
             isVoiceAlertPresented: isVoiceAlertPresented,
             isScreenshotPrivacyAlertPresented:
                 appChromeModel.showScreenshotPrivacyWarning,
             isMediaPickerPresented: isMediaPickerPresented
         )
+    }
+}
+
+enum MediaPickerMode: Equatable {
+    case photoLibrary
+    #if os(iOS)
+    case camera
+    #endif
+}
+
+extension View {
+    func mediaPickerPresentation(
+        mode: Binding<MediaPickerMode?>,
+        isActive: Bool,
+        conversationUIModel: ConversationUIModel?
+    ) -> some View {
+        let isPresented = Binding<Bool>(
+            get: { mode.wrappedValue != nil && isActive },
+            set: { newValue in
+                if !newValue {
+                    mode.wrappedValue = nil
+                }
+            }
+        )
+        #if os(iOS)
+        let sourceType: UIImagePickerController.SourceType =
+            mode.wrappedValue == .camera ? .camera : .photoLibrary
+        return fullScreenCover(isPresented: isPresented) {
+            ImagePickerView(sourceType: sourceType) { image in
+                mode.wrappedValue = nil
+                conversationUIModel?.processSelectedImage(image)
+            }
+            .ignoresSafeArea()
+        }
+        #else
+        return sheet(isPresented: isPresented) {
+            MacImagePickerView { url in
+                mode.wrappedValue = nil
+                conversationUIModel?.processSelectedImage(from: url)
+            }
+        }
+        #endif
+    }
+
+    func voiceAndBluetoothAlerts(
+        voiceRecordingVM: VoiceRecordingViewModel,
+        appChromeModel: AppChromeModel,
+        isVoiceAlertPresented: Binding<Bool>,
+        isBluetoothAlertPresented: Binding<Bool>
+    ) -> some View {
+        self
+            .alert(
+                Text(String(localized: "voice.error.title", defaultValue: "recording error", comment: "Title of the voice recording error alert")),
+                isPresented: isVoiceAlertPresented,
+                actions: {
+                    Button("common.ok", role: .cancel) {}
+                    if voiceRecordingVM.state == .permissionDenied {
+                        Button("location_channels.action.open_settings") {
+                            SystemSettings.microphone.open()
+                        }
+                    }
+                },
+                message: {
+                    Text(voiceRecordingVM.state.alertMessage)
+                }
+            )
+            .alert("content.alert.bluetooth_required.title", isPresented: isBluetoothAlertPresented) {
+                Button("content.alert.bluetooth_required.settings") {
+                    // Powered-off needs the radio controls, not the privacy pane.
+                    (appChromeModel.bluetoothState == .poweredOff
+                        ? SystemSettings.bluetoothPower
+                        : SystemSettings.bluetooth).open()
+                }
+                Button("common.ok", role: .cancel) {}
+            } message: {
+                Text(appChromeModel.bluetoothAlertMessage)
+            }
     }
 }
 
@@ -103,18 +176,12 @@ struct ContentView: View {
     @FocusState private var isNicknameFieldFocused: Bool
     @State private var isAtBottomPublic = true
     @State private var isAtBottomPrivate = true
-    @State private var showVerifySheet = false
     @State private var imagePreviewURL: URL?
-    #if os(iOS)
-    @State private var showImagePicker = false
-    @State private var imagePickerSourceType: UIImagePickerController.SourceType = .camera
-    #else
-    @State private var showMacImagePicker = false
-    #endif
+    @State private var mediaPickerMode: MediaPickerMode?
     @ScaledMetric(relativeTo: .body) private var headerHeight: CGFloat = 44
     @ScaledMetric(relativeTo: .subheadline) private var headerPeerIconSize: CGFloat = 11
     @ScaledMetric(relativeTo: .subheadline) private var headerPeerCountFontSize: CGFloat = 12
-    @State private var windowCountPublic: Int = 300
+    @State private var windowCountPublic: Int = TransportConfig.uiWindowInitialCountPublic
     @State private var windowCountPrivate: [PeerID: Int] = [:]
 
     @ThemedPalette private var palette
@@ -140,19 +207,12 @@ struct ContentView: View {
     private func rootModalPresentationState(
         includingVoiceAlert: Bool
     ) -> ContentRootModalPresentationState {
-        #if os(iOS)
-        let isMediaPickerPresented = showImagePicker
-        #else
-        let isMediaPickerPresented = showMacImagePicker
-        #endif
-
-        return ContentRootModalPresentationState(
+        ContentRootModalPresentationState(
             appChromeModel: appChromeModel,
             isPeopleSheetPresented: isPeopleSheetPresented,
             isImagePreviewPresented: imagePreviewURL != nil,
-            isVerificationSheetPresented: showVerifySheet,
             isVoiceAlertPresented: includingVoiceAlert && voiceRecordingVM.showAlert,
-            isMediaPickerPresented: isMediaPickerPresented
+            isMediaPickerPresented: mediaPickerMode != nil
         )
     }
 
@@ -312,7 +372,6 @@ struct ContentView: View {
             )
         ) {
             if let models = appEnvironmentModels {
-                #if os(iOS)
                 ContentPeopleSheetView(
                     showSidebar: $showSidebar,
                     draftModel: models.composerDraftModel,
@@ -325,30 +384,12 @@ struct ContentView: View {
                     voiceRecordingVM: voiceRecordingVM,
                     headerHeight: headerHeight,
                     onSendMessage: sendMessage,
-                    showImagePicker: $showImagePicker,
-                    imagePickerSourceType: $imagePickerSourceType
+                    mediaPickerMode: $mediaPickerMode
                 )
                 // Sheets + NavigationStack can drop inherited EnvironmentObjects on
                 // some iOS versions (#1558). Re-inject every model the sheet tree
                 // reads so ContentPeopleListView / PrivateMessageListView never crash.
                 .installAppEnvironment(models)
-                #else
-                ContentPeopleSheetView(
-                    showSidebar: $showSidebar,
-                    draftModel: models.composerDraftModel,
-                    selectedMessageSender: $selectedMessageSender,
-                    selectedMessageSenderID: $selectedMessageSenderID,
-                    imagePreviewURL: $imagePreviewURL,
-                    windowCountPrivate: $windowCountPrivate,
-                    isAtBottomPrivate: $isAtBottomPrivate,
-                    isTextFieldFocused: $isTextFieldFocused,
-                    voiceRecordingVM: voiceRecordingVM,
-                    headerHeight: headerHeight,
-                    onSendMessage: sendMessage,
-                    showMacImagePicker: $showMacImagePicker
-                )
-                .installAppEnvironment(models)
-                #endif
             }
         }
         .sheet(isPresented: $appChromeModel.isAppInfoPresented) {
@@ -368,37 +409,11 @@ struct ContentView: View {
                     .environmentObject(verificationModel)
             }
         }
-        #if os(iOS)
-        .fullScreenCover(isPresented: Binding(
-            get: { showImagePicker && !showSidebar && selectedPrivatePeerID == nil },
-            set: { newValue in
-                if !newValue {
-                    showImagePicker = false
-                }
-            }
-        )) {
-            ImagePickerView(sourceType: imagePickerSourceType) { image in
-                showImagePicker = false
-                appEnvironmentModels?.conversationUIModel.processSelectedImage(image)
-            }
-            .ignoresSafeArea()
-        }
-        #endif
-        #if os(macOS)
-        .sheet(isPresented: Binding(
-            get: { showMacImagePicker && !showSidebar && selectedPrivatePeerID == nil },
-            set: { newValue in
-                if !newValue {
-                    showMacImagePicker = false
-                }
-            }
-        )) {
-            MacImagePickerView { url in
-                showMacImagePicker = false
-                appEnvironmentModels?.conversationUIModel.processSelectedImage(from: url)
-            }
-        }
-        #endif
+        .mediaPickerPresentation(
+            mode: $mediaPickerMode,
+            isActive: !showSidebar && selectedPrivatePeerID == nil,
+            conversationUIModel: appEnvironmentModels?.conversationUIModel
+        )
         .sheet(isPresented: Binding(
             get: { imagePreviewURL != nil },
             set: { presenting in
@@ -411,27 +426,12 @@ struct ContentView: View {
                 ImagePreviewView(url: url)
             }
         }
-        .alert(Text(String(localized: "voice.error.title", defaultValue: "recording error", comment: "Title of the voice recording error alert")), isPresented: rootVoiceAlertBinding, actions: {
-            Button("common.ok", role: .cancel) {}
-            if voiceRecordingVM.state == .permissionDenied {
-                Button("location_channels.action.open_settings") {
-                    SystemSettings.microphone.open()
-                }
-            }
-        }, message: {
-            Text(voiceRecordingVM.state.alertMessage)
-        })
-        .alert("content.alert.bluetooth_required.title", isPresented: rootBluetoothAlertBinding) {
-            Button("content.alert.bluetooth_required.settings") {
-                // Powered-off needs the radio controls, not the privacy pane.
-                (appChromeModel.bluetoothState == .poweredOff
-                    ? SystemSettings.bluetoothPower
-                    : SystemSettings.bluetooth).open()
-            }
-            Button("common.ok", role: .cancel) {}
-        } message: {
-            Text(appChromeModel.bluetoothAlertMessage)
-        }
+        .voiceAndBluetoothAlerts(
+            voiceRecordingVM: voiceRecordingVM,
+            appChromeModel: appChromeModel,
+            isVoiceAlertPresented: rootVoiceAlertBinding,
+            isBluetoothAlertPresented: rootBluetoothAlertBinding
+        )
         .alert(
             String(localized: "share_import.review.title", comment: "Title for reviewing content received from the share extension"),
             isPresented: Binding(
@@ -487,14 +487,9 @@ struct ContentView: View {
 
                 Divider()
 
-                GeometryReader { geometry in
-                    VStack(spacing: 0) {
-                        publicMessageList
-                            .background(palette.background)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                }
+                publicMessageList
+                    .background(palette.background)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 Divider()
 
@@ -509,7 +504,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             ContentHeaderView(
                 showSidebar: $showSidebar,
-                showVerifySheet: $showVerifySheet,
                 isNicknameFieldFocused: $isNicknameFieldFocused,
                 headerHeight: headerHeight,
                 headerPeerIconSize: headerPeerIconSize,
@@ -519,7 +513,7 @@ struct ContentView: View {
             // Failed-wipe outranks connectivity: "your data may still be
             // here" matters more than "the radio is off".
             if appChromeModel.panicWipeBlocked {
-                PanicWipeBlockedBanner()
+                ConnectivityStatusBanner(issue: .panicWipeBlocked)
             }
 
             if let issue = ConnectivityIssue.resolve(
@@ -564,24 +558,13 @@ struct ContentView: View {
     @ViewBuilder
     private var composerView: some View {
         if let draftModel = appEnvironmentModels?.composerDraftModel {
-            #if os(iOS)
             ContentComposerView(
                 draftModel: draftModel,
                 isTextFieldFocused: $isTextFieldFocused,
                 voiceRecordingVM: voiceRecordingVM,
                 onSendMessage: sendMessage,
-                showImagePicker: $showImagePicker,
-                imagePickerSourceType: $imagePickerSourceType
+                mediaPickerMode: $mediaPickerMode
             )
-            #else
-            ContentComposerView(
-                draftModel: draftModel,
-                isTextFieldFocused: $isTextFieldFocused,
-                voiceRecordingVM: voiceRecordingVM,
-                onSendMessage: sendMessage,
-                showMacImagePicker: $showMacImagePicker
-            )
-            #endif
         }
     }
 

@@ -37,8 +37,6 @@ protocol ChatDeliveryContext: AnyObject {
     /// Returns the number of receipts removed. (Single mutation path for the
     /// owner's `sentReadReceipts`; this coordinator never reads the raw set.)
     func pruneSentReadReceipts(keeping validMessageIDs: Set<String>) -> Int
-    /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
-    func notifyUIChanged()
     /// Confirms receipt so the message router stops retaining the message for resend.
     func markMessageDelivered(_ messageID: String)
     /// Peer-bound form for authenticated remote receipts. Only the supplied
@@ -83,9 +81,6 @@ extension ChatViewModel: ChatDeliveryContext {
         conversations.directMessageIDs()
     }
 
-    func notifyUIChanged() {
-        objectWillChange.send()
-    }
 
     func markMessageDelivered(_ messageID: String) {
         messageRouter.markDelivered(messageID)
@@ -137,15 +132,6 @@ final class ChatDeliveryCoordinator {
     }
 
     @MainActor
-    func didReceiveReadReceipt(_ receipt: ReadReceipt) {
-        updateAcknowledgedMessageDeliveryStatus(
-            receipt.originalMessageID,
-            status: .read(by: receipt.readerNickname, at: receipt.timestamp),
-            from: [receipt.readerID]
-        )
-    }
-
-    @MainActor
     func didUpdateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
         updateMessageDeliveryStatus(messageID, status: status)
     }
@@ -168,7 +154,6 @@ final class ChatDeliveryCoordinator {
         default:
             break
         }
-        context.notifyUIChanged()
         return true
     }
 
@@ -211,7 +196,6 @@ final class ChatDeliveryCoordinator {
         // the acking peer; only then release the media reconnect retry, whose
         // stable message ID is not peer-scoped.
         context.confirmPrivateMediaDelivery(messageID)
-        context.notifyUIChanged()
         return true
     }
 }

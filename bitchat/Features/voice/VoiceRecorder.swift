@@ -7,7 +7,6 @@ import AVFoundation
 /// microphone on the test host.
 protocol VoiceAudioRecording: AnyObject {
     var isRecording: Bool { get }
-    var isMeteringEnabled: Bool { get set }
     func prepareToRecord() -> Bool
     func record(forDuration duration: TimeInterval) -> Bool
     func stop()
@@ -21,13 +20,7 @@ protocol VoiceAudioRecorderCreating {
 
 private struct SystemVoiceAudioRecorderFactory: VoiceAudioRecorderCreating {
     func makeRecorder(url: URL) throws -> any VoiceAudioRecording {
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 16_000
-        ]
-        return try AVAudioRecorder(url: url, settings: settings)
+        try AVAudioRecorder(url: url, settings: PTTAudioFormat.voiceNoteFileSettings)
     }
 }
 
@@ -158,7 +151,6 @@ actor VoiceRecorder {
             let newURL = try makeOutputURL()
             outputURL = newURL
             let audioRecorder = try recorderFactory.makeRecorder(url: newURL)
-            audioRecorder.isMeteringEnabled = true
             guard audioRecorder.prepareToRecord() else {
                 throw RecorderError.failedToStartRecording
             }
@@ -299,25 +291,41 @@ actor VoiceRecorder {
         #endif
     }
 
-    private func makeOutputURL() throws -> URL {
+    private static let fileNameDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let fileName = "voice_\(formatter.string(from: Date()))_\(UUID().uuidString).m4a"
+        return formatter
+    }()
 
-        let baseDirectory = try outputDirectory
-            ?? applicationFilesDirectory().appendingPathComponent("voicenotes/outgoing", isDirectory: true)
-        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true, attributes: BLEIncomingFileStore.mediaProtectionAttributes)
+    nonisolated static func makeOutgoingVoiceNoteURL(
+        fileName: String,
+        outputDirectory: URL? = nil
+    ) throws -> URL {
+        let baseDirectory: URL
+        if let outputDirectory {
+            baseDirectory = outputDirectory
+        } else {
+            let appSupport = try FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            baseDirectory = appSupport
+                .appendingPathComponent("files", isDirectory: true)
+                .appendingPathComponent("voicenotes/outgoing", isDirectory: true)
+        }
+        try FileManager.default.createDirectory(
+            at: baseDirectory,
+            withIntermediateDirectories: true,
+            attributes: BLEIncomingFileStore.mediaProtectionAttributes
+        )
         return baseDirectory.appendingPathComponent(fileName)
     }
 
-    private func applicationFilesDirectory() throws -> URL {
-        #if os(iOS)
-        return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("files", isDirectory: true)
-        #else
-        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return base.appendingPathComponent("files", isDirectory: true)
-        #endif
+    private func makeOutputURL() throws -> URL {
+        let fileName = "voice_\(Self.fileNameDateFormatter.string(from: Date()))_\(UUID().uuidString).m4a"
+        return try Self.makeOutgoingVoiceNoteURL(fileName: fileName, outputDirectory: outputDirectory)
     }
 
     /// Fire-and-forget: the coordinator hops the blocking deactivation IPC

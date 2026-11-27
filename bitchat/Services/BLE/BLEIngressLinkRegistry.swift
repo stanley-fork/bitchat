@@ -144,48 +144,82 @@ struct BLEIngressLinkRegistry {
     }
 }
 
-/// Lock-backed shared ownership of the ingress-link registry. Ingress is
-/// recorded on bleQueue the moment a frame decodes (the link identity is
-/// only known there, and the duplicate-ingress gate must answer before
-/// the packet is handed to the engine), while relay and routing decisions
-/// read it from the engine. Every registry mutation is a single
-/// whole-transition method, so readers never observe a torn state.
-final class BLEIngressLinkStore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var registry = BLEIngressLinkRegistry()
 
-    var isEmpty: Bool {
-        lock.withLock { registry.isEmpty }
+// MARK: - Ingress Packet Guard
+
+enum BLEIngressPacketGuard {
+    enum Rejection: Error, Equatable {
+        case selfLoopback(packetType: UInt8)
+        case directSenderMismatch(boundPeerID: PeerID, claimedSenderID: PeerID)
+        case invalidRSR(peerID: PeerID)
+        case timestampSkew(peerID: PeerID, skewMs: UInt64, maxSkewMs: UInt64)
     }
 
-    func removeAll() {
-        lock.withLock { registry.removeAll() }
-    }
+    static func evaluate(
+        packet: BitchatPacket,
+        claimedSenderID: PeerID,
+        boundPeerID: PeerID?,
+        localPeerID: PeerID,
+        directAnnounceTTL: UInt8,
+        nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
+        maxTimestampSkewMs: UInt64 = TransportConfig.bleMaxTimestampSkewMs,
+        isValidSyncResponse: (PeerID) -> Bool
+    ) -> Result<BLEIngressPacketContext, Rejection> {
+        let contextResult = BLEIngressLinkRegistry.packetContext(
+            for: packet,
+            claimedSenderID: claimedSenderID,
+            boundPeerID: boundPeerID,
+            localPeerID: localPeerID,
+            directAnnounceTTL: directAnnounceTTL
+        )
 
-    func record(for packet: BitchatPacket) -> BLEIngressLinkRecord? {
-        lock.withLock { registry.record(for: packet) }
-    }
+        let context: BLEIngressPacketContext
+        switch contextResult {
+        case .success(let acceptedContext):
+            context = acceptedContext
+        case .failure(.selfLoopback(let packetType)):
+            return .failure(.selfLoopback(packetType: packetType))
+        case .failure(.directSenderMismatch(let boundPeerID, let claimedSenderID)):
+            return .failure(.directSenderMismatch(boundPeerID: boundPeerID, claimedSenderID: claimedSenderID))
+        }
 
-    func record(forMessageID messageID: String) -> BLEIngressLinkRecord? {
-        lock.withLock { registry.record(forMessageID: messageID) }
-    }
-
-    func link(for packet: BitchatPacket) -> BLEIngressLinkID? {
-        lock.withLock { registry.link(for: packet) }
-    }
-
-    func recordIfNew(
-        messageID: String,
-        link: BLEIngressLinkID,
-        peerID: PeerID,
-        lifetime: TimeInterval
-    ) -> Bool {
-        lock.withLock {
-            registry.recordIfNew(messageID: messageID, link: link, peerID: peerID, lifetime: lifetime)
+        switch validatePayload(
+            packet,
+            from: context.validationPeerID,
+            nowMs: nowMs,
+            maxTimestampSkewMs: maxTimestampSkewMs,
+            isValidSyncResponse: isValidSyncResponse
+        ) {
+        case .success:
+            return .success(context)
+        case .failure(let rejection):
+            return .failure(rejection)
         }
     }
 
-    func prune(before cutoff: Date) {
-        lock.withLock { registry.prune(before: cutoff) }
+    static func validatePayload(
+        _ packet: BitchatPacket,
+        from peerID: PeerID,
+        nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
+        maxTimestampSkewMs: UInt64 = TransportConfig.bleMaxTimestampSkewMs,
+        isValidSyncResponse: (PeerID) -> Bool
+    ) -> Result<Void, Rejection> {
+        let packetTime = packet.timestamp
+        if packet.isRSR {
+            guard isValidSyncResponse(peerID) else {
+                return .failure(.invalidRSR(peerID: peerID))
+            }
+            guard packetTime <= nowMs || packetTime - nowMs <= maxTimestampSkewMs else {
+                return .failure(.timestampSkew(peerID: peerID, skewMs: packetTime - nowMs, maxSkewMs: maxTimestampSkewMs))
+            }
+            return .success(())
+        }
+
+        let skew = packetTime > nowMs ? packetTime - nowMs : nowMs - packetTime
+        guard skew <= maxTimestampSkewMs else {
+            return .failure(.timestampSkew(peerID: peerID, skewMs: skew, maxSkewMs: maxTimestampSkewMs))
+        }
+
+        return .success(())
     }
 }

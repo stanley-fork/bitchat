@@ -22,14 +22,20 @@ final class GroupStore: ObservableObject {
     @Published private(set) var groups: [BitchatGroup] = []
 
     private let keychain: KeychainManagerProtocol
-    private let fileURL: URL?
+    private let fileStore: AppSupportFileStore
     private var keyCache: [Data: Data] = [:]
 
     /// - Parameter fileURL: Overrides the on-disk location (tests). Ignored
     ///   when `persistsToDisk` is false.
     init(keychain: KeychainManagerProtocol, persistsToDisk: Bool = true, fileURL: URL? = nil) {
         self.keychain = keychain
-        self.fileURL = persistsToDisk ? (fileURL ?? Self.defaultFileURL()) : nil
+        self.fileStore = AppSupportFileStore(
+            persistsToDisk: persistsToDisk,
+            fileURL: fileURL,
+            subdirectory: "groups",
+            fileName: "groups.json",
+            protection: .complete
+        )
         loadFromDisk()
     }
 
@@ -76,16 +82,27 @@ final class GroupStore: ObservableObject {
     }
 
     /// Inserts or replaces a group and its current key. Rejects rosters over
-    /// the hard cap, groups whose creator is missing from the roster, and any
-    /// change to the creator (fingerprint or signing key) of a group already
-    /// held, so no caller can hand a known groupID to a different creator.
+    /// the hard cap, groups whose creator is missing from the roster, new
+    /// groups beyond the store cap, and any change to the creator (fingerprint
+    /// or signing key) of a group already held, so no caller can hand a known
+    /// groupID to a different creator.
     @discardableResult
     func upsert(_ group: BitchatGroup, key: Data) -> Bool {
         guard key.count == BitchatGroup.keyLength,
               Self.isWellFormed(group) else { return false }
-        if let existing = self.group(withID: group.groupID), !existing.hasSameCreator(as: group) {
+        let existingIndex = groups.firstIndex(where: { $0.groupID == group.groupID })
+        if let existingIndex {
+            let existing = groups[existingIndex]
+            if !existing.hasSameCreator(as: group) {
+                SecureLogger.warning(
+                    "Refusing group state: creator \(group.creatorFingerprint.prefix(8))… does not match stored creator \(existing.creatorFingerprint.prefix(8))…",
+                    category: .security
+                )
+                return false
+            }
+        } else if groups.count >= BitchatGroup.maxGroups {
             SecureLogger.warning(
-                "Refusing group state: creator \(group.creatorFingerprint.prefix(8))… does not match stored creator \(existing.creatorFingerprint.prefix(8))…",
+                "Refusing new group \(group.groupID.hexEncodedString().prefix(8))…: group store at cap (\(BitchatGroup.maxGroups))",
                 category: .security
             )
             return false
@@ -95,8 +112,8 @@ final class GroupStore: ObservableObject {
             return false
         }
         keyCache[group.groupID] = key
-        if let index = groups.firstIndex(where: { $0.groupID == group.groupID }) {
-            groups[index] = group
+        if let existingIndex {
+            groups[existingIndex] = group
         } else {
             groups.append(group)
         }
@@ -146,9 +163,7 @@ final class GroupStore: ObservableObject {
         }
         groups.removeAll()
         keyCache.removeAll()
-        if let fileURL {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
+        fileStore.removeIgnoringErrors()
     }
 
     // MARK: - Internals
@@ -158,9 +173,14 @@ final class GroupStore: ObservableObject {
     }
 
     /// Structural invariants every stored group satisfies: a well-sized ID,
-    /// a non-empty roster within the cap, and the creator in that roster.
+    /// a non-empty bounded name, a non-empty roster within the cap, and the
+    /// creator in that roster.
     private static func isWellFormed(_ group: BitchatGroup) -> Bool {
-        group.groupID.count == BitchatGroup.groupIDLength
+        let trimmedName = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return group.groupID.count == BitchatGroup.groupIDLength
+            && !trimmedName.isEmpty
+            && trimmedName.count <= BitchatGroup.maxNameLength
+            && group.name.utf8.count <= BitchatGroup.maxNameUTF8Bytes
             && !group.members.isEmpty
             && group.members.count <= BitchatGroup.maxMembers
             && group.creator != nil
@@ -176,31 +196,15 @@ final class GroupStore: ObservableObject {
     }
 
     private func persist() {
-        guard let fileURL else { return }
         do {
-            if groups.isEmpty {
-                try? FileManager.default.removeItem(at: fileURL)
-                return
-            }
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONEncoder().encode(groups)
-            var options: Data.WritingOptions = [.atomic]
-            #if os(iOS)
-            options.insert(.completeFileProtection)
-            #endif
-            try data.write(to: fileURL, options: options)
+            try fileStore.saveJSON(groups, isEmpty: groups.isEmpty)
         } catch {
             SecureLogger.error("Failed to persist group store: \(error)", category: .session)
         }
     }
 
     private func loadFromDisk() {
-        guard let fileURL,
-              let data = try? Data(contentsOf: fileURL),
-              let stored = try? JSONDecoder().decode([BitchatGroup].self, from: data) else {
+        guard let stored = try? fileStore.loadJSON([BitchatGroup].self) else {
             return
         }
         // Only groups whose key survived in the keychain are usable. Loading
@@ -212,17 +216,5 @@ final class GroupStore: ObservableObject {
                 && seenGroupIDs.insert(group.groupID).inserted
                 && key(forGroupID: group.groupID) != nil
         }
-    }
-
-    private static func defaultFileURL() -> URL? {
-        guard let base = try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ) else { return nil }
-        return base
-            .appendingPathComponent("groups", isDirectory: true)
-            .appendingPathComponent("groups.json")
     }
 }

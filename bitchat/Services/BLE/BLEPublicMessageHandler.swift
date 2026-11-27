@@ -22,8 +22,6 @@ struct BLEPublicMessageHandlerEnvironment {
     let signedSenderDisplayName: (_ packet: BitchatPacket, _ peerID: PeerID) -> String?
     /// Tracks the broadcast message packet for gossip sync.
     let trackPacketSeen: (BitchatPacket) -> Void
-    /// Direct link state for the peer (BLE-queue read).
-    let linkState: (PeerID) -> (hasPeripheral: Bool, hasCentral: Bool)
     /// Resolves and consumes the original message ID for our own re-broadcast.
     let takeSelfBroadcastMessageID: (BitchatPacket) -> String?
     /// Delivers `.publicMessageReceived` to the UI as one main-actor hop.
@@ -48,7 +46,8 @@ final class BLEPublicMessageHandler {
         self.environment = environment
     }
 
-    func handle(_ packet: BitchatPacket, from peerID: PeerID) {
+    @discardableResult
+    func handle(_ packet: BitchatPacket, from peerID: PeerID) -> Bool {
         let env = environment
         let now = env.now()
         let messageDecision = BLEPublicMessagePolicy.evaluate(
@@ -63,10 +62,10 @@ final class BLEPublicMessageHandler {
         case .accept(let acceptance):
             messagePolicy = acceptance
         case .reject(.selfEcho):
-            return
+            return false
         case .reject(.staleBroadcast(let ageSeconds)):
             SecureLogger.debug("⏰ Ignoring stale broadcast message from \(peerID.id.prefix(8))… (age: \(ageSeconds)s)", category: .session)
-            return
+            return false
         }
 
         // Snapshot peers to avoid concurrent mutation while iterating during nickname collision checks.
@@ -92,7 +91,7 @@ final class BLEPublicMessageHandler {
         let signedDisplayName = (isSelf || verifiedViaRegistry) ? nil : env.signedSenderDisplayName(packet, peerID)
         guard isSelf || verifiedViaRegistry || signedDisplayName != nil else {
             SecureLogger.warning("🚫 Dropping public message with missing/invalid signature for claimed sender \(peerID.id.prefix(8))…", category: .security)
-            return
+            return false
         }
 
         // Authenticity is established; prefer the registry's collision-resolved
@@ -105,7 +104,7 @@ final class BLEPublicMessageHandler {
             allowConnectedUnverified: false
         ) ?? signedDisplayName else {
             SecureLogger.warning("🚫 Dropping public message from unknown peer \(peerID.id.prefix(8))…", category: .security)
-            return
+            return false
         }
 
         if messagePolicy.shouldTrackForSync {
@@ -119,19 +118,14 @@ final class BLEPublicMessageHandler {
         // so nothing larger than a v1 frame is delivered.
         guard packet.payload.count <= Self.maxDeliveredPayloadBytes else {
             SecureLogger.warning("🚫 Dropping \(packet.payload.count)-byte public message from \(peerID.id.prefix(8))…: larger than a v1 frame", category: .security)
-            return
+            return false
         }
 
         guard let content = String(data: packet.payload, encoding: .utf8) else {
             SecureLogger.error("❌ Failed to decode message payload as UTF-8", category: .session)
-            return
+            return false
         }
-        // Determine if we have a direct link to the sender
-        let directLink = env.linkState(peerID)
-        let hasDirectLink = directLink.hasPeripheral || directLink.hasCentral
-
-        let pathTag = hasDirectLink ? "direct" : "mesh"
-        SecureLogger.debug("💬 [\(senderNickname)] TTL:\(packet.ttl) (\(pathTag)) chars=\(content.count) bytes=\(packet.payload.count)", category: .session)
+        SecureLogger.debug("💬 [\(senderNickname)] TTL:\(packet.ttl) chars=\(content.count) bytes=\(packet.payload.count)", category: .session)
 
         let ts = Date(timeIntervalSince1970: Double(packet.timestamp) / 1000)
         let messageID: String?
@@ -147,5 +141,53 @@ final class BLEPublicMessageHandler {
             )
         }
         env.deliverPublicMessage(peerID, senderNickname, content, ts, messageID)
+        return true
+    }
+}
+
+
+// MARK: - Public Message Acceptance Policy
+
+struct BLEPublicMessageAcceptance: Equatable {
+    let shouldTrackForSync: Bool
+}
+
+enum BLEPublicMessageRejection: Equatable {
+    case selfEcho
+    case staleBroadcast(ageSeconds: Double)
+}
+
+enum BLEPublicMessageDecision: Equatable {
+    case accept(BLEPublicMessageAcceptance)
+    case reject(BLEPublicMessageRejection)
+}
+
+enum BLEPublicMessagePolicy {
+    static func evaluate(
+        packet: BitchatPacket,
+        from peerID: PeerID,
+        localPeerID: PeerID,
+        now: Date
+    ) -> BLEPublicMessageDecision {
+        if peerID == localPeerID && packet.ttl != 0 {
+            return .reject(.selfEcho)
+        }
+
+        let isBroadcast = BLEPacketFreshnessPolicy.isBroadcastRecipient(packet.recipientID)
+        if isBroadcast,
+           BLEPacketFreshnessPolicy.isStale(
+               timestampMilliseconds: packet.timestamp,
+               now: now,
+               maxAgeSeconds: TransportConfig.syncPublicMessageMaxAgeSeconds
+           ) {
+            return .reject(.staleBroadcast(ageSeconds: BLEPacketFreshnessPolicy.ageSeconds(
+                timestampMilliseconds: packet.timestamp,
+                now: now
+            )))
+        }
+
+        return .accept(BLEPublicMessageAcceptance(
+            shouldTrackForSync: isBroadcast && packet.type == MessageType.message.rawValue
+        ))
     }
 }

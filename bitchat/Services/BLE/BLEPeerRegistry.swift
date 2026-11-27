@@ -10,9 +10,6 @@ struct BLEPeerInfo: Equatable {
     var isVerifiedNickname: Bool
     var lastSeen: Date
     var capabilities: PeerCapabilities = []
-    /// Distinguishes an old client that omitted the capabilities TLV from a
-    /// modern client that explicitly advertised a set without a given bit.
-    var capabilitiesWereExplicitlyAdvertised: Bool = false
     /// Rendezvous cell from the peer's announce when it advertises `.bridge`.
     var bridgeGeohash: String?
 }
@@ -21,11 +18,6 @@ struct BLEPeerAnnounceUpdate: Equatable {
     let isNewPeer: Bool
     let wasDisconnected: Bool
     let previousNickname: String?
-}
-
-struct BLEPeerLinkPresence: Equatable {
-    var hasPeripheral: Bool
-    var hasCentral: Bool
 }
 
 struct BLERemovedPeer: Equatable {
@@ -129,10 +121,6 @@ struct BLEPeerRegistry {
 
     func capabilities(for peerID: PeerID) -> PeerCapabilities {
         peers[peerID.toShort()]?.capabilities ?? []
-    }
-
-    func capabilitiesWereExplicitlyAdvertised(for peerID: PeerID) -> Bool {
-        peers[peerID.toShort()]?.capabilitiesWereExplicitlyAdvertised == true
     }
 
     /// Peers whose last verified announce advertised the given capability.
@@ -245,7 +233,6 @@ struct BLEPeerRegistry {
             isVerifiedNickname: true,
             lastSeen: now,
             capabilities: capabilities ?? [],
-            capabilitiesWereExplicitlyAdvertised: capabilities != nil,
             bridgeGeohash: bridgeGeohash
         )
 
@@ -254,7 +241,7 @@ struct BLEPeerRegistry {
 
     mutating func reconcileConnectivity(
         now: Date,
-        linkStates: [PeerID: BLEPeerLinkPresence]
+        linkStates: [PeerID: BLEDirectLinkState]
     ) -> BLEPeerConnectivityChanges {
         var changes = BLEPeerConnectivityChanges()
 
@@ -265,8 +252,8 @@ struct BLEPeerRegistry {
                 : TransportConfig.bleReachabilityRetentionUnverifiedSeconds
 
             if peer.isConnected && age > TransportConfig.blePeerInactivityTimeoutSeconds {
-                let state = linkStates[peerID] ?? BLEPeerLinkPresence(hasPeripheral: false, hasCentral: false)
-                if !state.hasPeripheral && !state.hasCentral {
+                let state = linkStates[peerID] ?? .none
+                if !state.isConnected {
                     var updated = peer
                     updated.isConnected = false
                     peers[peerID] = updated
@@ -281,5 +268,74 @@ struct BLEPeerRegistry {
         }
 
         return changes
+    }
+}
+
+
+// MARK: - Lock-Backed Shared Registry Store
+
+/// Lock-backed shared ownership of the peer registry, readable from any
+/// queue or the main actor without hopping onto a transport queue.
+final class BLEPeerRegistryStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var registry = BLEPeerRegistry()
+
+    func read<T>(_ body: (BLEPeerRegistry) -> T) -> T {
+        lock.withLock { body(registry) }
+    }
+
+    func mutate<T>(_ body: (inout BLEPeerRegistry) -> T) -> T {
+        lock.withLock { body(&registry) }
+    }
+
+    // MARK: - Single-question reads
+
+    var peerIDs: [PeerID] { read { $0.peerIDs } }
+    var connectedCount: Int { read { $0.connectedCount } }
+    var connectedPeerIDs: [PeerID] { read { $0.connectedPeerIDs } }
+    var connectedRoutingData: [Data] { read { $0.connectedRoutingData } }
+    var snapshotByID: [PeerID: BLEPeerInfo] { read { $0.snapshotByID } }
+
+    func info(for peerID: PeerID) -> BLEPeerInfo? {
+        read { $0.info(for: peerID) }
+    }
+
+    func isConnected(_ peerID: PeerID) -> Bool {
+        read { $0.isConnected(peerID) }
+    }
+
+    func isReachable(_ peerID: PeerID, now: Date) -> Bool {
+        read { $0.isReachable(peerID, now: now) }
+    }
+
+    func nickname(for peerID: PeerID, connectedOnly: Bool) -> String? {
+        read { $0.nickname(for: peerID, connectedOnly: connectedOnly) }
+    }
+
+    func fingerprint(for peerID: PeerID) -> String? {
+        read { $0.fingerprint(for: peerID) }
+    }
+
+    func capabilities(for peerID: PeerID) -> PeerCapabilities {
+        read { $0.capabilities(for: peerID) }
+    }
+
+    func advertisedBridgeGeohash() -> String? {
+        read { $0.advertisedBridgeGeohash() }
+    }
+
+    func displayNicknames(selfNickname: String) -> [PeerID: String] {
+        read { $0.displayNicknames(selfNickname: selfNickname) }
+    }
+
+    func transportSnapshots(selfNickname: String) -> [TransportPeerSnapshot] {
+        read { $0.transportSnapshots(selfNickname: selfNickname) }
+    }
+
+    func reachablePeers(advertising capability: PeerCapabilities, now: Date) -> [PeerID] {
+        read { registry in
+            registry.peers(advertising: capability)
+                .filter { registry.isReachable($0, now: now) }
+        }
     }
 }

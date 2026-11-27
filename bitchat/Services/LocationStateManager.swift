@@ -24,52 +24,11 @@ protocol LocationStateGeocoding: AnyObject {
     )
 }
 
-private final class CLLocationManagerAdapter: NSObject, LocationStateManaging {
-    private let base = CLLocationManager()
-
-    var delegate: CLLocationManagerDelegate? {
-        get { base.delegate }
-        set { base.delegate = newValue }
-    }
-
-    var desiredAccuracy: CLLocationAccuracy {
-        get { base.desiredAccuracy }
-        set { base.desiredAccuracy = newValue }
-    }
-
-    var distanceFilter: CLLocationDistance {
-        get { base.distanceFilter }
-        set { base.distanceFilter = newValue }
-    }
-
-    var authorizationStatus: CLAuthorizationStatus {
-        base.authorizationStatus
-    }
-
-    func requestWhenInUseAuthorization() {
-        base.requestWhenInUseAuthorization()
-    }
-
-    func requestLocation() {
-        base.requestLocation()
-    }
-
-    func startUpdatingLocation() {
-        base.startUpdatingLocation()
-    }
-
-    func stopUpdatingLocation() {
-        base.stopUpdatingLocation()
-    }
-}
+extension CLLocationManager: LocationStateManaging {}
 
 private final class CLGeocoderAdapter: LocationStateGeocoding {
     private let base = CLGeocoder()
-
-    func cancelGeocode() {
-        base.cancelGeocode()
-    }
-
+    func cancelGeocode() { base.cancelGeocode() }
     func reverseGeocodeLocation(
         _ location: CLLocation,
         completionHandler: @escaping ([CLPlacemark]?, Error?) -> Void
@@ -101,7 +60,6 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
 
     private let cl: LocationStateManaging
     private let geocoder: LocationStateGeocoding
-    private var refreshTimer: Timer?
 
     // MARK: - Persistence Keys
 
@@ -132,26 +90,16 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     private var resolvingNames: Set<String> = []
     private let storage: UserDefaults
 
-    /// Returns true if running in test environment
-    private static var isRunningTests: Bool {
-        let env = ProcessInfo.processInfo.environment
-        return NSClassFromString("XCTestCase") != nil ||
-               env["XCTestConfigurationFilePath"] != nil ||
-               env["XCTestBundlePath"] != nil ||
-               env["GITHUB_ACTIONS"] != nil ||
-               env["CI"] != nil
-    }
-
     // MARK: - Initialization
 
     private override init() {
         self.storage = .standard
-        self.cl = CLLocationManagerAdapter()
+        self.cl = CLLocationManager()
         self.geocoder = CLGeocoderAdapter()
         super.init()
 
         // Skip CoreLocation setup in test environments
-        guard !Self.isRunningTests else {
+        guard !TestEnvironment.isRunningTests else {
             loadPersistedState()
             return
         }
@@ -167,7 +115,7 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     /// Internal initializer for testing with custom storage
     init(storage: UserDefaults) {
         self.storage = storage
-        self.cl = CLLocationManagerAdapter()
+        self.cl = CLLocationManager()
         self.geocoder = CLGeocoderAdapter()
         super.init()
         loadPersistedState()
@@ -288,10 +236,8 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         }
     }
 
-    func beginLiveRefresh(interval _: TimeInterval = TransportConfig.locationLiveRefreshInterval) {
+    func beginLiveRefresh() {
         guard permissionState == .authorized else { return }
-        refreshTimer?.invalidate()
-        refreshTimer = nil
         cl.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
         cl.distanceFilter = TransportConfig.locationDistanceFilterLiveMeters
         cl.startUpdatingLocation()
@@ -299,8 +245,6 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     }
 
     func endLiveRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
         cl.stopUpdatingLocation()
         cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
         cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
@@ -655,13 +599,4 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
 
 typealias LocationChannelManager = LocationStateManager
 typealias GeohashBookmarksStore = LocationStateManager
-
-// MARK: - Backward Compatibility Extensions
-
-extension LocationStateManager {
-    /// Backward compatibility: toggle bookmark (was GeohashBookmarksStore.toggle)
-    func toggle(_ geohash: String) {
-        toggleBookmark(geohash)
-    }
-}
 #endif

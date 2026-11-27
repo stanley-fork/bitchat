@@ -12,25 +12,14 @@ import Foundation
 /// documents the coordinator's real coupling to private-chat state, peer
 /// identity, and the routing/ack transports.
 @MainActor
-protocol ChatPrivateConversationContext: AnyObject {
+protocol ChatPrivateConversationContext: ChatIdentityContext, ChatDirectMessageStoreContext {
     // MARK: Conversation state
     var privateChats: [PeerID: [BitchatMessage]] { get }
-    /// A single private chat's timeline. Witnessed by the store-direct
-    /// lookup on `ChatViewModel` (no `privateChats` dictionary build).
-    func privateMessages(for peerID: PeerID) -> [BitchatMessage]
     var sentReadReceipts: Set<String> { get }
     var selectedPrivateChatPeer: PeerID? { get }
-    var nickname: String { get }
-    var activeChannel: ChannelID { get }
     var nostrKeyMapping: [PeerID: String] { get }
 
     // MARK: Conversation store intents
-    // The sole mutation paths for private message state (single-writer
-    // `ConversationStore` ops; see docs/CONVERSATION-STORE-DESIGN.md).
-    /// Appends a private message in timestamp order; returns `false` on
-    /// duplicate message ID.
-    @discardableResult
-    func appendPrivateMessage(_ message: BitchatMessage, to peerID: PeerID) -> Bool
     /// Replace-or-append a private message by ID, keeping its position.
     func upsertPrivateMessage(_ message: BitchatMessage, in peerID: PeerID)
     /// Applies a delivery status by message ID; returns `false` when the
@@ -38,7 +27,6 @@ protocol ChatPrivateConversationContext: AnyObject {
     @discardableResult
     func setPrivateDeliveryStatus(_ status: DeliveryStatus, forMessageID messageID: String, peerID: PeerID) -> Bool
     func markPrivateChatUnread(_ peerID: PeerID)
-    func markPrivateChatRead(_ peerID: PeerID)
     /// Moves all messages from `oldPeerID`'s chat into `newPeerID`'s chat
     /// (dedup by ID, order preserved, unread carried, old chat removed).
     func migratePrivateChat(from oldPeerID: PeerID, to newPeerID: PeerID)
@@ -58,11 +46,8 @@ protocol ChatPrivateConversationContext: AnyObject {
     /// Moves the open private chat to `newPeerID` when the current selection is
     /// one of the peer IDs being migrated away.
     func handOffSelectedPrivateChat(from oldPeerIDs: [PeerID], to newPeerID: PeerID)
-    /// Signals that message state changed so observers refresh (e.g. `objectWillChange.send()`).
-    func notifyUIChanged()
 
     // MARK: Peers & identity
-    var myPeerID: PeerID { get }
     func peerNickname(for peerID: PeerID) -> String?
     func isPeerConnected(_ peerID: PeerID) -> Bool
     func isPeerReachable(_ peerID: PeerID) -> Bool
@@ -79,12 +64,9 @@ protocol ChatPrivateConversationContext: AnyObject {
     func isNostrBlocked(pubkeyHexLowercased: String) -> Bool
     func displayNameForNostrPubkey(_ pubkeyHex: String) -> String
     func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity
-    func currentNostrIdentity() -> NostrIdentity?
 
     // MARK: Routing & acknowledgements
     func routePrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String)
-    @discardableResult
-    func routeReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) -> Bool
     /// Confirms an authenticated delivery/read acknowledgement so the router
     /// stops retaining the original private message for resend. The peer
     /// aliases scope the removal to the authenticated sender.
@@ -155,7 +137,12 @@ extension ChatViewModel: ChatPrivateConversationContext {
     }
 
     func deriveNostrIdentity(forGeohash geohash: String) throws -> NostrIdentity {
-        try idBridge.deriveIdentity(forGeohash: geohash)
+        if let cached = cachedGeohashIdentity, cached.geohash == geohash {
+            return cached.identity
+        }
+        let identity = try idBridge.deriveIdentity(forGeohash: geohash)
+        cachedGeohashIdentity = (geohash, identity)
+        return identity
     }
 
     func currentNostrIdentity() -> NostrIdentity? {
@@ -381,7 +368,6 @@ final class ChatPrivateConversationCoordinator {
         )
 
         context.appendPrivateMessage(message, to: peerID)
-        context.notifyUIChanged()
 
         // Always hand the message to the router — it owns delivery. A live
         // link sends now; an unreachable peer gets the retained-outbox path
@@ -430,7 +416,6 @@ final class ChatPrivateConversationCoordinator {
         )
 
         context.appendPrivateMessage(message, to: peerID)
-        context.notifyUIChanged()
 
         guard let recipientHex = context.nostrKeyMapping[peerID] else {
             context.setPrivateDeliveryStatus(
@@ -577,7 +562,6 @@ final class ChatPrivateConversationCoordinator {
             context.notifyPrivateMessage(from: senderName, message: pm.content, peerID: conversationPeerID)
         }
 
-        context.notifyUIChanged()
     }
 
     func handleDelivered(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID) {
@@ -598,7 +582,6 @@ final class ChatPrivateConversationCoordinator {
                 peerID: conversationPeerID
             )
             if didChange {
-                context.notifyUIChanged()
             }
             SecureLogger.info(
                 "GeoDM: recv DELIVERED for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…",
@@ -635,7 +618,6 @@ final class ChatPrivateConversationCoordinator {
                 peerID: conversationPeerID
             )
             if didChange {
-                context.notifyUIChanged()
             }
             SecureLogger.info("GeoDM: recv READ for mid=\(messageID.prefix(8))… from=\(senderPubkey.prefix(8))…", category: .session)
         } else if clearedRetainedMessage {
@@ -716,7 +698,6 @@ final class ChatPrivateConversationCoordinator {
             context.notifyPrivateMessage(from: message.sender, message: message.content, peerID: peerID)
         }
 
-        context.notifyUIChanged()
     }
 
     /// O(1)-per-conversation dedup via the store's message-ID indexes
@@ -740,59 +721,6 @@ final class ChatPrivateConversationCoordinator {
         }
 
         context.upsertPrivateMessage(message, in: ephemeralPeerID)
-    }
-
-    func handleViewingThisChat(
-        _ message: BitchatMessage,
-        targetPeerID: PeerID,
-        key: Data?,
-        senderPubkey: String
-    ) {
-        context.markPrivateChatRead(targetPeerID)
-        if let key,
-           let ephemeralPeerID = context.ephemeralPeerID(forNoiseKey: key) {
-            context.markPrivateChatRead(ephemeralPeerID)
-        }
-        guard !context.sentReadReceipts.contains(message.id) else { return }
-
-        if let key {
-            let receipt = ReadReceipt(
-                originalMessageID: message.id,
-                readerID: context.myPeerID,
-                readerNickname: context.nickname
-            )
-            SecureLogger.debug("Viewing chat; sending READ ack for \(message.id.prefix(8))… via router", category: .session)
-            context.routeReadReceipt(receipt, to: PeerID(hexData: key))
-            context.markReadReceiptSent(message.id)
-        } else if let identity = context.currentNostrIdentity() {
-            context.sendGeohashReadReceipt(message.id, toRecipientHex: senderPubkey, from: identity)
-            context.markReadReceiptSent(message.id)
-            SecureLogger.debug(
-                "Viewing chat; sent READ ack directly to Nostr pub=\(senderPubkey.prefix(8))… for mid=\(message.id.prefix(8))…",
-                category: .session
-            )
-        }
-    }
-
-    func markAsUnreadIfNeeded(
-        shouldMarkAsUnread: Bool,
-        targetPeerID: PeerID,
-        key: Data?,
-        isRecentMessage: Bool,
-        senderNickname: String,
-        messageContent: String
-    ) {
-        guard shouldMarkAsUnread else { return }
-
-        context.markPrivateChatUnread(targetPeerID)
-        if let key,
-           let ephemeralPeerID = context.ephemeralPeerID(forNoiseKey: key),
-           ephemeralPeerID != targetPeerID {
-            context.markPrivateChatUnread(ephemeralPeerID)
-        }
-        if isRecentMessage {
-            context.notifyPrivateMessage(from: senderNickname, message: messageContent, peerID: targetPeerID)
-        }
     }
 
     /// Applies an inbound `[FAVORITED]`/`[UNFAVORITED]` marker from either
@@ -919,7 +847,6 @@ final class ChatPrivateConversationCoordinator {
             }
 
             if didMigrate {
-                context.notifyUIChanged()
             }
         }
     }

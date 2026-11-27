@@ -50,8 +50,7 @@ struct ChatViewModelInitializationTests {
     func initialization_setsDelegate() async {
         let (viewModel, transport) = makeTestableViewModel()
 
-        // The viewModel should set itself as the transport delegate
-        #expect(transport.delegate === viewModel)
+        // The viewModel should set itself as the transport event delegate
         #expect(transport.eventDelegate === viewModel)
     }
 
@@ -492,7 +491,6 @@ struct ChatViewModelReceivingTests {
 
         // Message may or may not appear due to rate limiting/pipeline batching
         // The important thing is no crash and delegate was called
-        #expect(transport.delegate === viewModel)
         #expect(transport.eventDelegate === viewModel)
     }
 
@@ -530,12 +528,12 @@ struct ChatViewModelNoisePayloadTests {
         #expect(payload != nil)
         guard let payload else { return }
 
-        viewModel.didReceiveNoisePayload(
-            from: peerID,
+        viewModel.didReceiveTransportEvent(.noisePayloadReceived(
+            peerID: peerID,
             type: .privateMessage,
             payload: payload,
             timestamp: Date()
-        )
+        ))
 
         let stored = await TestHelpers.waitUntil({
             viewModel.privateChats[peerID]?.contains(where: { $0.id == "pm-noise-1" && $0.content == "Secret hello" }) == true
@@ -570,12 +568,12 @@ struct ChatViewModelNoisePayloadTests {
         )
         viewModel.seedPrivateChat([message], for: peerID)
 
-        viewModel.didReceiveNoisePayload(
-            from: peerID,
+        viewModel.didReceiveTransportEvent(.noisePayloadReceived(
+            peerID: peerID,
             type: .delivered,
             payload: Data("pm-delivered-1".utf8),
             timestamp: Date()
-        )
+        ))
 
         let delivered = await TestHelpers.waitUntil({
             guard let status = viewModel.privateChats[peerID]?.first?.deliveryStatus else { return false }
@@ -608,12 +606,12 @@ struct ChatViewModelNoisePayloadTests {
         )
         viewModel.seedPrivateChat([message], for: peerID)
 
-        viewModel.didReceiveNoisePayload(
-            from: peerID,
+        viewModel.didReceiveTransportEvent(.noisePayloadReceived(
+            peerID: peerID,
             type: .readReceipt,
             payload: Data("pm-read-before-name".utf8),
             timestamp: Date()
-        )
+        ))
 
         let privateChatUpdated = await TestHelpers.waitUntil({
             guard let status = viewModel.privateChats[peerID]?.first?.deliveryStatus else { return false }
@@ -918,8 +916,6 @@ struct ChatViewModelPeerTests {
 
         viewModel.didReceiveTransportEvent(.peerConnected(peerID))
 
-        #expect(viewModel.isConnected)
-
         viewModel.didReceiveTransportEvent(.peerDisconnected(peerID))
 
         #expect(!viewModel.sentReadReceipts.contains(incoming.id))
@@ -966,11 +962,6 @@ struct ChatViewModelPeerTests {
         viewModel.didReceiveTransportEvent(.bluetoothStateUpdated(.poweredOff))
         #expect(viewModel.bluetoothState == .poweredOff)
         #expect(viewModel.showBluetoothAlert)
-
-        // Snapshot events belong to TransportPeerEventsDelegate and are
-        // intentionally ignored at this typed sink.
-        viewModel.didReceiveTransportEvent(.peerSnapshotsUpdated([]))
-        #expect(viewModel.bluetoothState == .poweredOff)
     }
 
     @Test @MainActor
@@ -1013,7 +1004,7 @@ struct ChatViewModelPeerTests {
         let stalePeer = PeerID(str: "00000000000000a2")
         viewModel.markPrivateChatUnread(stalePeer)
 
-        viewModel.didUpdatePeerList([])
+        viewModel.didReceiveTransportEvent(.peerListUpdated([]))
 
         let cleaned = await TestHelpers.waitUntil({
             !viewModel.unreadPrivateMessages.contains(stalePeer)
@@ -1041,7 +1032,7 @@ struct ChatViewModelPeerTests {
         viewModel.seedPrivateChat([message], for: stablePeer)
         viewModel.markPrivateChatUnread(stablePeer)
 
-        viewModel.didUpdatePeerList([])
+        viewModel.didReceiveTransportEvent(.peerListUpdated([]))
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         #expect(viewModel.unreadPrivateMessages.contains(stablePeer))
@@ -1312,7 +1303,7 @@ struct ChatViewModelPrivateMediaDeletionTests {
     }
 
     @Test @MainActor
-    func stableDeleteProtectsPathSharedWithLegacyBubble() {
+    func stableDeleteRefusalKeepsBubblesAndSurfacesSystemMessage() {
         let (viewModel, transport) = makeTestableViewModel()
         transport.persistDeletedPrivateMediaResult = false
         let peerID = PeerID(str: String(repeating: "6", count: 64))
@@ -1341,11 +1332,9 @@ struct ChatViewModelPrivateMediaDeletionTests {
         #expect(
             transport.deletedPrivateMediaMessageIDBatches == [[stableID]]
         )
-        #expect(transport.deletedPrivateMediaRelativePaths == [[:]])
         #expect(
-            transport.protectedPrivateMediaRelativePaths == [[
-                "images/incoming/\(filename)"
-            ]]
+            transport.deletedPrivateMediaRelativePaths
+                == [[stableID: "images/incoming/\(filename)"]]
         )
         let messages = viewModel.privateChats[peerID] ?? []
         #expect(messages.prefix(2).map(\.id) == [stableID, legacyID])
@@ -1608,6 +1597,8 @@ struct ChatViewModelPrivateMediaDeletionTests {
             kind: .canceled
         ))
         let coordinator = viewModel.liveVoiceCoordinator
+        // Live voice defaults off; this fixture exercises the opted-in path.
+        coordinator.liveVoiceEnabled = { true }
         defer {
             coordinator.handleVoiceFramePayload(
                 from: peerID,
@@ -2151,6 +2142,27 @@ struct ChatViewModelPrivateMediaDeletionTests {
 struct ChatViewModelPanicTests {
 
     @Test @MainActor
+    func panicClearAllData_turnsLiveVoiceBackOff() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: PTTSettings.liveVoiceEnabledKey)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: PTTSettings.liveVoiceEnabledKey)
+            } else {
+                defaults.removeObject(forKey: PTTSettings.liveVoiceEnabledKey)
+            }
+        }
+        PTTSettings.liveVoiceEnabled = true
+        let (viewModel, _) = makeTestableViewModel()
+
+        viewModel.panicClearAllData()
+
+        // A wiped device comes back like a fresh install: not streaming holds
+        // and not auto-playing strangers.
+        #expect(!PTTSettings.liveVoiceEnabled)
+    }
+
+    @Test @MainActor
     func panicClearAllData_finishesMediaWipeBeforeReturning() {
         var wipeFinished = false
         let (viewModel, _) = makeTestableViewModel(panicMediaWipe: {
@@ -2409,5 +2421,32 @@ struct ChatViewModelLifecycleTests {
         let (_, transport) = makeTestableViewModel()
 
         #expect(transport.startServicesCallCount == 1)
+    }
+}
+
+// MARK: - Live Voice Gate Tests
+
+struct ChatViewModelLiveVoiceGateTests {
+
+    @Test @MainActor
+    func holdOnPublicMesh_recordsAClassicNoteWhileLiveVoiceIsOff() {
+        let (viewModel, _) = makeTestableViewModel()
+        viewModel.activeChannel = .mesh
+        viewModel.liveVoiceCoordinator.liveVoiceEnabled = { false }
+
+        // Off means nothing leaves the device before release: the hold records
+        // a classic voice note that sends only once it is finished.
+        #expect(!viewModel.makeVoiceCaptureSession().isLive)
+    }
+
+    @Test @MainActor
+    func holdOnPublicMesh_streamsLiveOnlyAfterOptingIn() {
+        let (viewModel, _) = makeTestableViewModel()
+        viewModel.activeChannel = .mesh
+        viewModel.liveVoiceCoordinator.liveVoiceEnabled = { true }
+
+        // The same hold goes live once the switch is on, so the test above
+        // fails if the gate is removed instead of passing vacuously.
+        #expect(viewModel.makeVoiceCaptureSession().isLive)
     }
 }

@@ -26,12 +26,16 @@ import CoreBluetooth
 /// - `autoFloodEnabled` is disabled by default; Integration tests enable it in `setUp()` to
 ///   simulate broadcast propagation across the mesh. E2E tests keep it off and perform explicit
 ///   relays when needed.
+protocol MockBLEDelegate: AnyObject {
+    func didReceiveMessage(_ message: BitchatMessage)
+}
+
 final class MockBLEService: NSObject {
     private let bus: MockBLEBus
     
     // MARK: - Properties matching BLEService
     
-    weak var delegate: BitchatDelegate?
+    weak var delegate: MockBLEDelegate?
     var myPeerID = PeerID(str: "MOCK1234")
     var myNickname: String = "MockUser"
 
@@ -109,7 +113,7 @@ final class MockBLEService: NSObject {
             mentions: mentions.isEmpty ? nil : mentions
         )
         
-        if let payload = message.toBinaryPayload() {
+        if let payload = message.toTestPayload() {
             let packet = BitchatPacket(
                 type: 0x01,
                 senderID: myPeerID.id.data(using: .utf8)!,
@@ -151,7 +155,7 @@ final class MockBLEService: NSObject {
             mentions: nil
         )
         
-        if let payload = message.toBinaryPayload() {
+        if let payload = message.toTestPayload() {
             let packet = BitchatPacket(
                 type: 0x01,
                 senderID: myPeerID.id.data(using: .utf8)!,
@@ -189,15 +193,11 @@ final class MockBLEService: NSObject {
         registerIfNeeded()
         bus.connect(myPeerID, peerID)
         connectedPeers.insert(peerID)
-        delegate?.didConnectToPeer(peerID)
-        delegate?.didUpdatePeerList(Array(connectedPeers))
     }
     
     func simulateDisconnectedPeer(_ peerID: PeerID) {
         bus.disconnect(myPeerID, peerID)
         connectedPeers.remove(peerID)
-        delegate?.didDisconnectFromPeer(peerID)
-        delegate?.didUpdatePeerList(Array(connectedPeers))
     }
     
     func simulateIncomingMessage(_ message: BitchatMessage) {
@@ -211,7 +211,7 @@ final class MockBLEService: NSObject {
 
     func simulateIncomingPacket(_ packet: BitchatPacket) {
         // Process through the actual handling logic
-        if let message = BitchatMessage(packet.payload) {
+        if let message = BitchatMessage.fromTestPayload(packet.payload) {
             var shouldDeliver = false
             seenLock.lock()
             if !seenMessageIDs.contains(message.id) {
@@ -267,5 +267,15 @@ extension MockBLEService {
     func simulateConnection(with otherPeer: MockBLEService) {
         simulateConnectedPeer(otherPeer.myPeerID)
         otherPeer.simulateConnectedPeer(myPeerID)
+    }
+}
+
+extension BitchatMessage {
+    func toTestPayload() -> Data? {
+        try? JSONEncoder().encode(self)
+    }
+
+    static func fromTestPayload(_ data: Data) -> BitchatMessage? {
+        try? JSONDecoder().decode(BitchatMessage.self, from: data)
     }
 }

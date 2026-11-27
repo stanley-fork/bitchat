@@ -42,7 +42,6 @@ protocol ChatLiveVoiceContext: AnyObject {
     /// Publishes who is currently talking live in the public mesh channel
     /// (floor-courtesy indicator on the composer mic), nil when nobody is.
     func setActivePublicVoiceTalker(_ nickname: String?)
-    func notifyUIChanged()
 }
 
 extension ChatViewModel: ChatLiveVoiceContext {
@@ -79,6 +78,11 @@ enum VoiceBurstScope: Hashable {
 /// bubble so nobody sees a duplicate.
 @MainActor
 final class ChatLiveVoiceCoordinator {
+    /// Injectable so tests exercise the live path without racing other
+    /// suites through the shared UserDefaults-backed preference (which now
+    /// defaults OFF).
+    var liveVoiceEnabled: () -> Bool = { PTTSettings.liveVoiceEnabled }
+
     /// Burst IDs are sender-chosen, so they only identify a burst *within*
     /// an authenticated (peer, scope) pair: keying assemblies by the full
     /// triple stops an attacker who observed a public burst ID from racing
@@ -215,7 +219,7 @@ final class ChatLiveVoiceCoordinator {
     /// `ioQueue` in production while keeping synchronous unit tests deterministic.
     init(
         context: any ChatLiveVoiceContext,
-        fileStore: BLEIncomingFileStore = BLEIncomingFileStore(),
+        fileStore: BLEIncomingFileStore = .shared,
         sweepsOnInit: Bool = true,
         asyncStartupSweep: Bool = false,
         asyncQuotaEnforcement: Bool = false
@@ -262,7 +266,7 @@ final class ChatLiveVoiceCoordinator {
         // Live voice off means classic-notes-only in both directions: no live
         // bubble, no partial file, no early notification — the finalized
         // voice note still arrives through the normal pipeline.
-        guard PTTSettings.liveVoiceEnabled else {
+        guard liveVoiceEnabled() else {
             SecureLogger.debug("PTT: dropping inbound voice frame — live voice is toggled off", category: .session)
             return
         }
@@ -415,7 +419,6 @@ final class ChatLiveVoiceCoordinator {
         try? fileManager.removeItem(at: finished.fileURL)
         finishedBursts.removeValue(forKey: entry.key)
 
-        context.notifyUIChanged()
         SecureLogger.debug("PTT: absorbed finalized note for burst \(burstID.hexEncodedString())", category: .session)
         return true
     }
@@ -490,7 +493,7 @@ final class ChatLiveVoiceCoordinator {
         case .directMessage: context.selectedPrivateChatPeer == peerID
         case .publicMesh: context.isViewingPublicMeshTimeline
         }
-        if PTTSettings.liveVoiceEnabled, PTTSettings.isAppActive, isViewing {
+        if liveVoiceEnabled(), PTTSettings.isAppActive, isViewing {
             assembly.player = PTTBurstPlayer()
         }
 
@@ -614,7 +617,6 @@ final class ChatLiveVoiceCoordinator {
             // Nothing audible ever arrived — drop the empty bubble.
             removeBubble(of: assembly)
             try? fileManager.removeItem(at: assembly.fileURL)
-            context.notifyUIChanged()
             return
         }
 
@@ -651,7 +653,6 @@ final class ChatLiveVoiceCoordinator {
             messageTimestamp: assembly.messageTimestamp,
             expiresAt: Date().addingTimeInterval(TransportConfig.pttFinishedBurstRegistrySeconds)
         )
-        context.notifyUIChanged()
         SecureLogger.debug("PTT: burst \(assembly.burstID.hexEncodedString()) finalized (\(assembly.deliveredFrames) frames)", category: .session)
     }
 
@@ -721,7 +722,6 @@ final class ChatLiveVoiceCoordinator {
         removeBubble(of: assembly)
         WaveformCache.shared.purge(url: assembly.fileURL)
         try? fileManager.removeItem(at: assembly.fileURL)
-        context.notifyUIChanged()
     }
 
     // MARK: - Timers

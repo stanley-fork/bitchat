@@ -271,42 +271,6 @@ struct ChatViewModelDeliveryStatusTests {
     // MARK: - Read Receipt Handling
 
     @Test @MainActor
-    func didReceiveReadReceipt_updatesMessageStatus() async {
-        let (viewModel, transport) = makeTestableViewModel()
-        let peerID = PeerID(str: "0102030405060708")
-        let messageID = "test-msg-4"
-
-        // Setup: create a message with .sent status
-        let message = BitchatMessage(
-            id: messageID,
-            sender: viewModel.nickname,
-            content: "Test message",
-            timestamp: Date(),
-            isRelay: false,
-            isPrivate: true,
-            recipientNickname: "Peer",
-            senderPeerID: transport.myPeerID,
-            deliveryStatus: .sent
-        )
-        viewModel.seedPrivateChat([message], for: peerID)
-
-        // Action: receive read receipt
-        let receipt = ReadReceipt(
-            originalMessageID: messageID,
-            readerID: peerID,
-            readerNickname: "Peer"
-        )
-        viewModel.didReceiveReadReceipt(receipt)
-
-        // Assert: status should be .read
-        let currentStatus = viewModel.privateChats[peerID]?.first?.deliveryStatus
-        #expect({
-            if case .read = currentStatus { return true }
-            return false
-        }())
-    }
-
-    @Test @MainActor
     func authenticatedNoiseAckCannotClearAnotherPeersRetryState() async {
         let (viewModel, transport) = makeTestableViewModel()
         let intendedPeer = PeerID(str: "0102030405060708")
@@ -340,24 +304,24 @@ struct ChatViewModelDeliveryStatusTests {
 
         // This models a decrypted Noise receipt: the transport-authenticated
         // peer is authoritative, not the attacker-controlled message ID.
-        viewModel.didReceiveNoisePayload(
-            from: otherPeer,
+        viewModel.didReceiveTransportEvent(.noisePayloadReceived(
+            peerID: otherPeer,
             type: .delivered,
             payload: Data(messageID.utf8),
             timestamp: Date()
-        )
+        ))
         for _ in 0..<10 { await Task.yield() }
 
         #expect(isSent(viewModel.conversations.deliveryStatus(forMessageID: messageID)))
         viewModel.messageRouter.flushOutbox(for: intendedPeer)
         #expect(transport.sentPrivateMessages.count == 2)
 
-        viewModel.didReceiveNoisePayload(
-            from: intendedPeer,
+        viewModel.didReceiveTransportEvent(.noisePayloadReceived(
+            peerID: intendedPeer,
             type: .delivered,
             payload: Data(messageID.utf8),
             timestamp: Date()
-        )
+        ))
         for _ in 0..<10 { await Task.yield() }
 
         #expect(isDelivered(viewModel.conversations.deliveryStatus(forMessageID: messageID)))
@@ -775,7 +739,6 @@ private final class MockChatDeliveryContext: ChatDeliveryContext {
     let store = ConversationStore()
     var sentReadReceipts: Set<String> = []
     var isStartupPhase = false
-    private(set) var notifyUIChangedCount = 0
     private(set) var markedDeliveredMessageIDs: [String] = []
     private(set) var peerBoundDeliveredMessages: [(messageID: String, peerIDs: Set<PeerID>)] = []
     private(set) var confirmedMediaMessageIDs: [String] = []
@@ -812,9 +775,6 @@ private final class MockChatDeliveryContext: ChatDeliveryContext {
         return oldCount - sentReadReceipts.count
     }
 
-    func notifyUIChanged() {
-        notifyUIChangedCount += 1
-    }
 
     func markMessageDelivered(_ messageID: String) {
         markedDeliveredMessageIDs.append(messageID)
@@ -901,7 +861,6 @@ struct ChatDeliveryCoordinatorContextTests {
 
         #expect(didUpdate)
         #expect(isDelivered(context.store.conversation(for: .directPeer(peerID)).message(withID: messageID)?.deliveryStatus))
-        #expect(context.notifyUIChangedCount == 1)
         #expect(context.markedDeliveredMessageIDs == [messageID])
     }
 
@@ -916,12 +875,13 @@ struct ChatDeliveryCoordinatorContextTests {
             to: .directPeer(peerID)
         )
 
-        coordinator.didReceiveReadReceipt(
-            ReadReceipt(originalMessageID: messageID, readerID: peerID, readerNickname: "Peer")
+        coordinator.updateAcknowledgedMessageDeliveryStatus(
+            messageID,
+            status: .read(by: "Peer", at: Date()),
+            from: [peerID]
         )
 
         #expect(isRead(coordinator.deliveryStatus(for: messageID)))
-        #expect(context.notifyUIChangedCount == 1)
         #expect(context.markedDeliveredMessageIDs.isEmpty)
         #expect(context.peerBoundDeliveredMessages.count == 1)
         #expect(context.peerBoundDeliveredMessages[0].messageID == messageID)
@@ -973,7 +933,6 @@ struct ChatDeliveryCoordinatorContextTests {
         #expect(context.peerBoundDeliveredMessages.count == 1)
         #expect(context.peerBoundDeliveredMessages[0].messageID == messageID)
         #expect(context.peerBoundDeliveredMessages[0].peerIDs == aliases)
-        #expect(context.notifyUIChangedCount == 1)
     }
 
     @Test @MainActor
@@ -1028,12 +987,10 @@ struct ChatDeliveryCoordinatorContextTests {
             to: .directPeer(intendedPeer)
         )
 
-        coordinator.didReceiveReadReceipt(
-            ReadReceipt(
-                originalMessageID: messageID,
-                readerID: otherPeer,
-                readerNickname: "Other"
-            )
+        coordinator.updateAcknowledgedMessageDeliveryStatus(
+            messageID,
+            status: .read(by: "Other", at: Date()),
+            from: [otherPeer]
         )
 
         #expect(isSent(coordinator.deliveryStatus(for: messageID)))
@@ -1045,7 +1002,6 @@ struct ChatDeliveryCoordinatorContextTests {
         #expect(context.peerBoundDeliveredMessages[0].peerIDs == [otherPeer])
         #expect(context.markedDeliveredMessageIDs.isEmpty)
         #expect(context.confirmedMediaMessageIDs.isEmpty)
-        #expect(context.notifyUIChangedCount == 0)
     }
 
     @Test @MainActor
@@ -1078,7 +1034,6 @@ struct ChatDeliveryCoordinatorContextTests {
         #expect(context.peerBoundDeliveredMessages[0].peerIDs == [peerID])
         #expect(context.markedDeliveredMessageIDs.isEmpty)
         #expect(context.confirmedMediaMessageIDs.isEmpty)
-        #expect(context.notifyUIChangedCount == 0)
     }
 
     @Test @MainActor
@@ -1092,12 +1047,10 @@ struct ChatDeliveryCoordinatorContextTests {
         #expect(didUpdate)
         #expect(isSent(context.store.conversation(for: .mesh).message(withID: "public-mock-1")?.deliveryStatus))
         #expect(context.markedDeliveredMessageIDs.isEmpty)
-        #expect(context.notifyUIChangedCount == 1)
 
         // Unknown message: no state change, no extra UI notification.
         let didUpdateUnknown = coordinator.updateMessageDeliveryStatus("missing-msg", status: .sent)
         #expect(!didUpdateUnknown)
-        #expect(context.notifyUIChangedCount == 1)
     }
 
     // The old positional `messageLocationIndex` could go stale when a late

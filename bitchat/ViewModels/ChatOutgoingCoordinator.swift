@@ -10,11 +10,8 @@ import Foundation
 /// testable (see `ChatOutgoingCoordinatorContextTests`) and makes its true
 /// dependencies explicit.
 @MainActor
-protocol ChatOutgoingContext: AnyObject {
-    // MARK: Identity & channel state
-    var nickname: String { get }
-    var myPeerID: PeerID { get }
-    var activeChannel: ChannelID { get }
+protocol ChatOutgoingContext: ChatIdentityContext {
+    // MARK: Channel & selection state
     var selectedPrivateChatPeer: PeerID? { get }
     var isTeleported: Bool { get }
 
@@ -36,10 +33,6 @@ protocol ChatOutgoingContext: AnyObject {
     func recordContentKey(_ key: String, timestamp: Date)
 
     // MARK: Outbound routing
-    /// Stamps "now" as the channel's last public activity (background nudges).
-    /// (Single mutation path for the owner's `lastPublicActivityAt`; this
-    /// coordinator never reads it.)
-    func recordPublicActivity(forChannelKey key: String)
     func sendMeshMessage(_ content: String, mentions: [String], messageID: String, timestamp: Date)
     func sendGeohash(context: ChatViewModel.GeoOutgoingContext)
     /// Ships the bridged (rendezvous) copy of a just-sent public mesh
@@ -64,10 +57,6 @@ extension ChatViewModel: ChatOutgoingContext {
     // shared requirements with the other contexts or satisfied by existing
     // `ChatViewModel` members. The single-writer intent op below lives next to
     // its backing state's owner.
-
-    func recordPublicActivity(forChannelKey key: String) {
-        lastPublicActivityAt[key] = Date()
-    }
 
     func bridgeOutgoingPublicMessage(_ content: String, senderPeerID: PeerID, timestamp: Date) {
         BridgeService.shared.bridgeOutgoing(content: content, senderPeerID: senderPeerID, timestamp: timestamp)
@@ -152,7 +141,6 @@ private extension ChatOutgoingCoordinator {
         )
 
         appendLocalEcho(message, to: .mesh)
-        context.recordPublicActivity(forChannelKey: "mesh")
         context.sendMeshMessage(
             originalContent,
             mentions: mentions,
@@ -231,7 +219,6 @@ private extension ChatOutgoingCoordinator {
             let contentKey = context.normalizedContentKey(message.content)
             context.recordContentKey(contentKey, timestamp: message.timestamp)
 
-            context.recordPublicActivity(forChannelKey: "geo:\(channel.geohash)")
             context.sendGeohash(context: (
                 channel: channel,
                 event: event,

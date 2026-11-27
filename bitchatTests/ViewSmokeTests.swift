@@ -147,15 +147,9 @@ private struct ContentPeopleSheetHarness: View {
     @State private var isAtBottomPrivate = true
     @StateObject private var voiceRecordingVM = VoiceRecordingViewModel()
     @FocusState private var isTextFieldFocused: Bool
-    #if os(iOS)
-    @State private var showImagePicker = false
-    @State private var imagePickerSourceType: UIImagePickerController.SourceType = .photoLibrary
-    #else
-    @State private var showMacImagePicker = false
-    #endif
+    @State private var mediaPickerMode: MediaPickerMode?
 
     var body: some View {
-        #if os(iOS)
         ContentPeopleSheetView(
             showSidebar: $showSidebar,
             draftModel: draftModel,
@@ -168,25 +162,8 @@ private struct ContentPeopleSheetHarness: View {
             voiceRecordingVM: voiceRecordingVM,
             headerHeight: 44,
             onSendMessage: {},
-            showImagePicker: $showImagePicker,
-            imagePickerSourceType: $imagePickerSourceType
+            mediaPickerMode: $mediaPickerMode
         )
-        #else
-        ContentPeopleSheetView(
-            showSidebar: $showSidebar,
-            draftModel: draftModel,
-            selectedMessageSender: $selectedMessageSender,
-            selectedMessageSenderID: $selectedMessageSenderID,
-            imagePreviewURL: $imagePreviewURL,
-            windowCountPrivate: $windowCountPrivate,
-            isAtBottomPrivate: $isAtBottomPrivate,
-            isTextFieldFocused: $isTextFieldFocused,
-            voiceRecordingVM: voiceRecordingVM,
-            headerHeight: 44,
-            onSendMessage: {},
-            showMacImagePicker: $showMacImagePicker
-        )
-        #endif
     }
 }
 
@@ -315,21 +292,16 @@ struct ViewSmokeTests {
 
         transport.peerFingerprints[peerID] = fingerprint
         transport.updatePeerSnapshots([makeSnapshot(peerID: peerID, nickname: "Verifier", noiseByte: 0x33)])
-        featureModels.privateConversationModel.startConversation(with: peerID)
+        featureModels.privateConversationModel.openConversation(for: peerID)
         viewModel.verifiedFingerprints.insert(fingerprint)
-
-        let image = try makeCGImage()
 
         let myQR = MyQRView(qrString: "bitchat://verify?name=alice&npub=npub1test")
         let qrCode = QRCodeImage(data: "bitchat://verify?hello=world", size: 96)
-        let imageWrapper = ImageWrapper(image: image)
 
         _ = myQR.body
         _ = qrCode.body
-        _ = imageWrapper.body
         _ = mount(myQR)
         _ = mount(qrCode)
-        _ = mount(imageWrapper)
         _ = mount(
             VerificationSheetView(
                 isPresented: Binding(
@@ -555,7 +527,7 @@ struct ViewSmokeTests {
         _ = mount(installSmokeEnvironment(ContentView(), featureModels: featureModels))
         _ = mount(installSmokeEnvironment(ContentPeopleSheetHarness(draftModel: featureModels.composerDraftModel), featureModels: featureModels))
 
-        featureModels.privateConversationModel.startConversation(with: peerID)
+        featureModels.privateConversationModel.openConversation(for: peerID)
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         _ = mount(installSmokeEnvironment(ContentPeopleSheetHarness(draftModel: featureModels.composerDraftModel), featureModels: featureModels))
@@ -838,4 +810,110 @@ struct ViewSmokeTests {
         #expect(preview.videoPreviewLayer.videoGravity == .resizeAspectFill)
         #endif
     }
+
+    #if os(iOS)
+    @Test("Liquid Glass chat scroll view does not double-inset or offset the first message")
+    func liquidGlassMessageList_doesNotDoubleTopInsetFirstMessage() async {
+        let (viewModel, _, _) = makeSmokeViewModel()
+        let featureModels = makeSmokeFeatureModels(for: viewModel)
+
+        // Start in a populated #mesh channel (scrolled down) before switching
+        // to an initially empty #ez channel where 2 Tor system messages arrive
+        // with the keyboard up — reproducing channel switch, empty→populated
+        // transition, and keyboard safe-area changes in one test.
+        let meshHistory: [BitchatMessage] = (0..<80).map { i in
+            BitchatMessage(
+                id: "mesh-\(i)",
+                sender: "alice",
+                content: "crowded room message number \(i)",
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)),
+                isRelay: false
+            )
+        }
+        viewModel.conversations.appendBatch(meshHistory, to: .mesh)
+
+        let rootView = installSmokeEnvironment(
+            ContentView().environment(\.appTheme, .liquidGlass),
+            featureModels: featureModels
+        )
+        let host = UIHostingController(rootView: rootView)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Switch to empty #ez and simulate the keyboard opening.
+        let channel = GeohashChannel(level: .region, geohash: "ez")
+        featureModels.locationChannelsModel.select(.location(channel))
+        viewModel.conversations.setActiveChannel(.location(channel))
+        host.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: 330, right: 0)
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Now deliver two system messages (matching the Tor restart screenshot).
+        let first = BitchatMessage(
+            id: "sys-1",
+            sender: "system",
+            content: "tor is restarting to restore connectivity...",
+            timestamp: Date(timeIntervalSince1970: 1_700_001_000),
+            isRelay: false
+        )
+        let second = BitchatMessage(
+            id: "sys-2",
+            sender: "system",
+            content: "tor restarted. network routing restored.",
+            timestamp: Date(timeIntervalSince1970: 1_700_001_001),
+            isRelay: false
+        )
+        viewModel.conversations.append(first, to: .geohash("ez"))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        viewModel.conversations.append(second, to: .geohash("ez"))
+        // Let followToBottom + 50ms retry settle.
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+
+        func findScrollView(in view: UIView) -> UIScrollView? {
+            if let sv = view as? UIScrollView { return sv }
+            for subview in view.subviews {
+                if let found = findScrollView(in: subview) { return found }
+            }
+            return nil
+        }
+
+        let scrollView = findScrollView(in: host.view)
+        #expect(scrollView != nil)
+        if let scrollView {
+            let frameTopInWindow = scrollView.superview?.convert(scrollView.frame.origin, to: window).y ?? scrollView.frame.origin.y
+            let contentZeroInWindow = scrollView.convert(CGPoint.zero, to: window).y
+            let topInset = scrollView.adjustedContentInset.top
+            let expectedMaxTop = host.view.safeAreaInsets.top + 80
+            #expect(
+                frameTopInWindow <= host.view.safeAreaInsets.top + 1,
+                "ScrollView frame should extend behind top safeAreaInset (frameTop=\(frameTopInWindow), hostSafeTop=\(host.view.safeAreaInsets.top), topInset=\(topInset), contentOffset.y=\(scrollView.contentOffset.y), contentZeroInWindow=\(contentZeroInWindow))"
+            )
+            #expect(
+                contentZeroInWindow <= expectedMaxTop,
+                "First message top (\(contentZeroInWindow)) exceeded header budget (\(expectedMaxTop)); frameTop=\(frameTopInWindow), topInset=\(topInset), contentOffset.y=\(scrollView.contentOffset.y), hostSafeTop=\(host.view.safeAreaInsets.top)"
+            )
+            // Also verify the actual rendered content subview inside UIScrollView
+            // is not vertically centered or pushed halfway down.
+            let renderedContentMinY = scrollView.subviews
+                .filter { $0.bounds.height > 1 && $0.bounds.width > 100 }
+                .map { scrollView.convert($0.frame.origin, to: window).y }
+                .min()
+            if let renderedContentMinY {
+                #expect(
+                    renderedContentMinY <= expectedMaxTop + 16,
+                    "Rendered content subview top (\(renderedContentMinY)) was pushed down (expected <= \(expectedMaxTop + 16)); contentSize=\(scrollView.contentSize), contentOffset=\(scrollView.contentOffset), adjustedContentInset=\(scrollView.adjustedContentInset)"
+                )
+            }
+        }
+        window.isHidden = true
+    }
+    #endif
 }

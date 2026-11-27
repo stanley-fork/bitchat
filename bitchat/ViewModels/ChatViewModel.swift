@@ -123,7 +123,7 @@ private struct PendingPrivateChatClear {
 /// Manages the application state and business logic for BitChat.
 /// Acts as the primary coordinator between UI components and backend services,
 /// implementing the BitchatDelegate protocol to handle network events.
-final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessageTransportEventDelegate, CommandContextProvider, GeohashParticipantContext, MessageFormattingContext {
+final class ChatViewModel: ObservableObject, SynchronousMessageTransportEventDelegate, CommandContextProvider, GeohashParticipantContext {
     // Use MessageFormattingEngine.Patterns for regex matching (shared, precompiled)
     typealias Patterns = MessageFormattingEngine.Patterns
 
@@ -170,9 +170,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         return current
     }
     private var visibleMessagesCache: [BitchatMessage]?
-    @Published var currentColorScheme: ColorScheme = .light
-    @Published var currentTheme: AppTheme = .matrix
-    @Published var isConnected = false
+    var currentColorScheme: ColorScheme = .light
+    var currentTheme: AppTheme = .matrix
     @Published private(set) var panicRecoveryBlocked = false
     var networkActivationAllowed: Bool { !panicRecoveryBlocked }
     @Published var nickname: String = "" {
@@ -325,7 +324,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
 
     @Published var autocompleteSuggestions: [String] = []
     @Published var showAutocomplete: Bool = false
-    @Published var autocompleteRange: NSRange? = nil
+    var autocompleteRange: NSRange? = nil
     @Published var selectedAutocompleteIndex: Int = 0
 
     // MARK: - Services and Storage
@@ -361,7 +360,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             outgoingCoordinator.expeditePendingGeohashMining()
             conversations.setActiveChannel(newValue)
             visibleMessagesCache = nil
-            objectWillChange.send()
         }
     }
     // Single-writer: mutate only via `setGeoChatSubscriptionID(_:)` / `setGeoDmSubscriptionID(_:)` below.
@@ -430,8 +428,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             update(self.deliveryCoordinator)
         }
     }
-    // Channel activity tracking for background nudges
-    var lastPublicActivityAt: [String: Date] = [:]   // channelKey -> last activity time
     // Geohash participant tracker
     let participantTracker = GeohashParticipantTracker(activityCutoff: -TransportConfig.uiRecentCutoffFiveMinutesSeconds)
     // Participants who indicated they teleported (by tag in their events)
@@ -1085,6 +1081,12 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         conversations.append(message, to: conversationID)
     }
 
+    @MainActor
+    @discardableResult
+    func appendPublicMessages(_ messages: [BitchatMessage], to conversationID: ConversationID) -> [BitchatMessage] {
+        conversations.appendBatch(messages, to: conversationID)
+    }
+
     /// Appends a geohash message if absent. Returns `true` when stored
     /// (the legacy `PublicTimelineStore.appendIfAbsent` contract).
     @MainActor
@@ -1208,7 +1210,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             identityManager: identityManager,
             startSuspendedForPanicRecovery: startSuspendedForRecovery
         )
-        meshService.sfMetrics = .shared
         self.init(
             keychain: keychain,
             idBridge: idBridge,
@@ -1219,7 +1220,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             locationPresenceStore: locationPresenceStore ?? LocationPresenceStore(),
             locationManager: locationManager,
             outboxStore: MessageOutboxStore(keychain: keychain),
-            sfMetrics: .shared,
             panicRecoveryOperations: panicRecoveryOperations,
             panicNetworkLifecycle: .live
         )
@@ -1239,7 +1239,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         locationManager: LocationChannelManager = .shared,
         readReceiptsDefaults: UserDefaults? = nil,
         outboxStore: MessageOutboxStore? = nil,
-        sfMetrics: StoreAndForwardMetrics? = nil,
         panicMediaWipe: (() throws -> Void)? = nil,
         panicRecoveryOperations: PanicRecoveryOperations? = nil,
         panicNetworkLifecycle: PanicNetworkLifecycle = .noop
@@ -1252,8 +1251,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             idBridge: idBridge,
             identityManager: identityManager,
             meshService: transport,
-            outboxStore: outboxStore,
-            sfMetrics: sfMetrics
+            outboxStore: outboxStore
         )
 
         self.keychain = keychain
@@ -1291,7 +1289,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
                 if self.changeAffectsActivePublicConversation(change) {
                     self.visibleMessagesCache = nil
                 }
-                self.objectWillChange.send()
             }
             .store(in: &cancellables)
 
@@ -1317,15 +1314,15 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             _ = panicClearAllData(restartServices: false)
         }
 
+        // Eagerly initialize coordinators before transports attach so non-main
+        // BitchatDelegate callers (e.g. test transports like MockTransport or
+        // any future off-main delegate delivery) cannot race Swift lazy var init.
+        _ = transportEventCoordinator
+        _ = peerListCoordinator
+
         if networkActivationAllowed {
             ChatViewModelBootstrapper(viewModel: self).configure()
         }
-    }
-
-    // MARK: - Deinitialization
-
-    deinit {
-        // No need to force UserDefaults synchronization
     }
 
     // MARK: - Nickname Management
@@ -1560,7 +1557,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             senderPeerID: meshService.myPeerID
         )
         appendPrivateMessage(systemMessage, to: peerID)
-        objectWillChange.send()
     }
 
     // MARK: - Bluetooth State Management
@@ -1729,18 +1725,21 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         GatewayService.shared.resetForPanic()
         messageRouter.wipeOutbox()
         GossipMessageArchive.wipeDefault()
-        StoreAndForwardMetrics.shared.reset()
 
         // Ambient-liveliness bookkeeping: sampled nearby-chat previews, the
-        // daily sightings tally, and the echoes-dismissed watermark
+        // daily sightings tally, and legacy persisted activity keys
         GeohashChatActivityTracker.shared.clear()
         MeshSightingsTracker.shared.clear()
+        UserDefaults.standard.removeObject(forKey: "chat.bitchat.storeAndForwardMetrics")
         MeshEchoSettings.reset()
         NotificationPrivacySettings.reset()
         ComposerDraftStore.reset()
         // A hand-added relay names an operator someone chose to route through,
         // which is the kind of trace a wipe should not leave behind.
         NostrRelaySettings.reset()
+        // Live voice streams before release and plays strangers out loud, so a
+        // wiped device comes back with it off, like a fresh install.
+        PTTSettings.reset()
         NearbyNotesCounter.shared.resetForPanic()
         LocationNotesPool.shared.resetForPanic()
         LocationNotesDependencies.clearCachedIdentitiesForPanic()
@@ -1982,7 +1981,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
     @MainActor
     func refreshVisibleMessages(from channel: ChannelID? = nil) {
         visibleMessagesCache = nil
-        objectWillChange.send()
     }
 
     /// `true` when a store change touches the active public conversation
@@ -2002,28 +2000,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         case .migrated(let source, let destination):
             return source == activeID || destination == activeID
         }
-    }
-
-    @MainActor
-    private func peerColor(for message: BitchatMessage, isDark: Bool) -> Color {
-        messageFormatter.senderColor(for: message, isDark: isDark)
-    }
-
-    // MARK: - MessageFormattingContext Protocol
-
-    @MainActor
-    func isSelfMessage(_ message: BitchatMessage) -> Bool {
-        messageFormatter.isSelfMessage(message)
-    }
-
-    @MainActor
-    func senderColor(for message: BitchatMessage, isDark: Bool) -> Color {
-        peerColor(for: message, isDark: isDark)
-    }
-
-    @MainActor
-    func peerURL(for peerID: PeerID) -> URL? {
-        messageFormatter.peerURL(for: peerID)
     }
 
     // Public helpers for views to color peers consistently in lists
@@ -2220,9 +2196,6 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
             // where a peer's `.vouch` capability actually arrives.
             vouchCoordinator.peersUpdated(peers)
 
-        case .peerSnapshotsUpdated:
-            break
-
         case let .messageDeliveryStatusUpdated(messageID, status):
             deliveryCoordinator.didUpdateMessageDeliveryStatus(
                 messageID,
@@ -2239,86 +2212,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         transportEventCoordinator.didReceiveMessageSynchronously(message)
     }
 
-    func didReceiveMessage(_ message: BitchatMessage) {
-        transportEventCoordinator.didReceiveMessage(message)
-    }
-
-    // Low-level BLE events
-    func didReceiveNoisePayload(from peerID: PeerID, type: NoisePayloadType, payload: Data, timestamp: Date) {
-        transportEventCoordinator.didReceiveNoisePayload(
-            from: peerID,
-            type: type,
-            payload: payload,
-            timestamp: timestamp
-        )
-    }
-
-    func didReceivePublicMessage(from peerID: PeerID, nickname: String, content: String, timestamp: Date, messageID: String?) {
-        transportEventCoordinator.didReceivePublicMessage(
-            from: peerID,
-            nickname: nickname,
-            content: content,
-            timestamp: timestamp,
-            messageID: messageID
-        )
-    }
-
-    func didReceiveGroupMessage(payload: Data, timestamp: Date) {
-        Task { @MainActor [weak self] in
-            self?.groupCoordinator.handleGroupMessagePayload(payload, timestamp: timestamp)
-        }
-    }
-
-    func didReceivePublicVoiceFrame(from peerID: PeerID, nickname: String, payload: Data, timestamp: Date) {
-        Task { @MainActor [weak self] in
-            self?.liveVoiceCoordinator.handlePublicVoiceFramePayload(
-                from: peerID,
-                nickname: nickname,
-                payload: payload,
-                timestamp: timestamp
-            )
-        }
-    }
-
     // MARK: - QR Verification API
     @MainActor
     func beginQRVerification(with qr: VerificationService.VerificationQR) -> Bool {
         verificationCoordinator.beginQRVerification(with: qr)
-    }
-
-    // Mention parsing moved from BLE – use the existing non-optional helper below
-    // MARK: - Bluetooth State Monitoring
-
-    func didUpdateBluetoothState(_ state: CBManagerState) {
-        Task { @MainActor in
-            updateBluetoothState(state)
-        }
-    }
-
-    // MARK: - Peer Connection Events
-
-    func didConnectToPeer(_ peerID: PeerID) {
-        transportEventCoordinator.didConnectToPeer(peerID)
-        Task { @MainActor [weak self] in
-            self?.mediaTransferCoordinator.peerDidReconnect(peerID)
-        }
-    }
-
-    func didDisconnectFromPeer(_ peerID: PeerID) {
-        transportEventCoordinator.didDisconnectFromPeer(peerID)
-        Task { @MainActor [weak self] in
-            self?.mediaTransferCoordinator.peerDidDisconnect(peerID)
-        }
-    }
-
-    func didUpdatePeerList(_ peers: [PeerID]) {
-        peerListCoordinator.didUpdatePeerList(peers)
-        // A peer-list update follows every verified announce, which is where a
-        // peer's `.vouch` capability actually arrives — retry vouching now that
-        // capabilities may finally be known (closes the auth-time capability race).
-        Task { @MainActor [weak self] in
-            self?.vouchCoordinator.peersUpdated(peers)
-        }
     }
 
     @MainActor
@@ -2359,17 +2256,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, SynchronousMessage
         composerCoordinator.parseMentions(from: content)
     }
 
-    func isFavorite(fingerprint: String) -> Bool {
-        return identityManager.isFavorite(fingerprint: fingerprint)
-    }
-
     // MARK: - Delivery Tracking
-
-    func didReceiveReadReceipt(_ receipt: ReadReceipt) {
-        performDeliveryUpdate { coordinator in
-            coordinator.didReceiveReadReceipt(receipt)
-        }
-    }
 
     func didUpdateMessageDeliveryStatus(_ messageID: String, status: DeliveryStatus) {
         performDeliveryUpdate { coordinator in

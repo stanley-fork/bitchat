@@ -16,6 +16,7 @@ final class MockKeychain: KeychainManagerProtocol {
 
     // BCH-01-009: Configurable error simulation for testing
     var simulatedReadError: KeychainReadResult?
+    var simulatedReadErrorKeys: Set<String>?
     var simulatedSaveError: KeychainSaveResult?
     var simulatedGenericReadError: KeychainReadResult?
     var simulatedDeleteAllResult = true
@@ -32,6 +33,10 @@ final class MockKeychain: KeychainManagerProtocol {
 
     func getIdentityKey(forKey key: String) -> Data? {
         getIdentityKeyCallCount += 1
+        if simulatedReadError != nil,
+           simulatedReadErrorKeys == nil || simulatedReadErrorKeys?.contains(key) == true {
+            return nil
+        }
         return storage[key]
     }
 
@@ -52,10 +57,6 @@ final class MockKeychain: KeychainManagerProtocol {
         data = Data()
     }
 
-    func secureClear(_ string: inout String) {
-        string = ""
-    }
-
     func verifyIdentityKeyExists() -> Bool {
         storage["identity_noiseStaticKey"] != nil
     }
@@ -63,7 +64,8 @@ final class MockKeychain: KeychainManagerProtocol {
     // BCH-01-009: New methods with proper error classification
     func getIdentityKeyWithResult(forKey key: String) -> KeychainReadResult {
         getIdentityKeyCallCount += 1
-        if let simulated = simulatedReadError {
+        if let simulated = simulatedReadError,
+           simulatedReadErrorKeys == nil || simulatedReadErrorKeys?.contains(key) == true {
             return simulated
         }
         if let data = storage[key] {
@@ -92,6 +94,9 @@ final class MockKeychain: KeychainManagerProtocol {
 
     func load(key: String, service: String) -> Data? {
         loadCallCount += 1
+        if simulatedGenericReadError != nil {
+            return nil
+        }
         return serviceStorage[service]?[key]
     }
 
@@ -126,7 +131,6 @@ final class TrackingMockKeychain: KeychainManagerProtocol {
     /// Thread-safe counter for secureClear calls
     private let lock = NSLock()
     private var _secureClearDataCallCount = 0
-    private var _secureClearStringCallCount = 0
 
     // BCH-01-009: Configurable error simulation for testing
     var simulatedReadError: KeychainReadResult?
@@ -138,21 +142,14 @@ final class TrackingMockKeychain: KeychainManagerProtocol {
         return _secureClearDataCallCount
     }
 
-    var secureClearStringCallCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _secureClearStringCallCount
-    }
-
     var totalSecureClearCallCount: Int {
-        return secureClearDataCallCount + secureClearStringCallCount
+        return secureClearDataCallCount
     }
 
     func resetCounts() {
         lock.lock()
         defer { lock.unlock() }
         _secureClearDataCallCount = 0
-        _secureClearStringCallCount = 0
     }
 
     func saveIdentityKey(_ keyData: Data, forKey key: String) -> Bool {
@@ -180,13 +177,6 @@ final class TrackingMockKeychain: KeychainManagerProtocol {
         _secureClearDataCallCount += 1
         lock.unlock()
         data = Data()
-    }
-
-    func secureClear(_ string: inout String) {
-        lock.lock()
-        _secureClearStringCallCount += 1
-        lock.unlock()
-        string = ""
     }
 
     func verifyIdentityKeyExists() -> Bool {

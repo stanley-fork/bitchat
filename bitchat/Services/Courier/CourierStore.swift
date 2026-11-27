@@ -121,7 +121,7 @@ final class CourierStore {
 
     private var envelopes: [StoredEnvelope] = []
     private let queue = DispatchQueue(label: "chat.bitchat.courier.store")
-    private let fileURL: URL?
+    private let fileStore: AppSupportFileStore
     private let now: () -> Date
     private let readData: (URL) throws -> Data
     /// A protected file can be present but unreadable during an iOS
@@ -142,7 +142,13 @@ final class CourierStore {
         readData: @escaping (URL) throws -> Data = { try Data(contentsOf: $0) }
     ) {
         self.now = now
-        self.fileURL = persistsToDisk ? (fileURL ?? Self.defaultFileURL()) : nil
+        self.fileStore = AppSupportFileStore(
+            persistsToDisk: persistsToDisk,
+            fileURL: fileURL,
+            subdirectory: "courier",
+            fileName: "envelopes.json",
+            protection: .untilFirstUserAuthentication
+        )
         self.readData = readData
         loadFromDisk()
         #if os(iOS)
@@ -250,6 +256,7 @@ final class CourierStore {
 
     // MARK: - Handover (on encountering a peer)
 
+    #if DEBUG
     /// Remove and return all envelopes addressed to the given peer, matching
     /// the rotating recipient tag across adjacent days. This compatibility
     /// helper accepts every offer; transport callers should use
@@ -262,6 +269,7 @@ final class CourierStore {
         }
         return handedOver
     }
+    #endif
 
     /// Attempts direct handover without retiring the durable carried copy
     /// until the transport accepts it onto the intended peer's physical link.
@@ -355,6 +363,7 @@ final class CourierStore {
 
     // MARK: - Spray-and-wait (on encountering another courier)
 
+    #if DEBUG
     /// Envelopes to re-deposit with a courier we just encountered, each with
     /// half its remaining budget (binary spray). Skips envelopes the courier
     /// deposited, envelopes addressed to them (those ride the handover path),
@@ -367,6 +376,7 @@ final class CourierStore {
         }
         return sprayed
     }
+    #endif
 
     /// Offers binary-spray copies one at a time and commits the reduced local
     /// budget plus `sprayedTo` marker only after the directed transport accepts
@@ -423,9 +433,7 @@ final class CourierStore {
         queue.sync {
             envelopes.removeAll()
             diskLoadDeferred = false
-            if let fileURL {
-                try? FileManager.default.removeItem(at: fileURL)
-            }
+            fileStore.removeIgnoringErrors()
             publishCountLocked()
         }
     }
@@ -463,7 +471,7 @@ final class CourierStore {
 
     private func persistLocked() {
         publishCountLocked()
-        guard let fileURL else { return }
+        guard fileStore.fileURL != nil else { return }
         // Never turn a transient protected-data read failure into an
         // authoritative empty/new file. Once readable, resolve first by
         // merging the durable and in-memory snapshots.
@@ -471,27 +479,14 @@ final class CourierStore {
             return
         }
         do {
-            if envelopes.isEmpty {
-                try? FileManager.default.removeItem(at: fileURL)
-                return
-            }
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try JSONEncoder().encode(envelopes)
-            var options: Data.WritingOptions = [.atomic]
-            #if os(iOS)
-            options.insert(.completeFileProtectionUntilFirstUserAuthentication)
-            #endif
-            try data.write(to: fileURL, options: options)
+            try fileStore.saveJSON(envelopes, isEmpty: envelopes.isEmpty)
         } catch {
             SecureLogger.error("Failed to persist courier store: \(error)", category: .session)
         }
     }
 
     private func loadFromDisk() {
-        guard let fileURL else { return }
+        guard let fileURL = fileStore.fileURL else { return }
         queue.sync {
             guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 diskLoadDeferred = false
@@ -504,7 +499,7 @@ final class CourierStore {
                     diskLoadDeferred = false
                     pruneExpiredLocked(at: now())
                     publishCountLocked()
-                    Self.migrateFileProtectionIfNeeded(at: fileURL)
+                    fileStore.migrateProtectionIfNeeded(logContext: "courier store")
                 } catch {
                     // The bytes were readable, so this is corruption/schema
                     // failure rather than protected-data unavailability.
@@ -520,7 +515,7 @@ final class CourierStore {
 
     /// Must be called on `queue`.
     private func resolveDeferredLoadLocked() -> Bool {
-        guard diskLoadDeferred, let fileURL else { return true }
+        guard diskLoadDeferred, let fileURL = fileStore.fileURL else { return true }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             diskLoadDeferred = false
             return true
@@ -532,7 +527,7 @@ final class CourierStore {
             diskLoadDeferred = false
             pruneExpiredLocked(at: now())
             publishCountLocked()
-            Self.migrateFileProtectionIfNeeded(at: fileURL)
+            fileStore.migrateProtectionIfNeeded(logContext: "courier store")
             return true
         } catch let error as DecodingError {
             // Readability returned but the snapshot is corrupt. Do not pin
@@ -607,30 +602,5 @@ final class CourierStore {
             }
         }
         return merged
-    }
-
-    private static func migrateFileProtectionIfNeeded(at fileURL: URL) {
-        #if os(iOS)
-        do {
-            try FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                ofItemAtPath: fileURL.path
-            )
-        } catch {
-            SecureLogger.warning("Failed to migrate courier store file protection: \(error)", category: .session)
-        }
-        #endif
-    }
-
-    private static func defaultFileURL() -> URL? {
-        guard let base = try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ) else { return nil }
-        return base
-            .appendingPathComponent("courier", isDirectory: true)
-            .appendingPathComponent("envelopes.json")
     }
 }

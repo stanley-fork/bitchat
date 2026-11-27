@@ -78,7 +78,6 @@ enum TransportEvent: @unchecked Sendable {
     case peerConnected(PeerID)
     case peerDisconnected(PeerID)
     case peerListUpdated([PeerID])
-    case peerSnapshotsUpdated([TransportPeerSnapshot])
     case messageDeliveryStatusUpdated(messageID: String, status: DeliveryStatus)
     case bluetoothStateUpdated(CBManagerState)
 }
@@ -105,15 +104,11 @@ protocol PrivateMediaDeletionPersisting: AnyObject {
     func persistDeletedPrivateMedia(
         messageIDs: [String],
         payloadRelativePaths: [String: String],
-        protectedPayloadRelativePaths: Set<String>,
         completion: @escaping @MainActor (Bool) -> Void
     )
 
-    /// Gated unlink for a LEGACY (non-stable-ID) incoming payload whose
-    /// bubble was explicitly removed. Implementations delete the file only
-    /// when its path is not pending delivery and not reserved by any receipt
-    /// or in-flight deletion transaction; otherwise the file stays for
-    /// bounded quota cleanup.
+    /// Unlinks a legacy (non-stable-ID) incoming payload whose bubble was
+    /// explicitly removed when no stable receipt owns the path.
     @MainActor
     func removeLegacyPrivateMediaPayload(relativePath: String)
 }
@@ -130,9 +125,7 @@ protocol SynchronousMessageTransportEventDelegate: TransportEventDelegate {
 }
 
 protocol Transport: AnyObject {
-    // Event sink
-    var delegate: BitchatDelegate? { get set }
-    // Typed event sink for transport-domain events. Prefer this over BitchatDelegate for new code.
+    // Typed event sink for transport-domain events.
     var eventDelegate: TransportEventDelegate? { get set }
     // Peer events (preferred over publishers for UI)
     var peerEventsDelegate: TransportPeerEventsDelegate? { get set }
@@ -235,6 +228,23 @@ extension BitchatMessage {
 }
 
 extension Transport {
+    // Inert defaults for transports that only handle a subset of the mesh
+    // surface (e.g. NostrTransport for offline private messaging).
+    func currentPeerSnapshots() -> [TransportPeerSnapshot] { [] }
+    var myNickname: String { "" }
+    func setNickname(_ nickname: String) {}
+    func startServices() {}
+    func stopServices() {}
+    func emergencyDisconnectAll() {}
+    func isPeerConnected(_ peerID: PeerID) -> Bool { false }
+    func peerNickname(peerID: PeerID) -> String? { nil }
+    func getPeerNicknames() -> [PeerID: String] { [:] }
+    func getFingerprint(for peerID: PeerID) -> String? { nil }
+    func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState { .none }
+    func triggerHandshake(with peerID: PeerID) {}
+    func sendMessage(_ content: String, mentions: [String]) {}
+    func sendBroadcastAnnounce() {}
+
     // Reachability implies prompt delivery for transports that hand packets
     // straight to the radio; queue-backed transports override this.
     func canDeliverPromptly(to peerID: PeerID) -> Bool { isPeerReachable(peerID) }
@@ -266,42 +276,6 @@ extension Transport {
 
 protocol TransportPeerEventsDelegate: AnyObject {
     @MainActor func didUpdatePeerSnapshots(_: [TransportPeerSnapshot])
-}
-
-extension BitchatDelegate {
-    @MainActor
-    func receiveTransportEvent(_ event: TransportEvent) {
-        switch event {
-        case .messageReceived(let message):
-            didReceiveMessage(message)
-        case let .publicMessageReceived(peerID, nickname, content, timestamp, messageID):
-            didReceivePublicMessage(
-                from: peerID,
-                nickname: nickname,
-                content: content,
-                timestamp: timestamp,
-                messageID: messageID
-            )
-        case let .noisePayloadReceived(peerID, type, payload, timestamp):
-            didReceiveNoisePayload(from: peerID, type: type, payload: payload, timestamp: timestamp)
-        case let .groupMessageReceived(payload, timestamp):
-            didReceiveGroupMessage(payload: payload, timestamp: timestamp)
-        case let .publicVoiceFrameReceived(peerID, nickname, payload, timestamp):
-            didReceivePublicVoiceFrame(from: peerID, nickname: nickname, payload: payload, timestamp: timestamp)
-        case .peerConnected(let peerID):
-            didConnectToPeer(peerID)
-        case .peerDisconnected(let peerID):
-            didDisconnectFromPeer(peerID)
-        case .peerListUpdated(let peers):
-            didUpdatePeerList(peers)
-        case .peerSnapshotsUpdated:
-            break
-        case let .messageDeliveryStatusUpdated(messageID, status):
-            didUpdateMessageDeliveryStatus(messageID, status: status)
-        case .bluetoothStateUpdated(let state):
-            didUpdateBluetoothState(state)
-        }
-    }
 }
 
 extension BLEService: Transport {}

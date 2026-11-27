@@ -14,6 +14,8 @@ struct BLEInboundWriteAppendMetadata: Equatable {
 }
 
 struct BLEInboundWriteBuffer {
+    static let defaultMaxTrackedCentrals = 64
+
     enum AppendResult {
         case decoded(packet: BitchatPacket, metadata: BLEInboundWriteAppendMetadata)
         case waiting(metadata: BLEInboundWriteAppendMetadata)
@@ -21,19 +23,23 @@ struct BLEInboundWriteBuffer {
     }
 
     private var buffersByCentralID: [String: Data] = [:]
+    private var centralOrder: [String] = []
 
     mutating func removeAll() {
         buffersByCentralID.removeAll()
+        centralOrder.removeAll()
     }
 
     mutating func remove(for centralID: String) {
         buffersByCentralID.removeValue(forKey: centralID)
+        centralOrder.removeAll { $0 == centralID }
     }
 
     mutating func append(
         chunks: [BLEInboundWriteChunk],
         for centralID: String,
-        capBytes: Int
+        capBytes: Int,
+        maxTrackedCentrals: Int = BLEInboundWriteBuffer.defaultMaxTrackedCentrals
     ) -> AppendResult {
         var combined = buffersByCentralID[centralID] ?? Data()
         var appendedBytes = 0
@@ -42,7 +48,21 @@ struct BLEInboundWriteBuffer {
 
         for chunk in chunks where !chunk.data.isEmpty {
             offsets.append(chunk.offset)
-            let end = chunk.offset + chunk.data.count
+            let (end, overflow) = chunk.offset.addingReportingOverflow(chunk.data.count)
+
+            guard chunk.offset >= 0, !overflow, end <= capBytes else {
+                remove(for: centralID)
+                let reportedAccumulated = (chunk.offset < 0 || overflow)
+                    ? max(combined.count, capBytes + 1)
+                    : max(combined.count, end)
+                let metadata = BLEInboundWriteAppendMetadata(
+                    accumulatedBytes: reportedAccumulated,
+                    appendedBytes: appendedBytes + chunk.data.count,
+                    offsets: offsets,
+                    packetType: combined.count >= 2 ? combined[1] : (chunk.offset == 0 && chunk.data.count >= 2 ? chunk.data[1] : nil)
+                )
+                return .oversized(metadata: metadata)
+            }
 
             if chunk.offset == combined.count {
                 if combined.isEmpty {
@@ -67,15 +87,23 @@ struct BLEInboundWriteBuffer {
         )
 
         if Self.hasCompleteFrame(combined), let packet = BinaryProtocol.decode(combined) {
-            buffersByCentralID.removeValue(forKey: centralID)
+            remove(for: centralID)
             return .decoded(packet: packet, metadata: metadata)
         }
 
         guard combined.count <= capBytes else {
-            buffersByCentralID.removeValue(forKey: centralID)
+            remove(for: centralID)
             return .oversized(metadata: metadata)
         }
 
+        if buffersByCentralID[centralID] == nil {
+            let cap = max(1, maxTrackedCentrals)
+            while buffersByCentralID.count >= cap, !centralOrder.isEmpty {
+                let oldest = centralOrder.removeFirst()
+                buffersByCentralID.removeValue(forKey: oldest)
+            }
+            centralOrder.append(centralID)
+        }
         buffersByCentralID[centralID] = combined
         return .waiting(metadata: metadata)
     }
@@ -83,48 +111,9 @@ struct BLEInboundWriteBuffer {
     /// Cheap wire-header length pre-check so multi-chunk long writes avoid
     /// running `BinaryProtocol.decode` and PKCS#7 unpadding on incomplete frames.
     private static func hasCompleteFrame(_ data: Data) -> Bool {
-        guard data.count >= BinaryProtocol.v1HeaderSize + BinaryProtocol.senderIDSize else {
+        guard case .length(let required) = BinaryProtocol.expectedFrameLength(for: data) else {
             return false
         }
-        let start = data.startIndex
-        let version = data[start]
-        guard let headerSize = BinaryProtocol.headerSize(for: version) else {
-            return false
-        }
-        let minHeaderAndSender = headerSize + BinaryProtocol.senderIDSize
-        guard data.count >= minHeaderAndSender else {
-            return false
-        }
-
-        let flags = data[start + BinaryProtocol.Offsets.flags]
-        let hasRecipient = (flags & BinaryProtocol.Flags.hasRecipient) != 0
-        let hasSignature = (flags & BinaryProtocol.Flags.hasSignature) != 0
-        let hasRoute = (version >= 2) && (flags & BinaryProtocol.Flags.hasRoute) != 0
-
-        let lenStart = start + BinaryProtocol.Offsets.flags + 1
-        let payloadLength: Int
-        if version == 2 {
-            let b0 = UInt32(data[lenStart]) << 24
-            let b1 = UInt32(data[lenStart + 1]) << 16
-            let b2 = UInt32(data[lenStart + 2]) << 8
-            let b3 = UInt32(data[lenStart + 3])
-            payloadLength = Int(b0 | b1 | b2 | b3)
-        } else {
-            let b0 = UInt16(data[lenStart]) << 8
-            let b1 = UInt16(data[lenStart + 1])
-            payloadLength = Int(b0 | b1)
-        }
-        guard payloadLength <= data.count else {
-            return false
-        }
-
-        var required = minHeaderAndSender + (hasRecipient ? BinaryProtocol.recipientIDSize : 0)
-        if hasRoute {
-            guard data.count > required else { return false }
-            let routeCount = Int(data[start + required])
-            required += 1 + routeCount * BinaryProtocol.senderIDSize
-        }
-        required += payloadLength + (hasSignature ? BinaryProtocol.signatureSize : 0)
         return data.count >= required
     }
 }
