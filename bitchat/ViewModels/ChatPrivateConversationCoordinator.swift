@@ -17,6 +17,10 @@ protocol ChatPrivateConversationContext: ChatIdentityContext, ChatDirectMessageS
     var privateChats: [PeerID: [BitchatMessage]] { get }
     var sentReadReceipts: Set<String> { get }
     var selectedPrivateChatPeer: PeerID? { get }
+    /// Whether the app is currently active in the foreground. A DM left open
+    /// while the app is backgrounded or the phone is locked must not emit
+    /// instant read receipts or suppress notifications.
+    var isAppActive: Bool { get }
     var nostrKeyMapping: [PeerID: String] { get }
 
     // MARK: Conversation store intents
@@ -353,6 +357,7 @@ final class ChatPrivateConversationCoordinator {
             ?? "anon"
 
         let messageID = UUID().uuidString
+        let status = initialDeliveryStatus(for: content)
         let message = BitchatMessage(
             id: messageID,
             sender: context.nickname,
@@ -364,10 +369,11 @@ final class ChatPrivateConversationCoordinator {
             recipientNickname: recipientNickname,
             senderPeerID: context.myPeerID,
             mentions: nil,
-            deliveryStatus: .sending
+            deliveryStatus: status
         )
 
         context.appendPrivateMessage(message, to: peerID)
+        guard status == .sending else { return }
 
         // Always hand the message to the router — it owns delivery. A live
         // link sends now; an unreachable peer gets the retained-outbox path
@@ -390,6 +396,19 @@ final class ChatPrivateConversationCoordinator {
         // acks, or failed when the outbox TTL expires.
     }
 
+    private func initialDeliveryStatus(for content: String) -> DeliveryStatus {
+        guard PrivateMessagePacket.contentFitsOnWire(content) else {
+            return .failed(
+                reason: String(
+                    localized: "content.delivery.reason.too_long",
+                    defaultValue: "message too long",
+                    comment: "Failure reason when a private message exceeds the wire size limit"
+                )
+            )
+        }
+        return .sending
+    }
+
     func sendGeohashDM(_ content: String, to peerID: PeerID) {
         guard case .location(let channel) = context.activeChannel else {
             // The failure happened inside a geoDM thread — surface it there,
@@ -403,6 +422,7 @@ final class ChatPrivateConversationCoordinator {
         }
 
         let messageID = UUID().uuidString
+        let status = initialDeliveryStatus(for: content)
         let message = BitchatMessage(
             id: messageID,
             sender: context.nickname,
@@ -412,10 +432,11 @@ final class ChatPrivateConversationCoordinator {
             isPrivate: true,
             recipientNickname: context.nickname,
             senderPeerID: context.myPeerID,
-            deliveryStatus: .sending
+            deliveryStatus: status
         )
 
         context.appendPrivateMessage(message, to: peerID)
+        guard status == .sending else { return }
 
         guard let recipientHex = context.nostrKeyMapping[peerID] else {
             context.setPrivateDeliveryStatus(
@@ -546,10 +567,9 @@ final class ChatPrivateConversationCoordinator {
 
         context.appendPrivateMessage(message, to: conversationPeerID)
 
-        let isViewing = context.selectedPrivateChatPeer == conversationPeerID
+        let isViewing = context.isAppActive && context.selectedPrivateChatPeer == conversationPeerID
         let wasReadBefore = context.sentReadReceipts.contains(messageId)
-        let isRecentMessage = Date().timeIntervalSince(messageTimestamp) < 30
-        let shouldMarkUnread = !wasReadBefore && !isViewing && isRecentMessage
+        let shouldMarkUnread = !wasReadBefore && !isViewing
         if shouldMarkUnread {
             context.markPrivateChatUnread(conversationPeerID)
         }
@@ -684,7 +704,7 @@ final class ChatPrivateConversationCoordinator {
         let noiseKey = peerID.noiseKey ?? context.noisePublicKey(for: peerID)
         mirrorToEphemeralIfNeeded(message, targetPeerID: peerID, key: noiseKey)
 
-        let isViewing = context.selectedPrivateChatPeer == peerID
+        let isViewing = context.isAppActive && context.selectedPrivateChatPeer == peerID
         if isViewing {
             let receipt = ReadReceipt(
                 originalMessageID: message.id,

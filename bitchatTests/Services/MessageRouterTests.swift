@@ -1269,6 +1269,133 @@ struct MessageRouterTests {
         router.flushAllOutbox()
         #expect(writeCount == writesAfterEnqueue + 1)
     }
+
+    @Test @MainActor
+    func unknownAckDuringFailedRecoveryWriteStillSuppressesUnseenDurableMessage() async {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("router-unseen-recovery-ack-\(UUID().uuidString).sealed")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let keychain = MockKeychain()
+        let peerID = PeerID(str: "00000000000000e7")
+        let durable = MessageOutboxStore.QueuedMessage(
+            content: "Unseen before unlock",
+            nickname: "Peer",
+            messageID: "unseen-recovery-ack-target",
+            timestamp: Date()
+        )
+        MessageOutboxStore(keychain: keychain, fileURL: fileURL).save([peerID: [durable]])
+
+        var protectedDataUnavailable = true
+        var failWrites = false
+        let restoredStore = MessageOutboxStore(
+            keychain: keychain,
+            fileURL: fileURL,
+            readData: { url in
+                if protectedDataUnavailable {
+                    throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError)
+                }
+                return try Data(contentsOf: url)
+            },
+            writeData: { data, url, options in
+                if failWrites {
+                    throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)
+                }
+                try data.write(to: url, options: options)
+            }
+        )
+        let transport = MockTransport()
+        let router = MessageRouter(transports: [transport], outboxStore: restoredStore)
+        router.sendPrivate(
+            "Known wake",
+            to: peerID,
+            recipientNickname: "Peer",
+            messageID: "unseen-recovery-ack-known"
+        )
+
+        // Trigger post-unlock read with failing disk write so the store enters
+        // `unseenRecoveryPendingPersistence == true`.
+        protectedDataUnavailable = false
+        failWrites = true
+        router.sendPrivate(
+            "Known wake",
+            to: peerID,
+            recipientNickname: "Peer",
+            messageID: "unseen-recovery-ack-known"
+        )
+        #expect(restoredStore.hasDeferredDiskState)
+
+        // Ack the unseen durable message while `cleared == false`: the router
+        // must still record the removal tombstone so recovery does not resend it.
+        failWrites = false
+        router.markDelivered("unseen-recovery-ack-target")
+
+        transport.connectedPeers.insert(peerID)
+        transport.securePeers = [peerID]
+        restoredStore.retryDeferredLoad()
+        await Task.yield()
+        await Task.yield()
+
+        let sentIDs = transport.sentPrivateMessages.map(\.messageID)
+        #expect(!sentIDs.contains("unseen-recovery-ack-target"))
+        let remaining = MessageOutboxStore(keychain: keychain, fileURL: fileURL).load()[peerID]?.map(\.messageID) ?? []
+        #expect(!remaining.contains("unseen-recovery-ack-target"))
+    }
+
+    @Test @MainActor
+    func flushOutboxForShortIDDeliversMessagesQueuedUnderStableNoiseKeyID() {
+        let noiseKey = Data(repeating: 0x5A, count: 32)
+        let stableID = PeerID(hexData: noiseKey)
+        let shortID = PeerID(publicKey: noiseKey)
+        #expect(stableID != shortID)
+        #expect(stableID.toShort() == shortID)
+
+        let transport = MockTransport()
+        let router = MessageRouter(
+            transports: [transport],
+            courierDirectory: CourierDirectory(noiseKey: { _ in nil }, isTrustedCourier: { _ in false })
+        )
+
+        // Queued offline under the 64-hex stable ID (e.g. after disconnect migration).
+        router.sendPrivate("Offline message", to: stableID, recipientNickname: "Bob", messageID: "stable-1")
+        #expect(transport.sentPrivateMessages.isEmpty)
+
+        // Peer returns over BLE under its 16-hex short routing ID.
+        transport.connectedPeers.insert(shortID)
+        transport.securePeers = [shortID]
+        router.flushOutbox(for: shortID)
+
+        #expect(transport.sentPrivateMessages.map(\.messageID) == ["stable-1"])
+        #expect(transport.sentPrivateMessages.first?.peerID == shortID)
+    }
+
+    @Test @MainActor
+    func authRetryDeliversOfflineMessagesQueuedUnderStableNoiseKeyIDInChronologicalOrder() {
+        let clock = MutableTestClock()
+        let noiseKey = Data(repeating: 0x6B, count: 32)
+        let stableID = PeerID(hexData: noiseKey)
+        let shortID = PeerID(publicKey: noiseKey)
+
+        let transport = MockTransport()
+        let router = MessageRouter(
+            transports: [transport],
+            now: { clock.now },
+            courierDirectory: CourierDirectory(noiseKey: { _ in nil }, isTrustedCourier: { _ in false })
+        )
+
+        // Message 1 queued offline under the 64-hex stable ID.
+        router.sendPrivate("First offline", to: stableID, recipientNickname: "Bob", messageID: "m1")
+        clock.now = clock.now.addingTimeInterval(5)
+        // Message 2 queued offline under the 16-hex short ID.
+        router.sendPrivate("Second offline", to: shortID, recipientNickname: "Bob", messageID: "m2")
+        #expect(transport.sentPrivateMessages.isEmpty)
+
+        // Noise authentication completes for the short ID.
+        transport.connectedPeers.insert(shortID)
+        transport.securePeers = [shortID]
+        router.retrySecurePrivateMessagesAfterAuthentication(for: [shortID])
+
+        #expect(transport.sentPrivateMessages.map(\.messageID) == ["m1", "m2"])
+    }
 }
 
 /// Mutable wall clock injected into `MessageRouter` so TTL expiry is testable

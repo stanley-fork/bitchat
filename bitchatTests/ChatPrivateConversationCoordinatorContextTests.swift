@@ -24,6 +24,7 @@ private final class MockChatPrivateConversationContext: ChatPrivateConversationC
     var sentGeoDeliveryAcks: Set<String> = []
     var unreadPrivateMessages: Set<PeerID> = []
     var selectedPrivateChatPeer: PeerID?
+    var isAppActive = true
     var nickname = "me"
     var activeChannel: ChannelID = .mesh
     var nostrKeyMapping: [PeerID: String] = [:]
@@ -443,15 +444,16 @@ struct ChatPrivateConversationCoordinatorContextTests {
         context.displayNamesByPubkey[senderPubkey] = "bob#5678"
         let payloadData = PrivateMessagePacket(messageID: "geo-1", content: "hi there").encode()!
         let payload = NoisePayload(type: .privateMessage, data: payloadData)
-        // Old timestamp: not "recent", so no unread marking (and no notification).
-        let oldTimestamp = Date().addingTimeInterval(-120)
+        // Delayed Nostr/offline DM (>30s old): still newly received, so it must
+        // mark unread and post a notification when the thread is not open.
+        let delayedTimestamp = Date().addingTimeInterval(-3600)
 
         coordinator.handlePrivateMessage(
             payload,
             senderPubkey: senderPubkey,
             convKey: convKey,
             id: MockChatPrivateConversationContext.dummyIdentity,
-            messageTimestamp: oldTimestamp
+            messageTimestamp: delayedTimestamp
         )
 
         #expect(context.geoDeliveryAcks.map(\.messageID) == ["geo-1"])
@@ -459,7 +461,8 @@ struct ChatPrivateConversationCoordinatorContextTests {
         #expect(context.sentGeoDeliveryAcks == ["geo-1"])
         #expect(context.privateChats[convKey]?.map(\.id) == ["geo-1"])
         #expect(context.privateChats[convKey]?.first?.sender == "bob#5678")
-        #expect(context.unreadPrivateMessages.isEmpty)
+        #expect(context.unreadPrivateMessages == [convKey])
+        #expect(context.privateMessageNotifications.count == 1)
 
         // Redelivery: ack is deduplicated and the message is not appended twice.
         coordinator.handlePrivateMessage(
@@ -467,10 +470,11 @@ struct ChatPrivateConversationCoordinatorContextTests {
             senderPubkey: senderPubkey,
             convKey: convKey,
             id: MockChatPrivateConversationContext.dummyIdentity,
-            messageTimestamp: oldTimestamp
+            messageTimestamp: delayedTimestamp
         )
         #expect(context.geoDeliveryAcks.count == 1)
         #expect(context.privateChats[convKey]?.count == 1)
+        #expect(context.privateMessageNotifications.count == 1)
     }
 
     @Test @MainActor
@@ -1079,6 +1083,40 @@ struct ChatPrivateConversationCoordinatorContextTests {
     }
 
     @Test @MainActor
+    func handlePrivateMessage_backgroundedOpenChatMarksUnreadAndSkipsReadReceipt() async {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let meshPeerID = PeerID(str: "0102030405060708")
+        let geoConvKey = PeerID(str: "nostr_abcdef12")
+        let senderPubkey = "feedface00112233"
+        context.displayNamesByPubkey[senderPubkey] = "bob#5678"
+
+        // BLE path: chat is selected, but app is backgrounded/inactive.
+        context.selectedPrivateChatPeer = meshPeerID
+        context.isAppActive = false
+        coordinator.handlePrivateMessage(
+            makeIncomingMessage(id: "bg-mesh-1", content: "ping while locked", senderPeerID: meshPeerID)
+        )
+        #expect(context.meshReadReceipts.isEmpty)
+        #expect(context.unreadPrivateMessages.contains(meshPeerID))
+        #expect(context.privateMessageNotifications.count == 1)
+
+        // Nostr/GeoDM path: chat is selected, app is backgrounded/inactive.
+        context.selectedPrivateChatPeer = geoConvKey
+        let payloadData = PrivateMessagePacket(messageID: "bg-geo-1", content: "nostr while locked").encode()!
+        coordinator.handlePrivateMessage(
+            NoisePayload(type: .privateMessage, data: payloadData),
+            senderPubkey: senderPubkey,
+            convKey: geoConvKey,
+            id: MockChatPrivateConversationContext.dummyIdentity,
+            messageTimestamp: Date()
+        )
+        #expect(context.geoReadReceipts.isEmpty)
+        #expect(context.unreadPrivateMessages.contains(geoConvKey))
+        #expect(context.privateMessageNotifications.count == 2)
+    }
+
+    @Test @MainActor
     func handleFavoriteNotification_persistsAndAnnouncesTransitionsOnly() async {
         let context = MockChatPrivateConversationContext()
         let coordinator = ChatPrivateConversationCoordinator(context: context)
@@ -1234,5 +1272,40 @@ struct ChatPrivateConversationCoordinatorContextTests {
 
         #expect(context.routedPrivateMessages.map(\.content) == ["hello?"])
         #expect(context.privateChats[peerID]?.first?.deliveryStatus == .sending)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func oversizedPrivateMessageFailsWithoutRouting(isGeohash: Bool) {
+        let context = MockChatPrivateConversationContext()
+        let coordinator = ChatPrivateConversationCoordinator(context: context)
+        let peerID: PeerID
+        if isGeohash {
+            let pubkey = String(repeating: "a", count: 64)
+            peerID = PeerID(str: "nostr_" + String(pubkey.prefix(16)))
+            context.activeChannel = .location(GeohashChannel(level: .region, geohash: "0000"))
+            context.nostrKeyMapping[peerID] = pubkey
+        } else {
+            peerID = PeerID(str: "abcd1234abcd1234")
+        }
+
+        let content = String(repeating: "é", count: 128)
+        coordinator.sendPrivateMessage(content, to: peerID)
+
+        #expect(context.privateChats[peerID]?.map(\.content) == [content])
+        #expect(context.privateChats[peerID]?.first?.deliveryStatus == .failed(
+            reason: String(localized: "content.delivery.reason.too_long", defaultValue: "message too long")
+        ))
+        #expect(context.routedPrivateMessages.isEmpty)
+        #expect(context.geoPrivateMessages.isEmpty)
+
+        // The multibyte UTF-8 boundary still sends: 127 × 2 + 1 = 255 bytes.
+        let boundaryContent = String(repeating: "é", count: 127) + "a"
+        #expect(boundaryContent.utf8.count == PrivateMessagePacket.maxContentUTF8Bytes)
+        coordinator.sendPrivateMessage(boundaryContent, to: peerID)
+
+        #expect(context.privateChats[peerID]?.map(\.content) == [content, boundaryContent])
+        #expect(context.privateChats[peerID]?.last?.deliveryStatus == (isGeohash ? .sent : .sending))
+        #expect(context.routedPrivateMessages.map(\.content) == (isGeohash ? [] : [boundaryContent]))
+        #expect(context.geoPrivateMessages.map(\.content) == (isGeohash ? [boundaryContent] : []))
     }
 }

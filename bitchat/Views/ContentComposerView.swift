@@ -261,7 +261,7 @@ private extension ContentComposerView {
         Image(systemName: "camera.circle.fill")
             .font(.bitchatSystem(size: 24))
             .foregroundColor(composerAccentColor)
-            .frame(width: 36, height: 36)
+            .modifier(ComposerActionFrame())
             .contentShape(Circle())
             .onTapGesture {
                 mediaPickerMode = .photoLibrary
@@ -282,7 +282,7 @@ private extension ContentComposerView {
             Image(systemName: "photo.circle.fill")
                 .font(.bitchatSystem(size: 24))
                 .foregroundColor(composerAccentColor)
-                .frame(width: 36, height: 36)
+                .modifier(ComposerActionFrame())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Strings.choosePhoto)
@@ -301,10 +301,10 @@ private extension ContentComposerView {
                     .opacity(hasText ? 1 : 0)
                     .allowsHitTesting(hasText)
             }
-            .frame(width: 36, height: 36)
+            .modifier(ComposerActionFrame())
         } else {
             sendButtonView(enabled: hasText)
-                .frame(width: 36, height: 36)
+                .modifier(ComposerActionFrame())
         }
     }
 
@@ -325,12 +325,19 @@ private extension ContentComposerView {
         return composerAccentColor
     }
 
+    var currentVoiceNoteTarget: VoiceNoteTarget {
+        if let peerID = privateConversationModel.selectedPeerID {
+            return .privateChat(peerID)
+        }
+        return .publicMesh
+    }
+
     var micButtonView: some View {
         Image(systemName: "mic.circle.fill")
             .font(.bitchatSystem(size: 24))
             .foregroundColor(micColor)
             .modifier(PulsingOpacityModifier(active: busyTalker != nil && !voiceRecordingVM.state.isActive))
-            .frame(width: 36, height: 36)
+            .modifier(ComposerActionFrame())
             .contentShape(Circle())
             .overlay(
                 Color.clear
@@ -338,10 +345,13 @@ private extension ContentComposerView {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { _ in
-                                voiceRecordingVM.start(shouldShow: conversationUIModel.canSendMediaInCurrentContext)
+                                voiceRecordingVM.start(
+                                    shouldShow: conversationUIModel.canSendMediaInCurrentContext,
+                                    target: currentVoiceNoteTarget
+                                )
                             }
                             .onEnded { _ in
-                                voiceRecordingVM.finish(completion: conversationUIModel.sendVoiceNote)
+                                voiceRecordingVM.finish(completion: conversationUIModel.sendVoiceNote(at:target:))
                             }
                     )
             )
@@ -359,9 +369,12 @@ private extension ContentComposerView {
             // give it a start/stop toggle as the default action.
             .accessibilityAction {
                 if voiceRecordingVM.state.isActive {
-                    voiceRecordingVM.finish(completion: conversationUIModel.sendVoiceNote)
+                    voiceRecordingVM.finish(completion: conversationUIModel.sendVoiceNote(at:target:))
                 } else {
-                    voiceRecordingVM.start(shouldShow: conversationUIModel.canSendMediaInCurrentContext)
+                    voiceRecordingVM.start(
+                        shouldShow: conversationUIModel.canSendMediaInCurrentContext,
+                        target: currentVoiceNoteTarget
+                    )
                 }
             }
     }
@@ -372,7 +385,7 @@ private extension ContentComposerView {
             Image(systemName: "arrow.up.circle.fill")
                 .font(.bitchatSystem(size: 24))
                 .foregroundColor(enabled ? activeColor : Color.gray)
-                .frame(width: 36, height: 36)
+                .modifier(ComposerActionFrame())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -480,4 +493,12 @@ private struct AutocompleteKeyboardNavigationModifier: ViewModifier {
         }
     }
     #endif
+}
+
+struct ComposerActionFrame: ViewModifier {
+    // Match the .title2 scaling used by the composer's size-24 icons.
+    @ScaledMetric(relativeTo: .title2) private var scaledSize: CGFloat = 36
+    func body(content: Content) -> some View {
+        content.frame(width: max(36, scaledSize), height: max(36, scaledSize))
+    }
 }

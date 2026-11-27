@@ -177,9 +177,13 @@ final class ChatViewModel: ObservableObject, SynchronousMessageTransportEventDel
     @Published var nickname: String = "" {
         didSet {
             // Canonicalize whenever nickname is set: trim whitespace
-            // (whitespace-only becomes "") and apply Unicode NFC so accented
-            // names match regardless of how they were typed.
-            let cleaned = (nickname.trimmedOrNilIfEmpty ?? "").normalizedNickname
+            // (whitespace-only becomes ""), apply Unicode NFC so accented
+            // names match regardless of how they were typed, and cap to
+            // AnnouncementPacket's 255-byte UTF-8 TLV limit.
+            let cleaned = (nickname.trimmedOrNilIfEmpty ?? "")
+                .normalizedNickname
+                .truncatedToUTF8Bytes(String.maxNicknameUTF8Bytes)
+                .trimmedOrNilIfEmpty ?? ""
             if cleaned != nickname {
                 nickname = cleaned
                 return
@@ -1599,8 +1603,19 @@ final class ChatViewModel: ObservableObject, SynchronousMessageTransportEventDel
 
     // MARK: - App Lifecycle
 
+    /// Tracks whether the app is currently active in the foreground so an open
+    /// DM does not emit read receipts or suppress alerts while backgrounded or
+    /// locked. Defaults to `true` for headless tests and foreground launch.
+    private(set) var isAppActive: Bool = true
+
+    @MainActor
+    func setAppActive(_ active: Bool) {
+        isAppActive = active
+    }
+
     @MainActor
     func handleDidBecomeActive() {
+        isAppActive = true
         lifecycleCoordinator.handleDidBecomeActive()
     }
 
@@ -1763,7 +1778,7 @@ final class ChatViewModel: ObservableObject, SynchronousMessageTransportEventDel
         // crash-recovery replay calls this method directly and would otherwise
         // let a staged envelope survive the wipe. Clearing here is idempotent
         // (it only removes the app-group key), so the double-clear is harmless.
-        if let sharedDefaults = UserDefaults(suiteName: BitchatApp.groupID) {
+        if let sharedDefaults = BitchatApp.sharedUserDefaults() {
             SharedContentStore(defaults: sharedDefaults).discardAll()
         }
 

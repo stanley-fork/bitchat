@@ -35,6 +35,22 @@ struct PacketPayloadCapInteropTests {
         #expect(BinaryProtocol.decode(try inflatedFrame(type: .message)) == nil)
     }
 
+    @Test func privateMessageOver255UTF8BytesDoesNotEncode() {
+        let within = String(repeating: "é", count: 127)
+        #expect(within.utf8.count == 254)
+        #expect(PrivateMessagePacket.contentFitsOnWire(within))
+        #expect(PrivateMessagePacket(messageID: "m", content: within).encode() != nil)
+
+        let over = String(repeating: "é", count: 128)
+        #expect(over.utf8.count == 256)
+        #expect(PrivateMessagePacket.contentFitsOnWire(over) == false)
+        #expect(PrivateMessagePacket(messageID: "m", content: over).encode() == nil)
+
+        let ascii = String(repeating: "x", count: PrivateMessagePacket.maxContentUTF8Bytes)
+        #expect(PrivateMessagePacket(messageID: "m", content: ascii).encode() != nil)
+        #expect(PrivateMessagePacket(messageID: "m", content: ascii + "y").encode() == nil)
+    }
+
     @Test func androidAndIOSSizedFragmentsStillDecode() throws {
         // Every byte value once, then zeros: the inner packet stays
         // uncompressed (its bytes are 100% unique) while the zero-filled
@@ -111,10 +127,19 @@ struct PacketPayloadCapInteropTests {
     }
 
     @Test func largeFileTransfersStillDecode() throws {
-        // A 1 MiB image whose bytes compress well: the largest legitimate
-        // inflation a broadcast file can ask for.
+        // A 1 MiB file with realistic compressibility (~3-5x ratio): compresses
+        // on wire without resembling a ~1000x decompression bomb.
         var content = Data([0xFF, 0xD8, 0xFF, 0xE0])
-        content.append(Data(count: FileTransferLimits.maxPayloadBytes - content.count))
+        var rng: UInt64 = 0x1234_5678_9ABC_DEF0
+        content.reserveCapacity(FileTransferLimits.maxPayloadBytes)
+        for i in content.count..<FileTransferLimits.maxPayloadBytes {
+            if i % 4 == 0 {
+                rng = rng &* 6364136223846793005 &+ 1442695040888963407
+                content.append(UInt8((rng >> 33) & 0x3F))
+            } else {
+                content.append(0)
+            }
+        }
         let file = BitchatFilePacket(fileName: "photo.jpg", fileSize: nil, mimeType: "image/jpeg", content: content)
         let payload = try #require(file.encode())
         let packet = makePacket(type: .fileTransfer, payload: payload, version: 2)
